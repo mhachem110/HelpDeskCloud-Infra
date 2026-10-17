@@ -1,0 +1,74 @@
+name: Terraform CI
+
+on:
+  pull_request:
+    branches: [dev, stage, prod]
+
+permissions:
+  contents: read
+
+jobs:
+  promotion-route:
+    name: Check promotion route
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the agreed source and target branches
+        env:
+          SOURCE: ${{ github.head_ref }}
+          TARGET: ${{ github.base_ref }}
+        run: |
+          if [[ "$TARGET" == "dev" && "$SOURCE" == feature/* ]] ||
+             [[ "$TARGET" == "stage" && "$SOURCE" == "dev" ]] ||
+             [[ "$TARGET" == "prod" && "$SOURCE" == "stage" ]]; then
+            echo "Allowed promotion route: $SOURCE -> $TARGET"
+          else
+            echo "Disallowed promotion route: $SOURCE -> $TARGET" >&2
+            exit 1
+          fi
+
+  terraform:
+    name: Terraform format and validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.2.2
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: 1.16.2
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+      - name: Initialize without GCS access
+        run: terraform init -backend=false -input=false -lockfile=readonly
+      - name: Validate configuration
+        run: terraform validate -no-color
+
+  tflint:
+    name: TFLint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.2.2
+      - name: Install TFLint
+        uses: terraform-linters/setup-tflint@v6.3.2
+        with:
+          tflint_version: v0.64.0
+      - name: Lint Terraform
+        run: tflint --format compact
+
+  checkov:
+    name: Checkov Terraform scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.2.2
+      - name: Install Checkov
+        run: python -m pip install --disable-pip-version-check checkov==3.3.17
+      - name: Scan Terraform configuration
+        run: checkov --directory terraform --framework terraform --quiet
