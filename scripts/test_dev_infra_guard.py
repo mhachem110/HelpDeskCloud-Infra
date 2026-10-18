@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dev_infra_guard import EXPECTED, NETWORK, PHASE6, VPC_LINK, check_plan, diagnose_drift, verify_deployment
+from dev_infra_guard import (ATTRIBUTION_LABEL, EXPECTED, NETWORK, PHASE6, PSA_ADDRESS,
+                             SUBNET_ADDRESS, VPC_LINK, check_plan, diagnose_drift, verify_deployment)
 
 
 def fixture():
@@ -73,6 +74,27 @@ def fixture():
         "resource_changes": changes,
         "configuration": config,
     }
+
+
+def label_drift():
+    before = {"name": "helpdeskcloud-dev-psa", "address": "10.30.0.0", "labels": None,
+              "terraform_labels": ATTRIBUTION_LABEL}
+    after = copy.deepcopy(before)
+    after["labels"] = copy.deepcopy(ATTRIBUTION_LABEL)
+    return {"mode": "managed", "address": PSA_ADDRESS, "type": "google_compute_global_address",
+            "change": {"actions": ["update"], "before": before, "after": after}}
+
+
+def metadata_drift(after_fields=None, omit_after=False):
+    before = {"name": "helpdeskcloud-dev-subnet", "ip_cidr_range": "10.20.0.0/20",
+              "log_config": [{"metadata": "EXCLUDE_ALL_METADATA", "metadata_fields": None}]}
+    after = copy.deepcopy(before)
+    if omit_after:
+        del after["log_config"][0]["metadata_fields"]
+    else:
+        after["log_config"][0]["metadata_fields"] = [] if after_fields is None else after_fields
+    return {"mode": "managed", "address": SUBNET_ADDRESS, "type": "google_compute_subnetwork",
+            "change": {"actions": ["update"], "before": before, "after": after}}
 
 
 def evidence():
@@ -178,7 +200,7 @@ class GuardTests(unittest.TestCase):
             check_plan(self.plan)
 
     def test_unknown_drift_is_rejected_and_diagnosed_without_values(self):
-        self.plan["resource_drift"] = [{"address": next(iter(NETWORK)), "type": "google_compute_network",
+        self.plan["resource_drift"] = [{"mode": "managed", "address": next(iter(NETWORK)), "type": "google_compute_network",
                                         "change": {"actions": ["update"], "before": {"routing_mode": "REGIONAL"},
                                                    "after": {"routing_mode": "GLOBAL"}}}]
         with self.assertRaisesRegex(ValueError, "drift"):
@@ -187,6 +209,72 @@ class GuardTests(unittest.TestCase):
         self.assertIn("routing_mode", report)
         self.assertIn("security-sensitive paths=yes", report)
         self.assertNotIn("GLOBAL", report)
+
+    def test_two_exact_normalization_differences_are_permitted(self):
+        self.plan["resource_drift"] = [label_drift(), metadata_drift()]
+        self.assertEqual(check_plan(self.plan), "apply")
+        report = "\n".join(diagnose_drift(self.plan))
+        self.assertIn("labels: before=null; after=goog-terraform-provisioned=true", report)
+        self.assertIn("metadata_fields: before=null; after=[]", report)
+        self.plan["resource_drift"][1] = metadata_drift(omit_after=True)
+        self.assertEqual(check_plan(self.plan), "apply")
+        self.assertIn("metadata_fields: before=null; after=missing", "\n".join(diagnose_drift(self.plan)))
+        self.plan["resource_drift"] = [label_drift()]
+        self.assertEqual(check_plan(self.plan), "apply")
+        self.plan["resource_drift"] = [metadata_drift()]
+        self.assertEqual(check_plan(self.plan), "apply")
+
+    def test_exact_drift_is_permitted_with_zero_change_plan(self):
+        self.plan["resource_changes"] = []
+        self.plan["resource_drift"] = [label_drift(), metadata_drift()]
+        self.assertEqual(check_plan(self.plan), "no_changes")
+
+    def test_attribution_drift_rejects_other_labels_and_resource_changes(self):
+        for mutate in (
+            lambda d: d["change"]["after"]["labels"].update({"owner": "someone"}),
+            lambda d: d["change"]["after"]["labels"].update({"goog-terraform-provisioned": "false"}),
+            lambda d: d["change"]["after"].update({"address": "10.31.0.0"}),
+            lambda d: d["change"]["after"].update({"terraform_labels": {}}),
+            lambda d: d["change"].update({"actions": ["delete", "create"]}),
+        ):
+            drift = label_drift()
+            mutate(drift)
+            self.plan["resource_drift"] = [drift]
+            with self.subTest(drift=drift), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(self.plan)
+
+    def test_diagnostic_withholds_unexpected_label_and_metadata_values(self):
+        label = label_drift()
+        label["change"]["after"]["labels"] = {"unexpected": "private-value"}
+        metadata = metadata_drift(after_fields=["private-value"])
+        self.plan["resource_drift"] = [label, metadata]
+        report = "\n".join(diagnose_drift(self.plan))
+        self.assertIn("<unexpected value withheld>", report)
+        self.assertNotIn("private-value", report)
+
+    def test_metadata_drift_rejects_mode_fields_cidr_and_other_changes(self):
+        for mutate in (
+            lambda d: d["change"]["after"]["log_config"][0].update({"metadata": "CUSTOM_METADATA"}),
+            lambda d: d["change"]["after"]["log_config"][0].update({"metadata_fields": ["src_instance"]}),
+            lambda d: d["change"]["after"].update({"ip_cidr_range": "10.21.0.0/20"}),
+            lambda d: d["change"]["after"]["log_config"][0].update({"flow_sampling": 1}),
+            lambda d: d["change"].update({"actions": ["delete"]}),
+        ):
+            drift = metadata_drift()
+            mutate(drift)
+            self.plan["resource_drift"] = [drift]
+            with self.subTest(drift=drift), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(self.plan)
+
+    def test_duplicate_or_unrelated_drift_is_rejected(self):
+        self.plan["resource_drift"] = [label_drift(), label_drift()]
+        with self.assertRaisesRegex(ValueError, "drift"):
+            check_plan(self.plan)
+        unrelated = label_drift()
+        unrelated["address"] = next(iter(NETWORK))
+        self.plan["resource_drift"] = [unrelated]
+        with self.assertRaisesRegex(ValueError, "drift"):
+            check_plan(self.plan)
 
     def test_sql_public_ip_is_rejected(self):
         self.values("google_sql_database_instance")["settings"][0]["ip_configuration"][0]["ipv4_enabled"] = True
