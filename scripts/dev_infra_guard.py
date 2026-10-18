@@ -154,9 +154,12 @@ def permitted_drift(entry):
         return False
 
     if address == PSA_ADDRESS:
-        if (before.get("labels", MISSING) is not None or after.get("labels", MISSING) != ATTRIBUTION_LABEL
+        if (before.get("name") != PSA or after.get("name") != PSA
+                or before.get("labels", MISSING) is not None or after.get("labels", MISSING) != {}
                 or before.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL
-                or after.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL):
+                or after.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL
+                or before.get("effective_labels", MISSING) != ATTRIBUTION_LABEL
+                or after.get("effective_labels", MISSING) != ATTRIBUTION_LABEL):
             return False
         return {k: v for k, v in before.items() if k != "labels"} == {
             k: v for k, v in after.items() if k != "labels"}
@@ -190,6 +193,13 @@ def check_drift(plan):
             "Duplicate or malformed resource drift")
     require(all(isinstance(entry, dict) and permitted_drift(entry) for entry in drift),
             "Unexpected resource drift requires review; run the Dev Plan diagnostic")
+    # A drift observation never authorizes a requested operation on that resource.
+    for entry in drift:
+        if entry.get("address") == PSA_ADDRESS:
+            requested = [change for change in plan.get("resource_changes", [])
+                         if change.get("address") == PSA_ADDRESS]
+            require(all(change.get("change", {}).get("actions") == ["no-op"] for change in requested),
+                    "PSA drift is readback only; a proposed resource change requires review")
 
 
 def check_plan(plan):
