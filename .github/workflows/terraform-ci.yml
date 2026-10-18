@@ -79,5 +79,5 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4.2.2
-      - name: Test the existing network Apply guard
+      - name: Test the Dev infrastructure Apply guard
         run: python -m unittest discover -s scripts -p 'test_*.py' -v

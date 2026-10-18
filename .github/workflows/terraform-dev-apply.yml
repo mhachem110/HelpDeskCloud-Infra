@@ -48,6 +48,28 @@ jobs:
         with:
           terraform_version: 1.16.2
 
+      - name: Install gcloud for read-only API checks
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Require existing Dev APIs
+        run: |
+          set -euo pipefail
+          enabled=$(gcloud services list --enabled --project=helpdeskcloud-capstone-511905 --format='value(config.name)')
+          for service in compute.googleapis.com servicenetworking.googleapis.com artifactregistry.googleapis.com sqladmin.googleapis.com; do
+            if ! grep -Fxq "$service" <<< "$enabled"; then
+              echo "::error::Required API $service is not enabled. No API was changed."
+              exit 1
+            fi
+          done
+          echo 'All four required APIs are enabled.'
+
+      - name: Check project IAM for direct public access
+        run: |
+          set -euo pipefail
+          umask 077
+          gcloud projects get-iam-policy helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/project-iam.json"
+          python ../scripts/dev_infra_guard.py check-project-iam "$RUNNER_TEMP/project-iam.json"
+
       - name: Initialize Dev remote state
         run: terraform init -input=false -no-color -lockfile=readonly -backend-config=environments/dev.gcs.tfbackend
 
@@ -56,11 +78,12 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          plan_file="$RUNNER_TEMP/dev-network-review.tfplan"
-          json_file="$RUNNER_TEMP/dev-network-review.json"
+          plan_file="$RUNNER_TEMP/dev-infra-review.tfplan"
+          json_file="$RUNNER_TEMP/dev-infra-review.json"
           terraform plan -input=false -no-color -lock-timeout=5m -var-file=environments/dev.tfvars -out="$plan_file"
           terraform show -json "$plan_file" > "$json_file"
-          python ../scripts/dev_network_guard.py check-plan "$json_file"
+          python ../scripts/dev_infra_guard.py diagnose-drift "$json_file"
+          python ../scripts/dev_infra_guard.py check-plan "$json_file"
 
   approved-apply:
     name: Approved Dev apply and verification
@@ -114,6 +137,16 @@ jobs:
           service_account: helpdesk-terraform-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
           create_credentials_file: true
 
+      - name: Install gcloud for read-only checks
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Recheck project IAM before Apply
+        run: |
+          set -euo pipefail
+          umask 077
+          gcloud projects get-iam-policy helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/project-iam.json"
+          python ../scripts/dev_infra_guard.py check-project-iam "$RUNNER_TEMP/project-iam.json"
+
       - name: Install Terraform 1.16.2
         uses: hashicorp/setup-terraform@v4.0.1
         with:
@@ -128,26 +161,24 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          plan_file="$RUNNER_TEMP/dev-network-apply.tfplan"
-          json_file="$RUNNER_TEMP/dev-network-apply.json"
+          plan_file="$RUNNER_TEMP/dev-infra-apply.tfplan"
+          json_file="$RUNNER_TEMP/dev-infra-apply.json"
           terraform plan -input=false -no-color -lock-timeout=5m -var-file=environments/dev.tfvars -out="$plan_file"
           terraform show -json "$plan_file" > "$json_file"
-          decision=$(python ../scripts/dev_network_guard.py check-plan "$json_file")
+          python ../scripts/dev_infra_guard.py diagnose-drift "$json_file"
+          decision=$(python ../scripts/dev_infra_guard.py check-plan "$json_file")
           echo "decision=$decision" >> "$GITHUB_OUTPUT"
           echo "Guard decision: $decision"
 
       - name: Apply only the checked saved plan
         if: steps.inspect.outputs.decision == 'apply'
-        run: terraform apply -input=false -no-color -lock-timeout=5m "$RUNNER_TEMP/dev-network-apply.tfplan"
+        run: terraform apply -input=false -no-color -lock-timeout=5m "$RUNNER_TEMP/dev-infra-apply.tfplan"
 
-      - name: Report an already deployed network
+      - name: Report already deployed Dev infrastructure
         if: steps.inspect.outputs.decision == 'no_changes'
         run: echo 'The fresh Dev plan has no changes; apply was skipped.'
 
-      - name: Install gcloud for read-only verification
-        uses: google-github-actions/setup-gcloud@v3
-
-      - name: Verify deployed Dev network and state
+      - name: Verify deployed Dev infrastructure and state
         run: |
           set -euo pipefail
           umask 077
@@ -155,8 +186,15 @@ jobs:
           gcloud compute networks subnets describe helpdeskcloud-dev-subnet --region=us-east1 --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/subnet.json"
           gcloud compute addresses describe helpdeskcloud-dev-psa --global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/psa.json"
           gcloud services vpc-peerings list --network=helpdeskcloud-dev-vpc --service=servicenetworking.googleapis.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/connections.json"
+          gcloud artifacts repositories describe helpdeskcloud-dev-images --location=us-east1 --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/registry.json"
+          gcloud artifacts repositories get-iam-policy helpdeskcloud-dev-images --location=us-east1 --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/registry-iam.json"
+          gcloud projects get-iam-policy helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/project-iam.json"
+          gcloud sql instances describe helpdeskcloud-dev-postgres --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/sql.json"
+          gcloud sql databases list --instance=helpdeskcloud-dev-postgres --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/databases.json"
           terraform state list > "$RUNNER_TEMP/state-addresses.txt"
           terraform output -json > "$RUNNER_TEMP/outputs.json"
-          python ../scripts/dev_network_guard.py verify-deployment \
+          python ../scripts/dev_infra_guard.py verify-deployment \
             "$RUNNER_TEMP/vpc.json" "$RUNNER_TEMP/subnet.json" "$RUNNER_TEMP/psa.json" \
-            "$RUNNER_TEMP/connections.json" "$RUNNER_TEMP/outputs.json" "$RUNNER_TEMP/state-addresses.txt"
+            "$RUNNER_TEMP/connections.json" "$RUNNER_TEMP/registry.json" "$RUNNER_TEMP/registry-iam.json" \
+            "$RUNNER_TEMP/project-iam.json" "$RUNNER_TEMP/sql.json" "$RUNNER_TEMP/databases.json" \
+            "$RUNNER_TEMP/outputs.json" "$RUNNER_TEMP/state-addresses.txt"
