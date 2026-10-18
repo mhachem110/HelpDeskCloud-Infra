@@ -28,6 +28,8 @@ PHASE6 = {
 }
 EXPECTED = NETWORK | PHASE6
 VPC_LINK = f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/{VPC}"
+VPC_PATH = f"projects/{PROJECT}/global/networks/{VPC}"
+VPC_PEERING_PATH = f"projects/260283083469/global/networks/{VPC}"
 PSA_ADDRESS = PREFIX + "google_compute_global_address.private_services"
 SUBNET_ADDRESS = PREFIX + "google_compute_subnetwork.this"
 ATTRIBUTION_LABEL = {"goog-terraform-provisioned": "true"}
@@ -332,6 +334,7 @@ def verify_deployment(paths):
     state_addresses = set(Path(paths[10]).read_text(encoding="utf-8").splitlines())
     require(state_addresses == set(EXPECTED), "Dev state does not contain exactly the seven expected resources")
     require(network.get("name") == VPC and network.get("autoCreateSubnetworks") is False, "VPC verification failed")
+    require(network.get("selfLink") == VPC_LINK, "VPC self-link verification failed")
     require(network.get("routingConfig", {}).get("routingMode") == "REGIONAL", "VPC routing verification failed")
 
     require(subnet.get("name") == SUBNET and subnet.get("region", "").endswith("/regions/us-east1"), "Subnet identity verification failed")
@@ -347,7 +350,7 @@ def verify_deployment(paths):
     if isinstance(connections, dict):
         connections = connections.get("connections", [])
     require(isinstance(connections, list), "Unexpected Service Networking response")
-    matched = [c for c in connections if c.get("network", "").endswith("/global/networks/" + VPC)
+    matched = [c for c in connections if c.get("network") in (VPC_PATH, VPC_PEERING_PATH)
                and PSA in c.get("reservedPeeringRanges", []) and c.get("service") in (SERVICE, "services/" + SERVICE)]
     require(len(matched) == 1 and matched[0].get("peering"), "PSA connection verification failed")
     require(any(p.get("name") == matched[0]["peering"] and p.get("state") == "ACTIVE"
@@ -378,7 +381,8 @@ def verify_deployment(paths):
     require(int(backup.get("backupRetentionSettings", {}).get("retainedBackups", -1)) == 7,
             "Cloud SQL backup retention verification failed")
     ip = settings.get("ipConfiguration", {})
-    require(ip.get("ipv4Enabled") is False and ip.get("privateNetwork") == network.get("selfLink"),
+    # Cloud SQL returns a project-qualified path; the Compute API uses a full selfLink.
+    require(ip.get("ipv4Enabled") is False and ip.get("privateNetwork") in (VPC_PATH, VPC_LINK),
             "Cloud SQL must use only the intended private VPC")
     require(ip.get("allocatedIpRange") == PSA and ip.get("sslMode") == "ENCRYPTED_ONLY",
             "Cloud SQL PSA or encryption verification failed")

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from dev_infra_guard import (ATTRIBUTION_LABEL, EXPECTED, NETWORK, PHASE6, PSA_ADDRESS,
-                             SUBNET_ADDRESS, VPC_LINK, check_plan, diagnose_drift, verify_deployment)
+                             SUBNET_ADDRESS, VPC_LINK, VPC_PATH, check_plan, diagnose_drift, verify_deployment)
 
 
 def fixture():
@@ -109,7 +109,7 @@ def evidence():
                      "deletionProtectionEnabled": True,
                      "backupConfiguration": {"enabled": True, "pointInTimeRecoveryEnabled": False,
                                              "backupRetentionSettings": {"retainedBackups": 7}},
-                     "ipConfiguration": {"ipv4Enabled": False, "privateNetwork": vpc,
+                     "ipConfiguration": {"ipv4Enabled": False, "privateNetwork": VPC_PATH,
                                          "allocatedIpRange": "helpdeskcloud-dev-psa", "sslMode": "ENCRYPTED_ONLY"}},
     }
     outputs = {key: {"value": value} for key, value in {
@@ -450,6 +450,60 @@ class GuardTests(unittest.TestCase):
             del values[7]["settings"]["deletionProtectionEnabled"]
             paths[7].write_text(json.dumps(values[7]), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "API deletion protection"):
+                verify_deployment(filenames)
+
+    def test_cloud_sql_private_network_accepts_only_exact_project_and_vpc(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            values = evidence()
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+            for path, value in zip(paths, values):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            state = Path(temporary) / "state-addresses.txt"
+            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            filenames = [str(path) for path in paths] + [str(state)]
+
+            for network_ref in (VPC_PATH, VPC_LINK):
+                with self.subTest(accepted=network_ref):
+                    values[7]["settings"]["ipConfiguration"]["privateNetwork"] = network_ref
+                    paths[7].write_text(json.dumps(values[7]), encoding="utf-8")
+                    verify_deployment(filenames)
+
+            for network_ref in (
+                "projects/wrong-project/global/networks/helpdeskcloud-dev-vpc",
+                "projects/helpdeskcloud-capstone-511905/global/networks/wrong-vpc",
+                "https://www.googleapis.com/compute/v1/projects/wrong-project/global/networks/helpdeskcloud-dev-vpc",
+                "https://www.googleapis.com/compute/v1/projects/helpdeskcloud-capstone-511905/global/networks/wrong-vpc",
+            ):
+                with self.subTest(rejected=network_ref):
+                    values[7]["settings"]["ipConfiguration"]["privateNetwork"] = network_ref
+                    paths[7].write_text(json.dumps(values[7]), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "intended private VPC"):
+                        verify_deployment(filenames)
+
+    def test_verification_rejects_other_project_in_vpc_or_peering(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            values = evidence()
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+            for path, value in zip(paths, values):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            state = Path(temporary) / "state-addresses.txt"
+            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            filenames = [str(path) for path in paths] + [str(state)]
+
+            values[0]["selfLink"] = VPC_LINK.replace("projects/helpdeskcloud-capstone-511905/", "projects/wrong-project/")
+            paths[0].write_text(json.dumps(values[0]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "VPC self-link"):
+                verify_deployment(filenames)
+
+            values[0]["selfLink"] = VPC_LINK
+            paths[0].write_text(json.dumps(values[0]), encoding="utf-8")
+            values[3][0]["network"] = VPC_PATH
+            paths[3].write_text(json.dumps(values[3]), encoding="utf-8")
+            verify_deployment(filenames)
+
+            values[3][0]["network"] = "projects/wrong-project/global/networks/helpdeskcloud-dev-vpc"
+            paths[3].write_text(json.dumps(values[3]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "PSA connection"):
                 verify_deployment(filenames)
 
     def test_cloud_sql_api_rejects_non_runnable_or_public_address(self):
