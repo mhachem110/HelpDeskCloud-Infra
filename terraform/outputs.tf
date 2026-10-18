@@ -131,3 +131,49 @@ output "cloud_sql_private_services_range_name" {
   description = "Existing PSA allocation selected for Cloud SQL; null outside Dev."
   value       = try(module.dev_network[0].private_services_range_name, null)
 }
+
+# Phase 7 handoff values are null outside Dev; no credentials are exported.
+output "gke_cluster_name" {
+  description = "Dev Autopilot cluster name."
+  value       = try(google_container_cluster.dev[0].name, null)
+}
+
+output "gke_cluster_location" {
+  description = "Dev cluster region."
+  value       = try(google_container_cluster.dev[0].location, null)
+}
+
+output "gke_mode" {
+  description = "Cluster operating mode; null outside Dev."
+  value       = try(google_container_cluster.dev[0].enable_autopilot ? "AUTOPILOT" : "STANDARD", null)
+}
+
+output "gke_workload_pool" {
+  description = "Workload Identity Federation pool used by Kubernetes service accounts."
+  value       = try(google_container_cluster.dev[0].workload_identity_config[0].workload_pool, null)
+}
+
+output "gke_node_service_account" {
+  description = "Dedicated identity for GKE nodes and image pulls."
+  value       = try(google_service_account.dev_gke_nodes[0].email, null)
+}
+
+output "app_service_account" {
+  description = "Dev runtime identity used by the Cloud SQL Auth Proxy."
+  value       = try(google_service_account.dev_app[0].email, null)
+}
+
+output "migration_service_account" {
+  description = "One-time migration proxy identity."
+  value       = try(google_service_account.dev_migration[0].email, null)
+}
+
+output "app_connection_secret" {
+  description = "Secret Manager resource name; the payload is never in Terraform."
+  value       = try(google_secret_manager_secret.dev_app_connection[0].id, null)
+}
+
+output "migration_admin_secret" {
+  description = "Migration password secret metadata resource name only."
+  value       = try(google_secret_manager_secret.dev_admin_password[0].id, null)
+}

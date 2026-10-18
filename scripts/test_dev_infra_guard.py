@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dev_infra_guard import (ATTRIBUTION_LABEL, EXPECTED, NETWORK, PHASE6, PSA_ADDRESS,
+from dev_infra_guard import (ATTRIBUTION_LABEL, BASE, EXPECTED, NETWORK, PHASE6, PHASE7, PSA_ADDRESS,
                              SUBNET_ADDRESS, VPC_LINK, VPC_PATH, check_plan, diagnose_drift, verify_deployment)
 
 
@@ -41,6 +41,53 @@ def fixture():
         "google_sql_database": {"project": "helpdeskcloud-capstone-511905", "name": "helpdesk",
                                 "instance": "helpdeskcloud-dev-postgres"},
     }
+    project = "helpdeskcloud-capstone-511905"
+    node = f"helpdesk-gke-node-dev@{project}.iam.gserviceaccount.com"
+    app = f"helpdesk-app-dev@{project}.iam.gserviceaccount.com"
+    migration = f"helpdesk-migrate-dev@{project}.iam.gserviceaccount.com"
+    principal = f"principal://iam.googleapis.com/projects/260283083469/locations/global/workloadIdentityPools/{project}.svc.id.goog/subject/ns/helpdesk-dev/sa/"
+    phase7 = {
+        "google_container_cluster.dev[0]": {
+            "project": project, "name": "helpdeskcloud-dev-gke", "location": "us-east1",
+            "enable_autopilot": True, "deletion_protection": True,
+            "network": VPC_LINK,
+            "subnetwork": f"https://www.googleapis.com/compute/v1/projects/{project}/regions/us-east1/subnetworks/helpdeskcloud-dev-subnet",
+            "networking_mode": "VPC_NATIVE",
+            "ip_allocation_policy": [{"cluster_secondary_range_name": "helpdeskcloud-dev-pods",
+                                      "services_secondary_range_name": "helpdeskcloud-dev-services"}],
+            "private_cluster_config": [{"enable_private_nodes": True}],
+            "control_plane_endpoints_config": [{"dns_endpoint_config": [{"allow_external_traffic": True}],
+                                                "ip_endpoints_config": [{"enabled": False}]}],
+            "workload_identity_config": [{"workload_pool": f"{project}.svc.id.goog"}],
+            "secret_manager_config": [{"enabled": True}], "release_channel": [{"channel": "REGULAR"}],
+            "cluster_autoscaling": [{"auto_provisioning_defaults": [{"service_account": node}]}],
+        },
+        "google_service_account.dev_gke_nodes[0]": {"project": project, "account_id": "helpdesk-gke-node-dev"},
+        "google_service_account.dev_app[0]": {"project": project, "account_id": "helpdesk-app-dev"},
+        "google_service_account.dev_migration[0]": {"project": project, "account_id": "helpdesk-migrate-dev"},
+        "google_project_iam_member.dev_gke_node_runtime[0]": {"project": project, "role": "roles/container.defaultNodeServiceAccount", "member": f"serviceAccount:{node}"},
+        "google_project_iam_member.dev_app_cloudsql[0]": {"project": project, "role": "roles/cloudsql.client", "member": f"serviceAccount:{app}"},
+        "google_project_iam_member.dev_migration_cloudsql[0]": {"project": project, "role": "roles/cloudsql.client", "member": f"serviceAccount:{migration}"},
+        "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]": {
+            "project": project, "location": "us-east1", "repository": "helpdeskcloud-dev-images",
+            "role": "roles/artifactregistry.reader", "member": f"serviceAccount:{node}"},
+        "google_service_account_iam_member.dev_app_workload_identity[0]": {
+            "role": "roles/iam.workloadIdentityUser",
+            "member": f"serviceAccount:{project}.svc.id.goog[helpdesk-dev/helpdesk-dev-app]"},
+        "google_service_account_iam_member.dev_migration_workload_identity[0]": {
+            "role": "roles/iam.workloadIdentityUser",
+            "member": f"serviceAccount:{project}.svc.id.goog[helpdesk-dev/helpdesk-dev-migrate]"},
+        "google_secret_manager_secret.dev_app_connection[0]": {
+            "project": project, "secret_id": "helpdesk-dev-db-connection", "deletion_protection": True,
+            "replication": [{"auto": [{}]}]},
+        "google_secret_manager_secret.dev_admin_password[0]": {
+            "project": project, "secret_id": "helpdesk-dev-db-admin-password", "deletion_protection": True,
+            "replication": [{"auto": [{}]}]},
+        "google_secret_manager_secret_iam_member.dev_app_secret_access[0]": {
+            "role": "roles/secretmanager.secretAccessor", "member": principal + "helpdesk-dev-app"},
+        "google_secret_manager_secret_iam_member.dev_admin_secret_access[0]": {
+            "role": "roles/secretmanager.secretAccessor", "member": principal + "helpdesk-dev-migrate"},
+    }
     config = {
         "root_module": {
             "resources": [
@@ -50,6 +97,27 @@ def fixture():
                      "allocated_ip_range": {"references": ["module.dev_network[0].private_services_range_name"]}}]}]}},
                 {"address": "google_sql_database.dev_helpdesk", "expressions": {
                     "instance": {"references": ["google_sql_database_instance.dev_postgres[0].name"]}}},
+                {"address": "google_container_cluster.dev",
+                 "depends_on": ["google_project_iam_member.dev_gke_node_runtime",
+                                "google_artifact_registry_repository_iam_member.dev_gke_image_pull"],
+                 "expressions": {
+                     "network": {"references": ["module.dev_network[0].vpc_self_link"]},
+                     "subnetwork": {"references": ["module.dev_network[0].subnet_self_link"]},
+                     "ip_allocation_policy": [{
+                         "cluster_secondary_range_name": {"references": ["module.dev_network[0].pods_range_name"]},
+                         "services_secondary_range_name": {"references": ["module.dev_network[0].services_range_name"]}}],
+                     "cluster_autoscaling": [{"auto_provisioning_defaults": [{
+                         "service_account": {"references": ["google_service_account.dev_gke_nodes[0].email"]}}]}]}},
+                {"address": "google_artifact_registry_repository_iam_member.dev_gke_image_pull",
+                 "expressions": {"member": {"references": ["google_service_account.dev_gke_nodes[0].member"]}}},
+                {"address": "google_service_account_iam_member.dev_app_workload_identity",
+                 "expressions": {"service_account_id": {"references": ["google_service_account.dev_app[0].name"]}}},
+                {"address": "google_service_account_iam_member.dev_migration_workload_identity",
+                 "expressions": {"service_account_id": {"references": ["google_service_account.dev_migration[0].name"]}}},
+                {"address": "google_secret_manager_secret_iam_member.dev_app_secret_access",
+                 "expressions": {"secret_id": {"references": ["google_secret_manager_secret.dev_app_connection[0].id"]}}},
+                {"address": "google_secret_manager_secret_iam_member.dev_admin_secret_access",
+                 "expressions": {"secret_id": {"references": ["google_secret_manager_secret.dev_admin_password[0].id"]}}},
             ],
             "module_calls": {"dev_network": {"module": {"resources": [
                 {"address": "google_compute_subnetwork.this", "expressions": {
@@ -62,10 +130,11 @@ def fixture():
             ]}}},
         }
     }
-    planned = [{"mode": "managed", "address": address, "type": kind, "values": (network | phase6)[kind]}
+    planned = [{"mode": "managed", "address": address, "type": kind,
+                "values": phase7[address] if address in PHASE7 else (network | phase6)[kind]}
                for address, kind in EXPECTED.items()]
     changes = [{"mode": "managed", "address": address, "type": kind,
-                "change": {"actions": ["no-op"] if address in NETWORK else ["create"]}}
+                "change": {"actions": ["no-op"] if address in BASE else ["create"]}}
                for address, kind in EXPECTED.items()]
     return {
         "variables": {key: {"value": value} for key, value in {
@@ -127,7 +196,47 @@ def evidence():
         "cloud_sql_database_version": "POSTGRES_17", "cloud_sql_database_name": "helpdesk",
         "cloud_sql_private_ip": "10.30.0.3", "cloud_sql_connection_name": sql["connectionName"],
         "cloud_sql_vpc_self_link": vpc, "cloud_sql_private_services_range_name": "helpdeskcloud-dev-psa",
+        "gke_cluster_name": "helpdeskcloud-dev-gke", "gke_cluster_location": "us-east1",
+        "gke_mode": "AUTOPILOT", "gke_workload_pool": "helpdeskcloud-capstone-511905.svc.id.goog",
+        "gke_node_service_account": "helpdesk-gke-node-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com",
+        "app_service_account": "helpdesk-app-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com",
+        "migration_service_account": "helpdesk-migrate-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com",
+        "app_connection_secret": "projects/helpdeskcloud-capstone-511905/secrets/helpdesk-dev-db-connection",
+        "migration_admin_secret": "projects/helpdeskcloud-capstone-511905/secrets/helpdesk-dev-db-admin-password",
     }.items()}
+    project = "helpdeskcloud-capstone-511905"
+    node_email = f"helpdesk-gke-node-dev@{project}.iam.gserviceaccount.com"
+    app_email = f"helpdesk-app-dev@{project}.iam.gserviceaccount.com"
+    migration_email = f"helpdesk-migrate-dev@{project}.iam.gserviceaccount.com"
+    node_member = f"serviceAccount:{node_email}"
+    app_member = f"serviceAccount:{app_email}"
+    migration_member = f"serviceAccount:{migration_email}"
+    app_ksa = f"serviceAccount:{project}.svc.id.goog[helpdesk-dev/helpdesk-dev-app]"
+    migration_ksa = f"serviceAccount:{project}.svc.id.goog[helpdesk-dev/helpdesk-dev-migrate]"
+    principal = (f"principal://iam.googleapis.com/projects/260283083469/locations/global/"
+                 f"workloadIdentityPools/{project}.svc.id.goog/subject/ns/helpdesk-dev/sa/")
+    cluster = {
+        "name": "helpdeskcloud-dev-gke", "location": "us-east1", "status": "RUNNING",
+        "autopilot": {"enabled": True}, "network": VPC_PATH,
+        "subnetwork": f"projects/{project}/regions/us-east1/subnetworks/helpdeskcloud-dev-subnet",
+        "networkConfig": {"network": VPC_PATH,
+                          "subnetwork": f"projects/{project}/regions/us-east1/subnetworks/helpdeskcloud-dev-subnet"},
+        "ipAllocationPolicy": {"useIpAliases": True, "clusterSecondaryRangeName": "helpdeskcloud-dev-pods",
+                               "servicesSecondaryRangeName": "helpdeskcloud-dev-services"},
+        "privateClusterConfig": {"enablePrivateNodes": True},
+        "controlPlaneEndpointsConfig": {"ipEndpointsConfig": {"enabled": False},
+                                        "dnsEndpointConfig": {"allowExternalTraffic": True}},
+        "workloadIdentityConfig": {"workloadPool": f"{project}.svc.id.goog"},
+        "secretManagerConfig": {"enabled": True}, "releaseChannel": {"channel": "REGULAR"},
+        "autoscaling": {"autoprovisioningNodePoolDefaults": {"serviceAccount": node_email}},
+    }
+    state = {"values": {"root_module": {"resources": [
+        {"address": address, "values": {"deletion_protection": True}} for address in (
+            "google_container_cluster.dev[0]",
+            "google_secret_manager_secret.dev_app_connection[0]",
+            "google_secret_manager_secret.dev_admin_password[0]",
+        )
+    ]}}}
     return [
         {"name": "helpdeskcloud-dev-vpc", "selfLink": vpc, "autoCreateSubnetworks": False,
          "routingConfig": {"routingMode": "REGIONAL"},
@@ -144,8 +253,19 @@ def evidence():
           "peering": "servicenetworking-googleapis-com"}],
         {"name": "projects/helpdeskcloud-capstone-511905/locations/us-east1/repositories/helpdeskcloud-dev-images",
          "format": "DOCKER", "dockerConfig": {"immutableTags": True}},
-        {"bindings": []}, {"bindings": []}, sql,
+        {"bindings": [{"role": "roles/artifactregistry.reader", "members": [node_member]}]},
+        {"bindings": [{"role": "roles/container.defaultNodeServiceAccount", "members": [node_member]},
+                      {"role": "roles/cloudsql.client", "members": [app_member, migration_member]}]}, sql,
         [{"name": "helpdesk", "instance": "helpdeskcloud-dev-postgres"}], outputs,
+        cluster,
+        {"email": node_email}, {"email": app_email}, {"email": migration_email},
+        {"name": f"projects/{project}/secrets/helpdesk-dev-db-connection", "replication": {"automatic": {}}},
+        {"name": f"projects/{project}/secrets/helpdesk-dev-db-admin-password", "replication": {"automatic": {}}},
+        {"bindings": [{"role": "roles/iam.workloadIdentityUser", "members": [app_ksa]}]},
+        {"bindings": [{"role": "roles/iam.workloadIdentityUser", "members": [migration_ksa]}]},
+        {"bindings": [{"role": "roles/secretmanager.secretAccessor", "members": [principal + "helpdesk-dev-app"]}]},
+        {"bindings": [{"role": "roles/secretmanager.secretAccessor", "members": [principal + "helpdesk-dev-migrate"]}]},
+        state,
     ]
 
 
@@ -159,7 +279,7 @@ class GuardTests(unittest.TestCase):
     def values(self, kind):
         return next(r["values"] for r in self.plan["planned_values"]["root_module"]["resources"] if r["type"] == kind)
 
-    def test_three_approved_creations(self):
+    def test_exact_phase7_creations(self):
         self.assertEqual(check_plan(self.plan), "apply")
 
     def test_no_changes_even_when_no_op_entries_are_omitted(self):
@@ -195,9 +315,61 @@ class GuardTests(unittest.TestCase):
             with self.subTest(actions=actions), self.assertRaises(ValueError):
                 check_plan(plan)
 
-    def test_partial_phase6_creation_is_rejected(self):
-        self.change("google_sql_database.dev_helpdesk[0]", ["no-op"])
+    def test_phase6_creation_is_rejected(self):
+        self.change("google_sql_database.dev_helpdesk[0]", ["create"])
+        with self.assertRaisesRegex(ValueError, "Existing Phase 5-6"):
+            check_plan(self.plan)
+
+    def test_partial_phase7_creation_is_rejected(self):
+        self.change("google_secret_manager_secret.dev_admin_password[0]", ["no-op"])
         with self.assertRaisesRegex(ValueError, "Partial"):
+            check_plan(self.plan)
+
+    def test_phase7_update_destroy_and_replace_are_rejected(self):
+        for actions in (["update"], ["delete"], ["delete", "create"]):
+            plan = fixture()
+            next(c for c in plan["resource_changes"] if c["address"] in PHASE7)["change"]["actions"] = actions
+            with self.subTest(actions=actions), self.assertRaisesRegex(ValueError, "Phase 7"):
+                check_plan(plan)
+
+    def test_wrong_gke_network_ranges_or_project_are_rejected(self):
+        cluster = self.values("google_container_cluster")
+        for field, bad in (("project", "wrong-project"), ("network", "projects/wrong-project/global/networks/helpdeskcloud-dev-vpc"),
+                           ("subnetwork", "wrong-subnet")):
+            original = cluster[field]
+            cluster[field] = bad
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                check_plan(self.plan)
+            cluster[field] = original
+        cluster["ip_allocation_policy"][0]["cluster_secondary_range_name"] = "wrong-pods"
+        with self.assertRaisesRegex(ValueError, "secondary ranges"):
+            check_plan(self.plan)
+
+    def test_missing_private_nodes_or_workload_identity_is_rejected(self):
+        cluster = self.values("google_container_cluster")
+        cluster["private_cluster_config"][0]["enable_private_nodes"] = False
+        with self.assertRaisesRegex(ValueError, "private"):
+            check_plan(self.plan)
+        cluster["private_cluster_config"][0]["enable_private_nodes"] = True
+        cluster["workload_identity_config"][0]["workload_pool"] = "wrong.svc.id.goog"
+        with self.assertRaisesRegex(ValueError, "workload pool"):
+            check_plan(self.plan)
+
+    def test_public_ip_endpoint_or_wrong_identity_is_rejected(self):
+        cluster = self.values("google_container_cluster")
+        cluster["control_plane_endpoints_config"][0]["ip_endpoints_config"][0]["enabled"] = True
+        with self.assertRaisesRegex(ValueError, "IP access"):
+            check_plan(self.plan)
+        cluster["control_plane_endpoints_config"][0]["ip_endpoints_config"][0]["enabled"] = False
+        cluster["cluster_autoscaling"][0]["auto_provisioning_defaults"][0]["service_account"] = "default@developer.gserviceaccount.com"
+        with self.assertRaisesRegex(ValueError, "node identity"):
+            check_plan(self.plan)
+
+    def test_secret_and_iam_scope_are_rejected_when_broadened(self):
+        grant = next(r["values"] for r in self.plan["planned_values"]["root_module"]["resources"]
+                     if r["address"] == "google_secret_manager_secret_iam_member.dev_app_secret_access[0]")
+        grant["member"] = "allUsers"
+        with self.assertRaisesRegex(ValueError, "Secret Manager principal"):
             check_plan(self.plan)
 
     def test_unknown_drift_is_rejected_and_diagnosed_without_values(self):
@@ -382,13 +554,46 @@ class GuardTests(unittest.TestCase):
             filenames = [str(path) for path in paths] + [str(state)]
             verify_deployment(filenames)
             state.write_text("\n".join(NETWORK), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "seven"):
+            with self.assertRaisesRegex(ValueError, "approved resources"):
                 verify_deployment(filenames)
             state.write_text("\n".join(EXPECTED), encoding="utf-8")
             values[8] = []
             paths[8].write_text(json.dumps(values[8]), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "database"):
                 verify_deployment(filenames)
+
+    def test_phase7_read_only_verification_rejects_unsafe_api_responses(self):
+        # The fixture follows GKE, IAM and Secret Manager's documented JSON nesting.
+        mutations = (
+            (10, lambda v: v["controlPlaneEndpointsConfig"]["ipEndpointsConfig"].update(enabled=True), "endpoints"),
+            (10, lambda v: v["workloadIdentityConfig"].update(workloadPool="wrong.svc.id.goog"), "Workload Identity"),
+            (10, lambda v: v.update(network="projects/other/global/networks/helpdeskcloud-dev-vpc"), "VPC"),
+            (10, lambda v: v["networkConfig"].update(network="projects/other/global/networks/helpdeskcloud-dev-vpc"), "networkConfig"),
+            (10, lambda v: v["ipAllocationPolicy"].update(useIpAliases=False), "alias IP"),
+            (10, lambda v: v["autoscaling"]["autoprovisioningNodePoolDefaults"].update(serviceAccount="default@developer.gserviceaccount.com"), "node identity"),
+            (10, lambda v: v["secretManagerConfig"].update(enabled=False), "Secret Manager"),
+            (16, lambda v: v["bindings"][0].update(members=["allUsers"]), "Public"),
+            (18, lambda v: v["bindings"][0].update(members=["allUsers"]), "Public"),
+            (18, lambda v: v["bindings"].append({"role": "roles/secretmanager.admin", "members": ["user:other@example.com"]}), "Unexpected direct secret IAM"),
+            (6, lambda v: v["bindings"].append({"role": "roles/editor", "members": [
+                "serviceAccount:helpdesk-app-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com"]}),
+             "unapproved administrative role"),
+            (14, lambda v: v["replication"].update(automatic=None), "replication"),
+            (20, lambda v: v["values"]["root_module"]["resources"][0]["values"].update(deletion_protection=False),
+             "deletion protection"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(21)]
+            state_addresses = Path(temporary) / "state-addresses.txt"
+            state_addresses.write_text("\n".join(EXPECTED), encoding="utf-8")
+            filenames = [str(path) for path in paths] + [str(state_addresses)]
+            for index, mutate, message in mutations:
+                values = evidence()
+                mutate(values[index])
+                for path, value in zip(paths, values):
+                    path.write_text(json.dumps(value), encoding="utf-8")
+                with self.subTest(index=index, message=message), self.assertRaisesRegex(ValueError, message):
+                    verify_deployment(filenames)
 
     def test_artifact_registry_outputs_match_apply_log_and_api_formats(self):
         with tempfile.TemporaryDirectory() as temporary:

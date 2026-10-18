@@ -2,7 +2,7 @@
 
 HelpDesk Cloud is an ASP.NET Core .NET 10 ticketing application with PostgreSQL storage. The [application repository](https://github.com/mhachem110/HelpDeskCloud-App) holds its code, container, and Helm chart. This repository holds cloud infrastructure so application changes and infrastructure changes can be reviewed and promoted separately.
 
-The existing Google Cloud project is `helpdeskcloud-capstone-511905`; the target region is `us-east1`. Phase 4 established Terraform and the Dev GCS backend. The [Phase 5 Dev network was deployed and verified](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39146464396). Phase 6 defines a Docker repository and private PostgreSQL database for a later approved deployment. GKE and application workloads are future work.
+The existing Google Cloud project is `helpdeskcloud-capstone-511905`; the target region is `us-east1`. Phase 4 established Terraform and the Dev GCS backend. The [Phase 5 Dev network](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39146464396) and [Phase 6 private PostgreSQL and Docker repository](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39162768905) were deployed and verified. Phase 7 defines a Dev GKE Autopilot platform and application handoff; its cluster and new identities are **not deployed by this PR**.
 
 ## Repository map
 
@@ -12,7 +12,7 @@ The existing Google Cloud project is `helpdeskcloud-capstone-511905`; the target
   terraform-ci.yml           Credential-free PR checks
   terraform-dev-backend.yml  Dev-only authenticated backend check
   terraform-dev-plan.yml     Manual Dev plan with value-free drift diagnostics
-  terraform-dev-apply.yml    Protected Dev Apply and seven-resource verification
+  terraform-dev-apply.yml    Protected Dev Apply and read-only resource verification
 scripts/
   dev_infra_guard.py         Checks plan JSON, drift paths, and post-apply evidence
   test_dev_infra_guard.py    Offline tests for the Apply safety gate
@@ -25,7 +25,10 @@ terraform/
   main.tf                    Deployed Dev network module call; unchanged state addresses
   artifact-registry.tf       Dev-only Docker repository definition
   cloud-sql.tf               Dev-only PostgreSQL instance and helpdesk database
-  outputs.tf                 Safe configuration, network, registry, and SQL handoff values
+  gke.tf                     Dev-only Autopilot cluster on the existing network
+  gke-iam.tf                 Separate node, app and migration identities and grants
+  secret-manager.tf          Dev secret metadata and KSA-scoped access, no versions
+  outputs.tf                 Safe configuration, network, SQL and GKE handoff values
   .terraform.lock.hcl        Locked provider checksums
   environments/
     dev.tfvars               Dev project, environment, and region
@@ -39,6 +42,7 @@ terraform/
 docs/PHASE4.md               Commands, verification, and Phase 5 prerequisites
 docs/PHASE5.md               Network plan, IAM, inventory, costs, verification
 docs/PHASE6.md               Registry and SQL design, credentials, costs, rollout gates
+docs/PHASE7.md               GKE design, IAM preflight, cost and deployment checkpoints
 ```
 
 ## Terraform and state
@@ -70,7 +74,7 @@ terraform validate
 
 Local Application Default Credentials can be used; no key file is required. A local `terraform init` can replace the cached backend settings in `.terraform/`, so use `-reconfigure` when deliberately switching backend configuration. Do not initialize Stage or Prod with the Dev identity.
 
-`terraform fmt -check`, `terraform init -backend=false`, `terraform validate`, TFLint, and Checkov are safe validation commands. Run `python -m unittest discover -s scripts -p 'test_*.py' -v` from the repository root to test the Dev Apply guard. The manual Dev Plan workflow uses the existing OIDC identity and reports drift addresses and changed paths; it summarizes only two known non-secret attribute representations. The protected Apply workflow permits only the three intended Phase 6 additions while requiring the four existing network resources to remain unchanged. Its only drift allowances are exact provider readback differences for the private allocation attribution label and the subnet's empty metadata-fields representation. All other drift remains blocked. A successful plan summary such as “3 to add, 0 to change, 0 to destroy” does not resolve drift recorded separately in Terraform's `resource_drift`. See [Phase 6 notes](docs/PHASE6.md). Do **not** run `terraform apply`, `terraform destroy`, state migration, or any resource-changing command without explicit owner approval and a reviewed phase plan.
+`terraform fmt -check`, `terraform init -backend=false`, `terraform validate`, TFLint, and Checkov are safe validation commands. Run `python -m unittest discover -s scripts -p 'test_*.py' -v` from the repository root to test the Dev Apply guard. The manual Dev Plan workflow uses the existing OIDC identity and reports drift addresses and changed paths. The protected Apply workflow keeps all seven deployed Phase 5–6 resources unchanged and allows only the exact Phase 7 creation batch. Its only drift allowances remain the two confirmed provider readbacks for the private allocation label and subnet metadata fields. All other drift remains blocked. A successful plan summary does not resolve drift recorded separately in Terraform's `resource_drift`. See [Phase 7 notes](docs/PHASE7.md). Do **not** run `terraform apply`, `terraform destroy`, state migration, or any resource-changing command without explicit owner approval and a reviewed phase plan.
 
 ## Branch flow
 
