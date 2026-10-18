@@ -362,13 +362,14 @@ def verify_deployment(paths):
 
     require(sql.get("name") == "helpdeskcloud-dev-postgres" and sql.get("region") == "us-east1",
             "Cloud SQL identity verification failed")
-    require(sql.get("databaseVersion") == "POSTGRES_17" and sql.get("deletionProtection") is True,
-            "Cloud SQL engine or deletion protection verification failed")
+    require(sql.get("databaseVersion") == "POSTGRES_17", "Cloud SQL engine verification failed")
+    require(sql.get("state") == "RUNNABLE", "Cloud SQL instance is not RUNNABLE")
     settings = sql.get("settings", {})
     for field, expected in {"edition": "ENTERPRISE", "tier": "db-f1-micro", "availabilityType": "ZONAL",
-                            "dataDiskType": "PD_SSD", "storageAutoResize": False,
-                            "deletionProtectionEnabled": True}.items():
+                            "dataDiskType": "PD_SSD", "storageAutoResize": False}.items():
         require(settings.get(field) == expected, f"Cloud SQL {field} verification failed")
+    require(settings.get("deletionProtectionEnabled") is True,
+            "Cloud SQL API deletion protection verification failed")
     require(int(settings.get("dataDiskSizeGb", -1)) == 10, "Cloud SQL disk size verification failed")
     backup = settings.get("backupConfiguration", {})
     require(backup.get("enabled") is True and backup.get("pointInTimeRecoveryEnabled") is False,
@@ -383,7 +384,7 @@ def verify_deployment(paths):
     addresses = sql.get("ipAddresses", [])
     private_ips = [item.get("ipAddress") for item in addresses if item.get("type") == "PRIVATE"]
     require(len(private_ips) == 1 and private_ips[0], "Cloud SQL private IP is missing")
-    require(not any(item.get("type") == "PRIMARY" for item in addresses) and not sql.get("publicIpAddress"),
+    require(not any(item.get("type") == "PRIMARY" for item in addresses),
             "Cloud SQL has an unexpected public IP")
     require(isinstance(databases, list) and any(db.get("name") == "helpdesk" and
             db.get("instance") == "helpdeskcloud-dev-postgres" for db in databases),

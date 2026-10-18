@@ -102,7 +102,7 @@ def evidence():
     subnet_link = "https://www.googleapis.com/compute/v1/projects/helpdeskcloud-capstone-511905/regions/us-east1/subnetworks/helpdeskcloud-dev-subnet"
     sql = {
         "name": "helpdeskcloud-dev-postgres", "region": "us-east1", "databaseVersion": "POSTGRES_17",
-        "deletionProtection": True, "connectionName": "helpdeskcloud-capstone-511905:us-east1:helpdeskcloud-dev-postgres",
+        "state": "RUNNABLE", "connectionName": "helpdeskcloud-capstone-511905:us-east1:helpdeskcloud-dev-postgres",
         "ipAddresses": [{"type": "PRIVATE", "ipAddress": "10.30.0.5"}],
         "settings": {"edition": "ENTERPRISE", "tier": "db-f1-micro", "availabilityType": "ZONAL",
                      "dataDiskType": "PD_SSD", "dataDiskSizeGb": "10", "storageAutoResize": False,
@@ -354,6 +354,11 @@ class GuardTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 check_plan(plan)
 
+    def test_terraform_sql_deletion_protection_is_still_required(self):
+        self.values("google_sql_database_instance")["deletion_protection"] = False
+        with self.assertRaisesRegex(ValueError, "Terraform SQL deletion protection"):
+            check_plan(self.plan)
+
     def test_invalid_registry_is_rejected(self):
         self.values("google_artifact_registry_repository")["docker_config"][0]["immutable_tags"] = False
         with self.assertRaisesRegex(ValueError, "immutable"):
@@ -382,6 +387,52 @@ class GuardTests(unittest.TestCase):
             values[8] = []
             paths[8].write_text(json.dumps(values[8]), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "database"):
+                verify_deployment(filenames)
+
+    def test_cloud_sql_api_deletion_protection_uses_nested_settings_field(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            values = evidence()
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+            for path, value in zip(paths, values):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            state = Path(temporary) / "state-addresses.txt"
+            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            filenames = [str(path) for path in paths] + [str(state)]
+
+            # The Cloud SQL API response has this flag under settings; no top-level
+            # deletionProtection field is required for a valid API response.
+            verify_deployment(filenames)
+
+            values[7]["settings"]["deletionProtectionEnabled"] = False
+            values[7]["deletionProtection"] = True
+            paths[7].write_text(json.dumps(values[7]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "API deletion protection"):
+                verify_deployment(filenames)
+
+            del values[7]["settings"]["deletionProtectionEnabled"]
+            paths[7].write_text(json.dumps(values[7]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "API deletion protection"):
+                verify_deployment(filenames)
+
+    def test_cloud_sql_api_rejects_non_runnable_or_public_address(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            values = evidence()
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+            for path, value in zip(paths, values):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            state = Path(temporary) / "state-addresses.txt"
+            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            filenames = [str(path) for path in paths] + [str(state)]
+
+            values[7]["state"] = "FAILED"
+            paths[7].write_text(json.dumps(values[7]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "not RUNNABLE"):
+                verify_deployment(filenames)
+
+            values[7]["state"] = "RUNNABLE"
+            values[7]["ipAddresses"].append({"type": "PRIMARY", "ipAddress": "203.0.113.10"})
+            paths[7].write_text(json.dumps(values[7]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unexpected public IP"):
                 verify_deployment(filenames)
 
     def test_public_iam_is_rejected(self):

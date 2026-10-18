@@ -2,6 +2,15 @@ name: Terraform Dev Apply
 
 on:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Choose a reviewed Apply or read-only verification
+        required: true
+        type: choice
+        default: apply
+        options:
+          - apply
+          - verify-only
 
 permissions:
   contents: read
@@ -14,7 +23,7 @@ concurrency:
 jobs:
   review-plan:
     name: Show Dev plan
-    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev'
+    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.operation == 'apply'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -86,9 +95,14 @@ jobs:
           python ../scripts/dev_infra_guard.py check-plan "$json_file"
 
   approved-apply:
-    name: Approved Dev apply and verification
+    name: Approved Dev operation
     needs: review-plan
-    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev'
+    # A verify-only dispatch skips the plan job but still uses this same protected environment.
+    if: >-
+      always() &&
+      github.repository == 'mhachem110/HelpDeskCloud-Infra' &&
+      github.ref == 'refs/heads/dev' &&
+      ((inputs.operation == 'apply' && needs.review-plan.result == 'success') || inputs.operation == 'verify-only')
     environment: dev-network-apply
     runs-on: ubuntu-latest
     permissions:
@@ -140,7 +154,7 @@ jobs:
       - name: Install gcloud for read-only checks
         uses: google-github-actions/setup-gcloud@v3
 
-      - name: Recheck project IAM before Apply
+      - name: Check project IAM for direct public access
         run: |
           set -euo pipefail
           umask 077
@@ -158,6 +172,7 @@ jobs:
       # This is a new plan after approval; it is never uploaded or committed.
       - name: Check saved apply plan
         id: inspect
+        if: inputs.operation == 'apply'
         run: |
           set -euo pipefail
           umask 077
@@ -171,11 +186,11 @@ jobs:
           echo "Guard decision: $decision"
 
       - name: Apply only the checked saved plan
-        if: steps.inspect.outputs.decision == 'apply'
+        if: inputs.operation == 'apply' && steps.inspect.outputs.decision == 'apply'
         run: terraform apply -input=false -no-color -lock-timeout=5m "$RUNNER_TEMP/dev-infra-apply.tfplan"
 
       - name: Report already deployed Dev infrastructure
-        if: steps.inspect.outputs.decision == 'no_changes'
+        if: inputs.operation == 'apply' && steps.inspect.outputs.decision == 'no_changes'
         run: echo 'The fresh Dev plan has no changes; apply was skipped.'
 
       - name: Verify deployed Dev infrastructure and state
