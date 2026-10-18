@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   dev-plan:
-    name: Review Dev network changes
+    name: Review Dev infrastructure changes
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     permissions:
@@ -49,5 +49,5 @@ jobs:
         run: terraform init -input=false -no-color -lockfile=readonly -backend-config=environments/dev.gcs.tfbackend
 
       # No saved plan artifact, apply, or destroy. Permission errors fail this job.
-      - name: Plan Dev networking
+      - name: Plan Dev infrastructure
         run: terraform plan -input=false -no-color -lock-timeout=5m -var-file=environments/dev.tfvars
