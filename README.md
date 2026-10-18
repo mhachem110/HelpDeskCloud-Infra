@@ -2,7 +2,7 @@
 
 HelpDesk Cloud is an ASP.NET Core .NET 10 ticketing application with PostgreSQL storage. The [application repository](https://github.com/mhachem110/HelpDeskCloud-App) holds its code, container, and Helm chart. This repository holds cloud infrastructure so application changes and infrastructure changes can be reviewed and promoted separately.
 
-The existing Google Cloud project is `helpdeskcloud-capstone-511905`; the target region is `us-east1`. Phase 4 sets up Terraform configuration and validation. It creates **no** GCP resources. GKE, networking, IAM, databases, registry, and workloads belong to later approved phases.
+The existing Google Cloud project is `helpdeskcloud-capstone-511905`; the target region is `us-east1`. Phase 4 set up Terraform configuration and validation. Phase 5 adds **Dev networking code for review**, without applying it. GKE, Cloud SQL, registry, and workloads belong to later approved phases.
 
 ## Repository map
 
@@ -11,14 +11,15 @@ The existing Google Cloud project is `helpdeskcloud-capstone-511905`; the target
   oidc-test.yml              Existing successful OIDC smoke test
   terraform-ci.yml           Credential-free PR checks
   terraform-dev-backend.yml  Dev-only authenticated backend check
+  terraform-dev-plan.yml     Manual Dev-only Terraform plan (after IAM review)
 terraform/
   backend.tf                 Partial GCS backend declaration
   versions.tf                Terraform and Google provider versions
   providers.tf               Google project and region settings
   variables.tf               Three required input values
   locals.tf                  Reusable environment identifier
-  main.tf                    Placeholder comment for later resources
-  outputs.tf                 Selected non-secret configuration values
+  main.tf                    Dev-only network module call
+  outputs.tf                 Configuration and future network handoff values
   .terraform.lock.hcl        Locked provider checksums
   environments/
     dev.tfvars               Dev project, environment, and region
@@ -27,8 +28,10 @@ terraform/
     dev.gcs.tfbackend        Existing state bucket; Dev prefix
     stage.gcs.tfbackend      Existing state bucket; Stage prefix
     prod.gcs.tfbackend       Existing state bucket; Prod prefix
-  modules/README.md          Where reviewed reusable modules may go later
+  modules/network/           Reusable VPC, subnet, and private services access
+  modules/README.md          Module inventory
 docs/PHASE4.md               Commands, verification, and Phase 5 prerequisites
+docs/PHASE5.md               Network plan, IAM, inventory, costs, verification
 ```
 
 ## Terraform and state
@@ -60,10 +63,10 @@ terraform validate
 
 Local Application Default Credentials can be used; no key file is required. A local `terraform init` can replace the cached backend settings in `.terraform/`, so use `-reconfigure` when deliberately switching backend configuration. Do not initialize Stage or Prod with the Dev identity.
 
-`terraform fmt -check`, `terraform init -backend=false`, `terraform validate`, TFLint, and Checkov are safe validation commands. Do **not** run `terraform apply`, `terraform destroy`, state migration, or any resource-changing command without explicit owner approval and a reviewed phase plan.
+`terraform fmt -check`, `terraform init -backend=false`, `terraform validate`, TFLint, and Checkov are safe validation commands. Phase 5 also provides a manual Dev-only plan workflow; review its IAM and API prerequisites in [Phase 5 notes](docs/PHASE5.md). Do **not** run `terraform apply`, `terraform destroy`, state migration, or any resource-changing command without explicit owner approval and a reviewed phase plan.
 
 ## Branch flow
 
 Changes move through protected branches: `feature/*` → `dev` → `stage` → `prod`. The PR workflow checks those source and target pairs. Merging to `dev` triggers the Dev backend check when Terraform or that workflow changes. It does not apply resources. Stage and Prod deployment identities, permissions, approvals, and pipelines are future work.
 
-See [Phase 4 notes](docs/PHASE4.md) for the authentication flow, exact commands, verified results, and Phase 5 prerequisites.
+See [Phase 4 notes](docs/PHASE4.md) for the established foundation and [Phase 5 notes](docs/PHASE5.md) for the proposed Dev network, IAM limits, inventory commands, and future connectivity checks.
