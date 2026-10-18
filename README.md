@@ -11,11 +11,11 @@ The existing Google Cloud project is `helpdeskcloud-capstone-511905`; the target
   oidc-test.yml              Existing successful OIDC smoke test
   terraform-ci.yml           Credential-free PR checks
   terraform-dev-backend.yml  Dev-only authenticated backend check
-  terraform-dev-plan.yml     Manual Dev infrastructure plan (after IAM review)
-  terraform-dev-apply.yml    Protected, network-only Phase 5 Apply guard
+  terraform-dev-plan.yml     Manual Dev plan with value-free drift diagnostics
+  terraform-dev-apply.yml    Protected Dev Apply and seven-resource verification
 scripts/
-  dev_network_guard.py       Checks plan JSON and post-apply evidence
-  test_dev_network_guard.py  Offline tests for the Apply safety gate
+  dev_infra_guard.py         Checks plan JSON, drift paths, and post-apply evidence
+  test_dev_infra_guard.py    Offline tests for the Apply safety gate
 terraform/
   backend.tf                 Partial GCS backend declaration
   versions.tf                Terraform and Google provider versions
@@ -70,7 +70,7 @@ terraform validate
 
 Local Application Default Credentials can be used; no key file is required. A local `terraform init` can replace the cached backend settings in `.terraform/`, so use `-reconfigure` when deliberately switching backend configuration. Do not initialize Stage or Prod with the Dev identity.
 
-`terraform fmt -check`, `terraform init -backend=false`, `terraform validate`, TFLint, and Checkov are safe validation commands. Run `python -m unittest discover -s scripts -p 'test_*.py' -v` from the repository root to check the Phase 5 Apply guard. The manual Dev Plan workflow can show all Terraform changes after the required API and IAM review. The existing protected Apply workflow still permits only the four Phase 5 networking resources and will reject Phase 6 additions. It must be upgraded in a separate reviewed change before any approved registry or SQL deployment. See [Phase 6 notes](docs/PHASE6.md). Do **not** run `terraform apply`, `terraform destroy`, state migration, or any resource-changing command without explicit owner approval and a reviewed phase plan.
+`terraform fmt -check`, `terraform init -backend=false`, `terraform validate`, TFLint, and Checkov are safe validation commands. Run `python -m unittest discover -s scripts -p 'test_*.py' -v` from the repository root to test the Dev Apply guard. The manual Dev Plan workflow uses the existing OIDC identity and reports drift addresses and changed attribute paths without printing values. The protected Apply workflow permits only the three intended Phase 6 additions while requiring the four existing network resources to remain unchanged. It still blocks **all** reported drift until a human identifies and reviews it. A successful plan summary such as “3 to add, 0 to change, 0 to destroy” does not resolve drift recorded separately in Terraform's `resource_drift`. See [Phase 6 notes](docs/PHASE6.md). Do **not** run `terraform apply`, `terraform destroy`, state migration, or any resource-changing command without explicit owner approval and a reviewed phase plan.
 
 ## Branch flow
 
