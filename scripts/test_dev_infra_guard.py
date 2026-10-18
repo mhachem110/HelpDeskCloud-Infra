@@ -103,7 +103,7 @@ def evidence():
     sql = {
         "name": "helpdeskcloud-dev-postgres", "region": "us-east1", "databaseVersion": "POSTGRES_17",
         "state": "RUNNABLE", "connectionName": "helpdeskcloud-capstone-511905:us-east1:helpdeskcloud-dev-postgres",
-        "ipAddresses": [{"type": "PRIVATE", "ipAddress": "10.30.0.5"}],
+        "ipAddresses": [{"type": "PRIVATE", "ipAddress": "10.30.0.3"}],
         "settings": {"edition": "ENTERPRISE", "tier": "db-f1-micro", "availabilityType": "ZONAL",
                      "dataDiskType": "PD_SSD", "dataDiskSizeGb": "10", "storageAutoResize": False,
                      "deletionProtectionEnabled": True,
@@ -119,12 +119,13 @@ def evidence():
         "subnet_cidr": "10.20.0.0/20", "pods_range_name": "helpdeskcloud-dev-pods",
         "pods_cidr": "10.24.0.0/16", "services_range_name": "helpdeskcloud-dev-services",
         "services_cidr": "10.25.0.0/20", "private_services_range_name": "helpdeskcloud-dev-psa",
-        "private_services_connection_id": "connection-id",
+        "private_services_connection_id": "projects%2Fhelpdeskcloud-capstone-511905%2Fglobal%2Fnetworks%2Fhelpdeskcloud-dev-vpc:servicenetworking.googleapis.com",
         "artifact_registry_repository_id": "helpdeskcloud-dev-images", "artifact_registry_location": "us-east1",
-        "artifact_registry_resource_name": "projects/helpdeskcloud-capstone-511905/locations/us-east1/repositories/helpdeskcloud-dev-images",
+        "artifact_registry_resource_name": "helpdeskcloud-dev-images",
+        "docker_image_repository": "us-east1-docker.pkg.dev/helpdeskcloud-capstone-511905/helpdeskcloud-dev-images/helpdeskcloud",
         "cloud_sql_instance_name": "helpdeskcloud-dev-postgres", "cloud_sql_region": "us-east1",
         "cloud_sql_database_version": "POSTGRES_17", "cloud_sql_database_name": "helpdesk",
-        "cloud_sql_private_ip": "10.30.0.5", "cloud_sql_connection_name": sql["connectionName"],
+        "cloud_sql_private_ip": "10.30.0.3", "cloud_sql_connection_name": sql["connectionName"],
         "cloud_sql_vpc_self_link": vpc, "cloud_sql_private_services_range_name": "helpdeskcloud-dev-psa",
     }.items()}
     return [
@@ -387,6 +388,43 @@ class GuardTests(unittest.TestCase):
             values[8] = []
             paths[8].write_text(json.dumps(values[8]), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "database"):
+                verify_deployment(filenames)
+
+    def test_artifact_registry_outputs_match_apply_log_and_api_formats(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            values = evidence()
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+            for path, value in zip(paths, values):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            state = Path(temporary) / "state-addresses.txt"
+            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            filenames = [str(path) for path in paths] + [str(state)]
+
+            # Apply output is the short repository ID; the GCP API name is a full path.
+            self.assertEqual(values[4]["name"],
+                             "projects/helpdeskcloud-capstone-511905/locations/us-east1/repositories/helpdeskcloud-dev-images")
+            self.assertEqual(values[9]["artifact_registry_resource_name"]["value"], "helpdeskcloud-dev-images")
+            self.assertEqual(values[9]["docker_image_repository"]["value"],
+                             "us-east1-docker.pkg.dev/helpdeskcloud-capstone-511905/helpdeskcloud-dev-images/helpdeskcloud")
+            verify_deployment(filenames)
+
+            values[9]["artifact_registry_resource_name"]["value"] = values[4]["name"]
+            paths[9].write_text(json.dumps(values[9]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "artifact_registry_resource_name"):
+                verify_deployment(filenames)
+
+            values[9]["artifact_registry_resource_name"]["value"] = "helpdeskcloud-dev-images"
+            values[4]["name"] = "projects/helpdeskcloud-capstone-511905/locations/us-east1/repositories/unexpected"
+            paths[4].write_text(json.dumps(values[4]), encoding="utf-8")
+            paths[9].write_text(json.dumps(values[9]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Artifact Registry identity"):
+                verify_deployment(filenames)
+
+            values[4]["name"] = "projects/helpdeskcloud-capstone-511905/locations/us-east1/repositories/helpdeskcloud-dev-images"
+            values[9]["docker_image_repository"]["value"] = "us-east1-docker.pkg.dev/wrong-project/helpdeskcloud-dev-images/helpdeskcloud"
+            paths[4].write_text(json.dumps(values[4]), encoding="utf-8")
+            paths[9].write_text(json.dumps(values[9]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "docker_image_repository"):
                 verify_deployment(filenames)
 
     def test_cloud_sql_api_deletion_protection_uses_nested_settings_field(self):

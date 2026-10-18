@@ -355,6 +355,7 @@ def verify_deployment(paths):
 
     require(registry.get("name") == f"projects/{PROJECT}/locations/us-east1/repositories/helpdeskcloud-dev-images",
             "Artifact Registry identity verification failed")
+    registry_id = registry["name"].rsplit("/", 1)[-1]
     require(registry.get("format") == "DOCKER" and registry.get("dockerConfig", {}).get("immutableTags") is True,
             "Artifact Registry Docker or immutable-tag verification failed")
     check_iam(registry_iam, "repository")
@@ -403,9 +404,11 @@ def verify_deployment(paths):
     require(outputs["vpc_self_link"]["value"] == network.get("selfLink"), "VPC output mismatch")
     require(outputs["subnet_self_link"]["value"] == subnet.get("selfLink"), "Subnet output mismatch")
     for key, expected in {
-        "artifact_registry_repository_id": "helpdeskcloud-dev-images",
+        "artifact_registry_repository_id": registry_id,
         "artifact_registry_location": "us-east1",
-        "artifact_registry_resource_name": registry["name"],
+        # The provider's name output is the repository ID; the API name above is the full resource path.
+        "artifact_registry_resource_name": registry_id,
+        "docker_image_repository": f"us-east1-docker.pkg.dev/{PROJECT}/{registry_id}/helpdeskcloud",
         "cloud_sql_instance_name": sql["name"],
         "cloud_sql_region": "us-east1",
         "cloud_sql_database_version": "POSTGRES_17",

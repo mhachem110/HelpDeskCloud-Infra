@@ -82,7 +82,7 @@ output "artifact_registry_location" {
 }
 
 output "artifact_registry_resource_name" {
-  description = "Full Dev Docker repository resource name; null outside Dev."
+  description = "Dev Docker repository name returned by the provider; null outside Dev."
   value       = try(google_artifact_registry_repository.dev_images[0].name, null)
 }
 
