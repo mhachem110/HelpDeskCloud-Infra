@@ -26,3 +26,7 @@ gha-creds-*.json
 terraform.tfvars
 
 # Keep terraform/.terraform.lock.hcl under version control.
+
+# Local Python bytecode from the Apply guard's offline tests.
+__pycache__/
+*.pyc
