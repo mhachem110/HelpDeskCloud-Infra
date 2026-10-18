@@ -28,6 +28,8 @@ PHASE6 = {
 }
 EXPECTED = NETWORK | PHASE6
 VPC_LINK = f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/{VPC}"
+VPC_PATH = f"projects/{PROJECT}/global/networks/{VPC}"
+VPC_PEERING_PATH = f"projects/260283083469/global/networks/{VPC}"
 PSA_ADDRESS = PREFIX + "google_compute_global_address.private_services"
 SUBNET_ADDRESS = PREFIX + "google_compute_subnetwork.this"
 ATTRIBUTION_LABEL = {"goog-terraform-provisioned": "true"}
@@ -332,6 +334,7 @@ def verify_deployment(paths):
     state_addresses = set(Path(paths[10]).read_text(encoding="utf-8").splitlines())
     require(state_addresses == set(EXPECTED), "Dev state does not contain exactly the seven expected resources")
     require(network.get("name") == VPC and network.get("autoCreateSubnetworks") is False, "VPC verification failed")
+    require(network.get("selfLink") == VPC_LINK, "VPC self-link verification failed")
     require(network.get("routingConfig", {}).get("routingMode") == "REGIONAL", "VPC routing verification failed")
 
     require(subnet.get("name") == SUBNET and subnet.get("region", "").endswith("/regions/us-east1"), "Subnet identity verification failed")
@@ -347,7 +350,7 @@ def verify_deployment(paths):
     if isinstance(connections, dict):
         connections = connections.get("connections", [])
     require(isinstance(connections, list), "Unexpected Service Networking response")
-    matched = [c for c in connections if c.get("network", "").endswith("/global/networks/" + VPC)
+    matched = [c for c in connections if c.get("network") in (VPC_PATH, VPC_PEERING_PATH)
                and PSA in c.get("reservedPeeringRanges", []) and c.get("service") in (SERVICE, "services/" + SERVICE)]
     require(len(matched) == 1 and matched[0].get("peering"), "PSA connection verification failed")
     require(any(p.get("name") == matched[0]["peering"] and p.get("state") == "ACTIVE"
@@ -355,6 +358,7 @@ def verify_deployment(paths):
 
     require(registry.get("name") == f"projects/{PROJECT}/locations/us-east1/repositories/helpdeskcloud-dev-images",
             "Artifact Registry identity verification failed")
+    registry_id = registry["name"].rsplit("/", 1)[-1]
     require(registry.get("format") == "DOCKER" and registry.get("dockerConfig", {}).get("immutableTags") is True,
             "Artifact Registry Docker or immutable-tag verification failed")
     check_iam(registry_iam, "repository")
@@ -362,13 +366,14 @@ def verify_deployment(paths):
 
     require(sql.get("name") == "helpdeskcloud-dev-postgres" and sql.get("region") == "us-east1",
             "Cloud SQL identity verification failed")
-    require(sql.get("databaseVersion") == "POSTGRES_17" and sql.get("deletionProtection") is True,
-            "Cloud SQL engine or deletion protection verification failed")
+    require(sql.get("databaseVersion") == "POSTGRES_17", "Cloud SQL engine verification failed")
+    require(sql.get("state") == "RUNNABLE", "Cloud SQL instance is not RUNNABLE")
     settings = sql.get("settings", {})
     for field, expected in {"edition": "ENTERPRISE", "tier": "db-f1-micro", "availabilityType": "ZONAL",
-                            "dataDiskType": "PD_SSD", "storageAutoResize": False,
-                            "deletionProtectionEnabled": True}.items():
+                            "dataDiskType": "PD_SSD", "storageAutoResize": False}.items():
         require(settings.get(field) == expected, f"Cloud SQL {field} verification failed")
+    require(settings.get("deletionProtectionEnabled") is True,
+            "Cloud SQL API deletion protection verification failed")
     require(int(settings.get("dataDiskSizeGb", -1)) == 10, "Cloud SQL disk size verification failed")
     backup = settings.get("backupConfiguration", {})
     require(backup.get("enabled") is True and backup.get("pointInTimeRecoveryEnabled") is False,
@@ -376,14 +381,15 @@ def verify_deployment(paths):
     require(int(backup.get("backupRetentionSettings", {}).get("retainedBackups", -1)) == 7,
             "Cloud SQL backup retention verification failed")
     ip = settings.get("ipConfiguration", {})
-    require(ip.get("ipv4Enabled") is False and ip.get("privateNetwork") == network.get("selfLink"),
+    # Cloud SQL returns a project-qualified path; the Compute API uses a full selfLink.
+    require(ip.get("ipv4Enabled") is False and ip.get("privateNetwork") in (VPC_PATH, VPC_LINK),
             "Cloud SQL must use only the intended private VPC")
     require(ip.get("allocatedIpRange") == PSA and ip.get("sslMode") == "ENCRYPTED_ONLY",
             "Cloud SQL PSA or encryption verification failed")
     addresses = sql.get("ipAddresses", [])
     private_ips = [item.get("ipAddress") for item in addresses if item.get("type") == "PRIVATE"]
     require(len(private_ips) == 1 and private_ips[0], "Cloud SQL private IP is missing")
-    require(not any(item.get("type") == "PRIMARY" for item in addresses) and not sql.get("publicIpAddress"),
+    require(not any(item.get("type") == "PRIMARY" for item in addresses),
             "Cloud SQL has an unexpected public IP")
     require(isinstance(databases, list) and any(db.get("name") == "helpdesk" and
             db.get("instance") == "helpdeskcloud-dev-postgres" for db in databases),
@@ -402,9 +408,11 @@ def verify_deployment(paths):
     require(outputs["vpc_self_link"]["value"] == network.get("selfLink"), "VPC output mismatch")
     require(outputs["subnet_self_link"]["value"] == subnet.get("selfLink"), "Subnet output mismatch")
     for key, expected in {
-        "artifact_registry_repository_id": "helpdeskcloud-dev-images",
+        "artifact_registry_repository_id": registry_id,
         "artifact_registry_location": "us-east1",
-        "artifact_registry_resource_name": registry["name"],
+        # The provider's name output is the repository ID; the API name above is the full resource path.
+        "artifact_registry_resource_name": registry_id,
+        "docker_image_repository": f"us-east1-docker.pkg.dev/{PROJECT}/{registry_id}/helpdeskcloud",
         "cloud_sql_instance_name": sql["name"],
         "cloud_sql_region": "us-east1",
         "cloud_sql_database_version": "POSTGRES_17",

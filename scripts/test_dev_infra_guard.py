@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from dev_infra_guard import (ATTRIBUTION_LABEL, EXPECTED, NETWORK, PHASE6, PSA_ADDRESS,
-                             SUBNET_ADDRESS, VPC_LINK, check_plan, diagnose_drift, verify_deployment)
+                             SUBNET_ADDRESS, VPC_LINK, VPC_PATH, check_plan, diagnose_drift, verify_deployment)
 
 
 def fixture():
@@ -102,14 +102,14 @@ def evidence():
     subnet_link = "https://www.googleapis.com/compute/v1/projects/helpdeskcloud-capstone-511905/regions/us-east1/subnetworks/helpdeskcloud-dev-subnet"
     sql = {
         "name": "helpdeskcloud-dev-postgres", "region": "us-east1", "databaseVersion": "POSTGRES_17",
-        "deletionProtection": True, "connectionName": "helpdeskcloud-capstone-511905:us-east1:helpdeskcloud-dev-postgres",
-        "ipAddresses": [{"type": "PRIVATE", "ipAddress": "10.30.0.5"}],
+        "state": "RUNNABLE", "connectionName": "helpdeskcloud-capstone-511905:us-east1:helpdeskcloud-dev-postgres",
+        "ipAddresses": [{"type": "PRIVATE", "ipAddress": "10.30.0.3"}],
         "settings": {"edition": "ENTERPRISE", "tier": "db-f1-micro", "availabilityType": "ZONAL",
                      "dataDiskType": "PD_SSD", "dataDiskSizeGb": "10", "storageAutoResize": False,
                      "deletionProtectionEnabled": True,
                      "backupConfiguration": {"enabled": True, "pointInTimeRecoveryEnabled": False,
                                              "backupRetentionSettings": {"retainedBackups": 7}},
-                     "ipConfiguration": {"ipv4Enabled": False, "privateNetwork": vpc,
+                     "ipConfiguration": {"ipv4Enabled": False, "privateNetwork": VPC_PATH,
                                          "allocatedIpRange": "helpdeskcloud-dev-psa", "sslMode": "ENCRYPTED_ONLY"}},
     }
     outputs = {key: {"value": value} for key, value in {
@@ -119,12 +119,13 @@ def evidence():
         "subnet_cidr": "10.20.0.0/20", "pods_range_name": "helpdeskcloud-dev-pods",
         "pods_cidr": "10.24.0.0/16", "services_range_name": "helpdeskcloud-dev-services",
         "services_cidr": "10.25.0.0/20", "private_services_range_name": "helpdeskcloud-dev-psa",
-        "private_services_connection_id": "connection-id",
+        "private_services_connection_id": "projects%2Fhelpdeskcloud-capstone-511905%2Fglobal%2Fnetworks%2Fhelpdeskcloud-dev-vpc:servicenetworking.googleapis.com",
         "artifact_registry_repository_id": "helpdeskcloud-dev-images", "artifact_registry_location": "us-east1",
-        "artifact_registry_resource_name": "projects/helpdeskcloud-capstone-511905/locations/us-east1/repositories/helpdeskcloud-dev-images",
+        "artifact_registry_resource_name": "helpdeskcloud-dev-images",
+        "docker_image_repository": "us-east1-docker.pkg.dev/helpdeskcloud-capstone-511905/helpdeskcloud-dev-images/helpdeskcloud",
         "cloud_sql_instance_name": "helpdeskcloud-dev-postgres", "cloud_sql_region": "us-east1",
         "cloud_sql_database_version": "POSTGRES_17", "cloud_sql_database_name": "helpdesk",
-        "cloud_sql_private_ip": "10.30.0.5", "cloud_sql_connection_name": sql["connectionName"],
+        "cloud_sql_private_ip": "10.30.0.3", "cloud_sql_connection_name": sql["connectionName"],
         "cloud_sql_vpc_self_link": vpc, "cloud_sql_private_services_range_name": "helpdeskcloud-dev-psa",
     }.items()}
     return [
@@ -354,6 +355,11 @@ class GuardTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 check_plan(plan)
 
+    def test_terraform_sql_deletion_protection_is_still_required(self):
+        self.values("google_sql_database_instance")["deletion_protection"] = False
+        with self.assertRaisesRegex(ValueError, "Terraform SQL deletion protection"):
+            check_plan(self.plan)
+
     def test_invalid_registry_is_rejected(self):
         self.values("google_artifact_registry_repository")["docker_config"][0]["immutable_tags"] = False
         with self.assertRaisesRegex(ValueError, "immutable"):
@@ -382,6 +388,143 @@ class GuardTests(unittest.TestCase):
             values[8] = []
             paths[8].write_text(json.dumps(values[8]), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "database"):
+                verify_deployment(filenames)
+
+    def test_artifact_registry_outputs_match_apply_log_and_api_formats(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            values = evidence()
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+            for path, value in zip(paths, values):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            state = Path(temporary) / "state-addresses.txt"
+            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            filenames = [str(path) for path in paths] + [str(state)]
+
+            # Apply output is the short repository ID; the GCP API name is a full path.
+            self.assertEqual(values[4]["name"],
+                             "projects/helpdeskcloud-capstone-511905/locations/us-east1/repositories/helpdeskcloud-dev-images")
+            self.assertEqual(values[9]["artifact_registry_resource_name"]["value"], "helpdeskcloud-dev-images")
+            self.assertEqual(values[9]["docker_image_repository"]["value"],
+                             "us-east1-docker.pkg.dev/helpdeskcloud-capstone-511905/helpdeskcloud-dev-images/helpdeskcloud")
+            verify_deployment(filenames)
+
+            values[9]["artifact_registry_resource_name"]["value"] = values[4]["name"]
+            paths[9].write_text(json.dumps(values[9]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "artifact_registry_resource_name"):
+                verify_deployment(filenames)
+
+            values[9]["artifact_registry_resource_name"]["value"] = "helpdeskcloud-dev-images"
+            values[4]["name"] = "projects/helpdeskcloud-capstone-511905/locations/us-east1/repositories/unexpected"
+            paths[4].write_text(json.dumps(values[4]), encoding="utf-8")
+            paths[9].write_text(json.dumps(values[9]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Artifact Registry identity"):
+                verify_deployment(filenames)
+
+            values[4]["name"] = "projects/helpdeskcloud-capstone-511905/locations/us-east1/repositories/helpdeskcloud-dev-images"
+            values[9]["docker_image_repository"]["value"] = "us-east1-docker.pkg.dev/wrong-project/helpdeskcloud-dev-images/helpdeskcloud"
+            paths[4].write_text(json.dumps(values[4]), encoding="utf-8")
+            paths[9].write_text(json.dumps(values[9]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "docker_image_repository"):
+                verify_deployment(filenames)
+
+    def test_cloud_sql_api_deletion_protection_uses_nested_settings_field(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            values = evidence()
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+            for path, value in zip(paths, values):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            state = Path(temporary) / "state-addresses.txt"
+            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            filenames = [str(path) for path in paths] + [str(state)]
+
+            # The Cloud SQL API response has this flag under settings; no top-level
+            # deletionProtection field is required for a valid API response.
+            verify_deployment(filenames)
+
+            values[7]["settings"]["deletionProtectionEnabled"] = False
+            values[7]["deletionProtection"] = True
+            paths[7].write_text(json.dumps(values[7]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "API deletion protection"):
+                verify_deployment(filenames)
+
+            del values[7]["settings"]["deletionProtectionEnabled"]
+            paths[7].write_text(json.dumps(values[7]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "API deletion protection"):
+                verify_deployment(filenames)
+
+    def test_cloud_sql_private_network_accepts_only_exact_project_and_vpc(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            values = evidence()
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+            for path, value in zip(paths, values):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            state = Path(temporary) / "state-addresses.txt"
+            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            filenames = [str(path) for path in paths] + [str(state)]
+
+            for network_ref in (VPC_PATH, VPC_LINK):
+                with self.subTest(accepted=network_ref):
+                    values[7]["settings"]["ipConfiguration"]["privateNetwork"] = network_ref
+                    paths[7].write_text(json.dumps(values[7]), encoding="utf-8")
+                    verify_deployment(filenames)
+
+            for network_ref in (
+                "projects/wrong-project/global/networks/helpdeskcloud-dev-vpc",
+                "projects/helpdeskcloud-capstone-511905/global/networks/wrong-vpc",
+                "https://www.googleapis.com/compute/v1/projects/wrong-project/global/networks/helpdeskcloud-dev-vpc",
+                "https://www.googleapis.com/compute/v1/projects/helpdeskcloud-capstone-511905/global/networks/wrong-vpc",
+            ):
+                with self.subTest(rejected=network_ref):
+                    values[7]["settings"]["ipConfiguration"]["privateNetwork"] = network_ref
+                    paths[7].write_text(json.dumps(values[7]), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "intended private VPC"):
+                        verify_deployment(filenames)
+
+    def test_verification_rejects_other_project_in_vpc_or_peering(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            values = evidence()
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+            for path, value in zip(paths, values):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            state = Path(temporary) / "state-addresses.txt"
+            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            filenames = [str(path) for path in paths] + [str(state)]
+
+            values[0]["selfLink"] = VPC_LINK.replace("projects/helpdeskcloud-capstone-511905/", "projects/wrong-project/")
+            paths[0].write_text(json.dumps(values[0]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "VPC self-link"):
+                verify_deployment(filenames)
+
+            values[0]["selfLink"] = VPC_LINK
+            paths[0].write_text(json.dumps(values[0]), encoding="utf-8")
+            values[3][0]["network"] = VPC_PATH
+            paths[3].write_text(json.dumps(values[3]), encoding="utf-8")
+            verify_deployment(filenames)
+
+            values[3][0]["network"] = "projects/wrong-project/global/networks/helpdeskcloud-dev-vpc"
+            paths[3].write_text(json.dumps(values[3]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "PSA connection"):
+                verify_deployment(filenames)
+
+    def test_cloud_sql_api_rejects_non_runnable_or_public_address(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            values = evidence()
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+            for path, value in zip(paths, values):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            state = Path(temporary) / "state-addresses.txt"
+            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            filenames = [str(path) for path in paths] + [str(state)]
+
+            values[7]["state"] = "FAILED"
+            paths[7].write_text(json.dumps(values[7]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "not RUNNABLE"):
+                verify_deployment(filenames)
+
+            values[7]["state"] = "RUNNABLE"
+            values[7]["ipAddresses"].append({"type": "PRIMARY", "ipAddress": "203.0.113.10"})
+            paths[7].write_text(json.dumps(values[7]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unexpected public IP"):
                 verify_deployment(filenames)
 
     def test_public_iam_is_rejected(self):
