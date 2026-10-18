@@ -1,4 +1,6 @@
 # Future Terraform modules
 
-Phase 4 has no GCP resources, so this directory intentionally has no modules.
-Reusable networking and IAM modules may be added here in Phase 5 after review.
+`network/` defines the custom VPC, subnet and secondary ranges, private services
+allocation, and service connection. The root configuration calls it only for Dev.
+Stage and Prod remain disabled. IAM and later infrastructure modules require
+separate review before they are added.

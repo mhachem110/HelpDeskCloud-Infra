@@ -1,0 +1,53 @@
+name: Terraform Dev Plan
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dev-plan:
+    name: Review Dev network changes
+    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      TF_IN_AUTOMATION: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.2.2
+
+      # Fail before cloud authentication if a dispatch somehow uses another ref.
+      - name: Verify trusted repository and branch
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          test "$REPOSITORY" = "mhachem110/HelpDeskCloud-Infra"
+          test "$REF" = "refs/heads/dev"
+
+      - name: Authenticate through the existing Dev OIDC provider
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: helpdeskcloud-capstone-511905
+          workload_identity_provider: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-infra-dev
+          service_account: helpdesk-terraform-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+          create_credentials_file: true
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: 1.16.2
+
+      - name: Initialize existing Dev GCS state
+        run: terraform init -input=false -no-color -lockfile=readonly -backend-config=environments/dev.gcs.tfbackend
+
+      # No saved plan artifact, apply, or destroy. Permission errors fail this job.
+      - name: Plan Dev networking
+        run: terraform plan -input=false -no-color -lock-timeout=5m -var-file=environments/dev.tfvars
