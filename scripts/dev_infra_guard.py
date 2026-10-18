@@ -28,6 +28,10 @@ PHASE6 = {
 }
 EXPECTED = NETWORK | PHASE6
 VPC_LINK = f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/{VPC}"
+PSA_ADDRESS = PREFIX + "google_compute_global_address.private_services"
+SUBNET_ADDRESS = PREFIX + "google_compute_subnetwork.this"
+ATTRIBUTION_LABEL = {"goog-terraform-provisioned": "true"}
+MISSING = object()
 
 
 def require(condition, message):
@@ -138,11 +142,61 @@ def check_references(plan):
                "google_sql_database_instance.dev_postgres[0].name", "database instance")
 
 
+def permitted_drift(entry):
+    """Accept only two known readback representations, with every other field identical."""
+    address = entry.get("address")
+    if (entry.get("mode") != "managed" or address not in (PSA_ADDRESS, SUBNET_ADDRESS)
+            or entry.get("type") != NETWORK[address]):
+        return False
+    change = entry.get("change", {})
+    before, after = change.get("before"), change.get("after")
+    if change.get("actions") != ["update"] or not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+
+    if address == PSA_ADDRESS:
+        if (before.get("labels", MISSING) is not None or after.get("labels", MISSING) != ATTRIBUTION_LABEL
+                or before.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL
+                or after.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL):
+            return False
+        return {k: v for k, v in before.items() if k != "labels"} == {
+            k: v for k, v in after.items() if k != "labels"}
+
+    before_logs, after_logs = before.get("log_config"), after.get("log_config")
+    if (not isinstance(before_logs, list) or len(before_logs) != 1
+            or not isinstance(after_logs, list) or len(after_logs) != 1
+            or not isinstance(before_logs[0], dict) or not isinstance(after_logs[0], dict)):
+        return False
+    before_log, after_log = before_logs[0], after_logs[0]
+    before_fields = before_log.get("metadata_fields", MISSING)
+    after_fields = after_log.get("metadata_fields", MISSING)
+    empty_fields = (MISSING, None, [])
+    if (before_log.get("metadata") != "EXCLUDE_ALL_METADATA"
+            or after_log.get("metadata") != "EXCLUDE_ALL_METADATA"
+            or before_fields not in empty_fields or after_fields not in empty_fields
+            or (before_fields is MISSING and after_fields is MISSING)
+            or (before_fields is not MISSING and after_fields is not MISSING and before_fields == after_fields)):
+        return False
+    # Compare the complete resource snapshots after removing only the inert field.
+    before_copy, after_copy = dict(before), dict(after)
+    before_copy["log_config"] = [{k: v for k, v in before_log.items() if k != "metadata_fields"}]
+    after_copy["log_config"] = [{k: v for k, v in after_log.items() if k != "metadata_fields"}]
+    return before_copy == after_copy
+
+
+def check_drift(plan):
+    drift = plan.get("resource_drift", [])
+    require(isinstance(drift, list), "Unexpected resource drift format")
+    require(len({entry.get("address") for entry in drift if isinstance(entry, dict)}) == len(drift),
+            "Duplicate or malformed resource drift")
+    require(all(isinstance(entry, dict) and permitted_drift(entry) for entry in drift),
+            "Unexpected resource drift requires review; run the Dev Plan diagnostic")
+
+
 def check_plan(plan):
     for name, expected in {"project_id": PROJECT, "region": "us-east1", "environment": "dev"}.items():
         require(plan.get("variables", {}).get(name, {}).get("value") == expected, f"Unexpected {name}")
-    # Drift is a separate observation from the requested actions. Never auto-approve it.
-    require(not plan.get("resource_drift"), "Existing resource drift requires review; run the Dev Plan diagnostic")
+    # Drift is separate from requested actions; only two exact provider readbacks are allowed.
+    check_drift(plan)
     planned = planned_resources(plan.get("planned_values", {}).get("root_module", {}))
     managed = [r for r in planned if r.get("mode") == "managed"]
     require(len(managed) == len(EXPECTED) and {r.get("address") for r in managed} == set(EXPECTED),
@@ -182,7 +236,7 @@ def changed_paths(before, after, prefix=""):
         paths = []
         for key in sorted(before.keys() | after.keys()):
             path = f"{prefix}.{key}" if prefix else key
-            paths.extend(changed_paths(before.get(key), after.get(key), path))
+            paths.extend(changed_paths(before.get(key, MISSING), after.get(key, MISSING), path))
         return paths
     if isinstance(before, list) and isinstance(after, list):
         paths = []
@@ -194,11 +248,24 @@ def changed_paths(before, after, prefix=""):
     return [prefix or "<unknown>"]
 
 
+def known_value(value, label=False):
+    """Show only the two documented, non-secret attribute representations."""
+    if value is MISSING:
+        return "missing"
+    if value is None:
+        return "null"
+    if label and value == ATTRIBUTION_LABEL:
+        return "goog-terraform-provisioned=true"
+    if not label and value == []:
+        return "[]"
+    return "<unexpected value withheld>"
+
+
 def diagnose_drift(plan):
     drift = plan.get("resource_drift", [])
     if not drift:
         return ["No resource_drift entries in this plan; this does not prove the earlier drift is resolved."]
-    lines = [f"Terraform reported drift for {len(drift)} resource(s). No values are shown."]
+    lines = [f"Terraform reported drift for {len(drift)} resource(s). Only two known non-secret fields are summarized."]
     for entry in drift:
         change = entry.get("change", {})
         paths = changed_paths(change.get("before"), change.get("after")) or ["<unknown>"]
@@ -208,7 +275,18 @@ def diagnose_drift(plan):
                      f"actions={','.join(change.get('actions', [])) or 'unknown'}; "
                      f"security-sensitive paths={'yes' if sensitive else 'possible'}; "
                      f"paths={', '.join(paths)}")
-    lines.append("All drift remains blocked by Dev Apply. Review before/after values privately with an authorized owner.")
+        before, after = change.get("before"), change.get("after")
+        if entry.get("address") == PSA_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
+            lines.append("  labels: before=" + known_value(before.get("labels", MISSING), label=True)
+                         + "; after=" + known_value(after.get("labels", MISSING), label=True))
+        if entry.get("address") == SUBNET_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
+            before_logs, after_logs = before.get("log_config"), after.get("log_config")
+            if (isinstance(before_logs, list) and len(before_logs) == 1 and isinstance(before_logs[0], dict)
+                    and isinstance(after_logs, list) and len(after_logs) == 1 and isinstance(after_logs[0], dict)):
+                lines.append("  log_config[0].metadata_fields: before="
+                             + known_value(before_logs[0].get("metadata_fields", MISSING))
+                             + "; after=" + known_value(after_logs[0].get("metadata_fields", MISSING)))
+    lines.append("Only exact documented normalization patterns may pass; all other drift remains blocked.")
     return lines
 
 
