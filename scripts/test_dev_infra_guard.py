@@ -252,6 +252,49 @@ class GuardTests(unittest.TestCase):
         self.assertIn("<unexpected value withheld>", report)
         self.assertNotIn("private-value", report)
 
+    def test_psa_diagnostic_classifies_label_maps_without_exposing_values(self):
+        for labels, expected in (
+            ({}, "empty map"),
+            ({"goog-terraform-provisioned": "true"}, "goog-terraform-provisioned=true"),
+            ({"other": "private-value"}, "unexpected map (contents withheld)"),
+            ({"goog-terraform-provisioned": "true", "other": "private-value"},
+             "unexpected map (contents withheld)"),
+        ):
+            drift = label_drift()
+            drift["change"]["after"]["labels"] = labels
+            self.plan["resource_drift"] = [drift]
+            report = "\n".join(diagnose_drift(self.plan))
+            with self.subTest(labels=labels):
+                self.assertIn("labels: before=null; after=" + expected, report)
+                self.assertNotIn("private-value", report)
+            if labels != ATTRIBUTION_LABEL:
+                with self.assertRaisesRegex(ValueError, "drift"):
+                    check_plan(self.plan)
+
+    def test_psa_diagnostic_reports_attribution_presence_without_map_contents(self):
+        drift = label_drift()
+        drift["change"]["before"]["effective_labels"] = None
+        drift["change"]["after"]["terraform_labels"] = {
+            "goog-terraform-provisioned": "true", "other": "private-value"}
+        drift["change"]["after"]["effective_labels"] = {
+            "goog-terraform-provisioned": "true", "other": "private-value"}
+        self.plan["resource_drift"] = [drift]
+        report = "\n".join(diagnose_drift(self.plan))
+        self.assertIn("terraform_labels: before=expected attribution label present; "
+                      "after=expected attribution label present", report)
+        self.assertIn("effective_labels: before=null; after=expected attribution label present", report)
+        self.assertNotIn("private-value", report)
+        with self.assertRaisesRegex(ValueError, "drift"):
+            check_plan(self.plan)
+
+        drift["change"]["after"]["terraform_labels"] = {"other": "private-value"}
+        drift["change"]["after"]["effective_labels"] = {}
+        report = "\n".join(diagnose_drift(self.plan))
+        self.assertIn("terraform_labels: before=expected attribution label present; "
+                      "after=expected attribution label absent or different", report)
+        self.assertIn("effective_labels: before=null; after=expected attribution label absent or different", report)
+        self.assertNotIn("private-value", report)
+
     def test_metadata_drift_rejects_mode_fields_cidr_and_other_changes(self):
         for mutate in (
             lambda d: d["change"]["after"]["log_config"][0].update({"metadata": "CUSTOM_METADATA"}),

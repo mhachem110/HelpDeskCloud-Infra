@@ -261,6 +261,30 @@ def known_value(value, label=False):
     return "<unexpected value withheld>"
 
 
+def classify_address_labels(value):
+    """Classify the PSA labels map without exposing unexpected keys or values."""
+    if value == {}:
+        return "empty map"
+    if value == ATTRIBUTION_LABEL:
+        return "goog-terraform-provisioned=true"
+    if isinstance(value, dict):
+        return "unexpected map (contents withheld)"
+    return known_value(value, label=True)
+
+
+def attribution_status(value):
+    """Report label presence in provider-computed maps, never their other contents."""
+    if value is MISSING:
+        return "missing"
+    if value is None:
+        return "null"
+    if not isinstance(value, dict):
+        return "unexpected type (contents withheld)"
+    if value.get("goog-terraform-provisioned") == "true":
+        return "expected attribution label present"
+    return "expected attribution label absent or different (contents withheld)"
+
+
 def diagnose_drift(plan):
     drift = plan.get("resource_drift", [])
     if not drift:
@@ -278,7 +302,10 @@ def diagnose_drift(plan):
         before, after = change.get("before"), change.get("after")
         if entry.get("address") == PSA_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
             lines.append("  labels: before=" + known_value(before.get("labels", MISSING), label=True)
-                         + "; after=" + known_value(after.get("labels", MISSING), label=True))
+                         + "; after=" + classify_address_labels(after.get("labels", MISSING)))
+            for field in ("terraform_labels", "effective_labels"):
+                lines.append("  " + field + ": before=" + attribution_status(before.get(field, MISSING))
+                             + "; after=" + attribution_status(after.get(field, MISSING)))
         if entry.get("address") == SUBNET_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
             before_logs, after_logs = before.get("log_config"), after.get("log_config")
             if (isinstance(before_logs, list) and len(before_logs) == 1 and isinstance(before_logs[0], dict)
