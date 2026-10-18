@@ -78,9 +78,9 @@ def fixture():
 
 def label_drift():
     before = {"name": "helpdeskcloud-dev-psa", "address": "10.30.0.0", "labels": None,
-              "terraform_labels": ATTRIBUTION_LABEL}
+              "terraform_labels": ATTRIBUTION_LABEL, "effective_labels": ATTRIBUTION_LABEL}
     after = copy.deepcopy(before)
-    after["labels"] = copy.deepcopy(ATTRIBUTION_LABEL)
+    after["labels"] = {}
     return {"mode": "managed", "address": PSA_ADDRESS, "type": "google_compute_global_address",
             "change": {"actions": ["update"], "before": before, "after": after}}
 
@@ -214,7 +214,7 @@ class GuardTests(unittest.TestCase):
         self.plan["resource_drift"] = [label_drift(), metadata_drift()]
         self.assertEqual(check_plan(self.plan), "apply")
         report = "\n".join(diagnose_drift(self.plan))
-        self.assertIn("labels: before=null; after=goog-terraform-provisioned=true", report)
+        self.assertIn("labels: before=null; after=empty map", report)
         self.assertIn("metadata_fields: before=null; after=[]", report)
         self.plan["resource_drift"][1] = metadata_drift(omit_after=True)
         self.assertEqual(check_plan(self.plan), "apply")
@@ -234,7 +234,11 @@ class GuardTests(unittest.TestCase):
             lambda d: d["change"]["after"]["labels"].update({"owner": "someone"}),
             lambda d: d["change"]["after"]["labels"].update({"goog-terraform-provisioned": "false"}),
             lambda d: d["change"]["after"].update({"address": "10.31.0.0"}),
+            lambda d: d["change"]["after"].update({"prefix_length": 15}),
+            lambda d: d["change"]["after"].update({"network": "unexpected-vpc"}),
             lambda d: d["change"]["after"].update({"terraform_labels": {}}),
+            lambda d: d["change"]["after"].update({"effective_labels": {}}),
+            lambda d: d["change"]["after"].update({"name": "unexpected-allocation"}),
             lambda d: d["change"].update({"actions": ["delete", "create"]}),
         ):
             drift = label_drift()
@@ -267,9 +271,18 @@ class GuardTests(unittest.TestCase):
             with self.subTest(labels=labels):
                 self.assertIn("labels: before=null; after=" + expected, report)
                 self.assertNotIn("private-value", report)
-            if labels != ATTRIBUTION_LABEL:
+            if labels == {}:
+                self.assertEqual(check_plan(self.plan), "apply")
+            else:
                 with self.assertRaisesRegex(ValueError, "drift"):
                     check_plan(self.plan)
+
+    def test_psa_drift_requires_readback_without_a_proposed_resource_change(self):
+        self.plan["resource_drift"] = [label_drift()]
+        change = next(c for c in self.plan["resource_changes"] if c["address"] == PSA_ADDRESS)
+        change["change"]["actions"] = ["update"]
+        with self.assertRaisesRegex(ValueError, "readback only"):
+            check_plan(self.plan)
 
     def test_psa_diagnostic_reports_attribution_presence_without_map_contents(self):
         drift = label_drift()
