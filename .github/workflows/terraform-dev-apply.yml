@@ -69,6 +69,7 @@ jobs:
     environment: dev-network-apply
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
       id-token: write
     defaults:
@@ -82,6 +83,7 @@ jobs:
       # GitHub creates unknown environment names without protections. Fail before OIDC.
       - name: Verify trusted ref and protected environment
         env:
+          GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           REF: ${{ github.ref }}
         run: |
@@ -92,8 +94,14 @@ jobs:
           environment_file="$RUNNER_TEMP/dev-environment.json"
           branches_file="$RUNNER_TEMP/dev-branches.json"
           url="https://api.github.com/repos/mhachem110/HelpDeskCloud-Infra/environments/dev-network-apply"
-          curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' "$url" > "$environment_file"
-          curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' "$url/deployment-branch-policies?per_page=100" > "$branches_file"
+          curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" "$url" > "$environment_file" || {
+            echo '::error::GitHub Environment API request failed. See the curl HTTP or transport error above; verify actions: read permission and repository access.'
+            exit 1
+          }
+          curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" "$url/deployment-branch-policies?per_page=100" > "$branches_file" || {
+            echo '::error::GitHub deployment branch policies API request failed. See the curl HTTP or transport error above; verify actions: read permission and repository access.'
+            exit 1
+          }
           jq -e '.name == "dev-network-apply" and .deployment_branch_policy.custom_branch_policies == true and ([.protection_rules[]? | select(.type == "required_reviewers" and (.reviewers | length) > 0)] | length) > 0' "$environment_file" >/dev/null
           jq -e '.total_count == 1 and (.branch_policies | length) == 1 and .branch_policies[0].name == "dev"' "$branches_file" >/dev/null
           echo 'Required reviewers and dev-only environment branch policy verified.'
