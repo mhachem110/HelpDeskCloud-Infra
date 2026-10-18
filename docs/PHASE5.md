@@ -26,7 +26,7 @@ The VPC keeps Google's implied ingress deny. No custom firewall rule, public loa
 | Service secondary range | `helpdeskcloud-dev-services`, `10.25.0.0/20` | ClusterIP Service addresses | GKE `services_secondary_range_name` |
 | PSA allocation | `helpdeskcloud-dev-psa`, `10.30.0.0/16` | Address pool for Google's service producer subnets | Cloud SQL private IP allocation |
 
-These four proposed CIDRs do not overlap **with each other**. Their availability against live project subnets, peerings, routes, and connected networks is unverified. Do not apply until inventory confirms no conflict. Google's [VPC-native GKE guidance](https://cloud.google.com/kubernetes-engine/docs/concepts/alias-ips) supports user-managed Pod and Service ranges; newer Autopilot versions can also use a GKE-managed Service range, but this project deliberately supplies a named range. Google's [Cloud SQL PSA guidance](https://cloud.google.com/sql/docs/postgres/about-private-services-access) recommends a `/16` allocation for growth and requires available `/24` blocks for service producer subnets.
+These four proposed CIDRs do not overlap **with each other**. The owner reports that live project network inventory was checked before the successful Dev plan. Recheck it before an approved Apply because networks and routes can change. Google's [VPC-native GKE guidance](https://cloud.google.com/kubernetes-engine/docs/concepts/alias-ips) supports user-managed Pod and Service ranges; newer Autopilot versions can also use a GKE-managed Service range, but this project deliberately supplies a named range. Google's [Cloud SQL PSA guidance](https://cloud.google.com/sql/docs/postgres/about-private-services-access) recommends a `/16` allocation for growth and requires available `/24` blocks for service producer subnets.
 
 Root outputs are null for Stage and Prod. After an approved Dev apply, `vpc_self_link` and `subnet_self_link` identify the Terraform-managed network and subnet. `pods_range_name` and `services_range_name` identify the GKE secondary ranges. `private_services_range_name` identifies the Cloud SQL allocation. A future Cloud SQL module should reference the VPC self-link and allocation name and depend explicitly on the PSA connection (for example, by consuming `private_services_connection_id` as an input or using `depends_on = [module.dev_network]`). The current PSA resource already references the VPC and reserved range, so Terraform infers that ordering. No GKE-to-Cloud-SQL connectivity is proven until both later resources exist and a real Pod test passes.
 
@@ -47,13 +47,13 @@ gcloud compute interconnects attachments list --project="$PROJECT" --format=json
 gcloud compute networks peerings list --network=EXISTING_NETWORK --project="$PROJECT" --format=json
 ```
 
-Review primary and secondary subnet ranges, allocated PSA ranges, peering and custom-route destinations, VPN and Interconnect attachments, and any connected on-premises address space. Compare them with all four proposed CIDRs and confirm the resource names are unused. Do not silently substitute other ranges if there is a conflict. Compute Engine API was previously enabled, but recheck it. Service Networking API status is unknown. Both APIs must be enabled before a future apply; [Cloud SQL requires both](https://cloud.google.com/sql/docs/postgres/configure-private-services-access). API activation is a separately approved administrator action, not part of this Terraform code.
+Review primary and secondary subnet ranges, allocated PSA ranges, peering and custom-route destinations, VPN and Interconnect attachments, and any connected on-premises address space. Compare them with all four proposed CIDRs and confirm the resource names are unused. Do not silently substitute other ranges if there is a conflict. The owner reports that both Compute Engine and Service Networking APIs are enabled and verified. Recheck before Apply; [Cloud SQL requires both](https://cloud.google.com/sql/docs/postgres/configure-private-services-access). This Terraform code does not enable APIs.
 
 ## IAM permission matrix
 
 | Identity and action | Needed permission or proposed role | Scope and status |
 |---|---|---|
-| GitHub Actions Dev Terraform service account plans | GCS state access (already proven); Compute read/list/get for network, subnet, global address, routes; Service Networking connection read; Service Usage list | Existing Dev identity; network permissions **not verified**. A plan must fail if access is missing. |
+| GitHub Actions Dev Terraform service account plans | GCS state access; Compute read/list/get for network, subnet, global address, routes; Service Networking connection read; Service Usage list | The owner reports a successful authenticated plan. Creation and post-apply read permissions are still unverified. |
 | Same Dev identity in a future approved apply | VPC/subnet create, update, read; global internal address allocation; `servicenetworking.services.addPeering` and related read/list | Evaluate `roles/compute.networkAdmin` on project `helpdeskcloud-capstone-511905`. Google documents it for [PSA creation](https://cloud.google.com/vpc/docs/configure-private-services-access) and includes [addPeering](https://cloud.google.com/iam/docs/roles-permissions/servicenetworking). **Not granted here.** |
 | API-state inspection | `serviceusage.services.list` | Project scope. If missing for the Dev identity, evaluate `roles/serviceusage.serviceUsageViewer` for read-only inspection. Do not grant Service Usage Admin merely to plan. [Service Usage IAM](https://cloud.google.com/service-usage/docs/access-control). |
 | API enablement, only if disabled | `serviceusage.services.enable` and `servicemanagement.services.bind` | Project/service scope; an authorized administrator must approve and enable APIs separately. Terraform does not manage them. |
@@ -74,7 +74,7 @@ The GitHub Actions Terraform account is a deployment identity. A later GKE appli
 
 ## Plan workflow and validation
 
-`terraform-dev-plan.yml` is manual-only. The job checks the repository and `dev` ref before OIDC authentication, reuses the Phase 4 Dev backend, and runs `terraform plan -var-file=environments/dev.tfvars`. It does not save a plan artifact, apply, destroy, or grant IAM. It must wait until the owner approves the exact network permissions and verifies both APIs. Do not run privileged plans on feature-branch PR code. Existing credential-free PR CI and backend/OIDC workflows are unchanged.
+`terraform-dev-plan.yml` is manual-only. The job checks the repository and `dev` ref before OIDC authentication, reuses the Phase 4 Dev backend, and runs `terraform plan -var-file=environments/dev.tfvars`. It does not save a plan artifact, apply, destroy, or grant IAM. The [owner's successful plan run](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39083920274) reported **4 to add, 0 to change, 0 to destroy**. That verifies planning at that time, not creation permission. Do not run privileged plans on feature-branch PR code. Existing credential-free PR CI and backend/OIDC workflows are unchanged.
 
 Offline commands from `terraform/`:
 
@@ -86,7 +86,30 @@ tflint --format compact
 checkov --directory . --framework terraform --quiet
 ```
 
+From the repository root, run `python -m unittest discover -s scripts -p 'test_*.py' -v` to exercise the Apply guard without cloud credentials.
+
 Checkov has one documented firewall exception; the other applicable policies must pass. Offline validation proves HCL structure, not live CIDR availability, API enablement, IAM sufficiency, or successful resource creation. The earlier [Phase 4 backend run](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39081423878) proves only OIDC and Dev GCS initialization.
+
+## Manual Dev Apply and GitHub approval
+
+`terraform-dev-apply.yml` is a separate **manual-only** workflow. It can execute only from `refs/heads/dev` in this repository. Its first job authenticates through the existing Dev OIDC identity, initializes `helpdeskcloud/dev` remote state, displays a Terraform plan, and checks its structured JSON. The second job waits for the `dev-network-apply` GitHub Environment approval. After approval it checks the environment settings before requesting cloud credentials, reauthenticates, initializes the same backend, and creates a **new** saved plan. The new plan is checked again; it is not assumed to match the earlier plan. The saved plan and JSON stay in the runner's temporary directory and are never uploaded as artifacts. Only that checked saved plan can be applied. Terraform state locking remains enabled.
+
+The owner must configure the environment **before dispatching the workflow**:
+
+1. Open **HelpDeskCloud-Infra → Settings → Environments → New environment** and name it exactly `dev-network-apply`.
+2. Enable **Required reviewers** and select a reviewer with repository read access. Save the rule. If another reviewer is available, consider **Prevent self-review** so the person dispatching cannot approve their own run.
+3. Under **Deployment branches and tags**, choose **Selected branches and tags**. Add exactly one **Branch** rule named `dev`; add no tag or wildcard rules.
+4. Deselect **Allow administrators to bypass configured protection rules**, if the setting is available, and save. Review the environment page to confirm the approval, branch, and bypass settings before dispatch.
+
+[GitHub documents these settings](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments). A workflow reference alone can create an environment **without protection rules**. Therefore the Apply job also fetches the public environment settings before OIDC and fails unless required reviewers and exactly one `dev` branch policy are present. The GitHub API response used by this preflight does not expose the administrator-bypass checkbox, so the owner must verify that setting in the UI. If the repository's GitHub plan or visibility prevents required reviewers or a Dev-only branch rule, **do not run or substitute an unprotected Apply**. This repository is currently public, where GitHub documents support for these rules.
+
+`scripts/dev_network_guard.py` reads `terraform show -json` without printing the JSON. It requires the Dev project, region and environment, exactly the four Phase 5 managed resource addresses and types, and creation-only actions. It rejects updates, deletes, replacements, drift, different names/CIDRs, disabled Private Google Access, or a different PSA connection. It checks Terraform's references from subnet and PSA resources to the VPC and from the connection to the reserved range. If the fresh plan has no changes, Apply is skipped and deployed resources are still verified. A changed or partial plan fails closed. [Terraform documents the plan JSON format](https://developer.hashicorp.com/terraform/internals/json-format); [plan JSON may contain sensitive values](https://developer.hashicorp.com/terraform/cli/commands/show), so it is never printed or uploaded.
+
+After a successful Apply, or a safe no-change result, the workflow uses read-only `gcloud` descriptions plus `terraform state list` and selected root outputs to check the actual VPC, subnet, secondary ranges, private allocation, active Service Networking peering, and exactly four Dev state addresses. The backend initialization uses only `environments/dev.gcs.tfbackend`. It does not initialize Stage or Prod, use their credentials, or alter their state. A missing resource, failed peering, or missing read permission fails verification. State contents and full output JSON are kept out of logs.
+
+If creation fails with `PERMISSION_DENIED`, record the **exact permission and resource scope** shown in the failed job and review IAM with the owner; do not grant broad roles automatically. If PSA fails, confirm `servicenetworking.googleapis.com`, the allocation's `VPC_PEERING` purpose and VPC, CIDR availability, and the Google-managed Service Networking service agent. Do not assign service-agent roles to the Terraform account. Do not retry by disabling state locks or changing state manually.
+
+No Apply is run while preparing this PR. Before Phase 6, this approved workflow must complete and its read-only network checks must pass. Then Cloud SQL design can use the VPC, reserved range, and completed connection for private IP. GKE design must consume the VPC, subnet, and named Pod/Service ranges. Neither service is created by this workflow.
 
 ## Verification matrix
 
@@ -94,8 +117,9 @@ Checkov has one documented firewall exception; the other applicable policies mus
 |---|---|---|
 | Offline `fmt`, `init -backend=false`, `validate`, TFLint, Checkov` | PR | Syntax, module wiring, lint and static policy results; no cloud access. |
 | CIDR calculation | PR | The four proposed blocks do not overlap each other; not live availability. |
-| API and inventory commands above | Before apply | Required APIs and no conflicts with existing network ranges, allocations, routes, or connected networks. |
-| Manual Dev plan, with approved IAM | Before apply | Planned changes and enough read permissions; not creation authority or connectivity. Review for exactly one VPC, one subnet, one allocation, and one PSA connection, with no unexpected destroy/replace. |
+| API and inventory commands above | Before apply | Owner reports these passed; rerun to catch any change before deployment. |
+| Manual Dev plan | Before apply | Owner's run showed four adds and no changes or destroys; it does not prove creation authority or connectivity. |
+| Protected Apply environment and fresh structured plan | Before apply | Reviewer approval, Dev-only branch policy, exactly four approved creations, and no destructive or unexpected operation. Pending owner configuration and dispatch. |
 | `gcloud compute networks describe helpdeskcloud-dev-vpc` | After approved apply | Correct VPC name, custom mode, REGIONAL routing. |
 | `gcloud compute networks subnets describe helpdeskcloud-dev-subnet --region=us-east1` | After approved apply | Primary and both named secondary CIDRs, Private Google Access, flow logging. |
 | `gcloud compute addresses describe helpdeskcloud-dev-psa --global` | After approved apply | Internal `VPC_PEERING` allocation at `10.30.0.0/16`. |
