@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_LABEL, BASE, EXPECTED,
                              NETWORK, PHASE6, PHASE7, PSA_ADDRESS, REGISTRY_ADDRESS, SQL_ADDRESS,
-                             SUBNET_ADDRESS, VPC_LINK, VPC_PATH,
+                             SUBNET_ADDRESS, SUBNET_PATHS, VPC_LINK, VPC_PATH, VPC_PATHS,
                              check_plan, diagnose_drift, permitted_drift, verify_deployment)
 
 
@@ -1098,6 +1098,42 @@ class GuardTests(unittest.TestCase):
                 "helpdeskcloud-dev-subnet")
         self.assertTrue(permitted_drift(drift))
 
+    def test_gke_canonical_relative_network_paths_are_permitted(self):
+        for network_path, subnet_path in zip(VPC_PATHS, SUBNET_PATHS):
+            drift = gke_resource_labels_drift()
+            for snapshot in (drift["change"]["before"], drift["change"]["after"]):
+                snapshot["network"] = network_path
+                snapshot["subnetwork"] = subnet_path
+            with self.subTest(network_project=network_path.split("/")[1],
+                              subnet_project=subnet_path.split("/")[1]):
+                self.assertTrue(permitted_drift(drift))
+
+    def test_gke_canonical_relative_paths_pass_complete_no_change_plan(self):
+        cluster = resource(self.plan, "google_container_cluster.dev[0]")["values"]
+        cluster["network"] = VPC_PATH
+        cluster["subnetwork"] = SUBNET_PATHS[0]
+        set_prior_phase7(self.plan, PHASE7)
+        for change in self.plan["resource_changes"]:
+            change["change"]["actions"] = ["no-op"]
+        drift = gke_resource_labels_drift()
+        for snapshot in (drift["change"]["before"], drift["change"]["after"]):
+            snapshot["network"] = VPC_PATH
+            snapshot["subnetwork"] = SUBNET_PATHS[0]
+        self.plan["resource_drift"] = [drift]
+        self.assertEqual(check_plan(self.plan), "no_changes")
+
+    def test_gke_drift_rejects_unexpected_relative_network_paths(self):
+        for field, unexpected in (
+            ("network", "projects/another-project/global/networks/helpdeskcloud-dev-vpc"),
+            ("network", "projects/helpdeskcloud-capstone-511905/global/networks/another-vpc"),
+            ("subnetwork", "projects/helpdeskcloud-capstone-511905/regions/us-west1/subnetworks/helpdeskcloud-dev-subnet"),
+            ("subnetwork", "projects/helpdeskcloud-capstone-511905/regions/us-east1/subnetworks/another-subnet"),
+        ):
+            drift = gke_resource_labels_drift()
+            drift["change"]["after"][field] = unexpected
+            with self.subTest(field=field, unexpected=unexpected):
+                self.assertFalse(permitted_drift(drift))
+
     def test_project_iam_missing_etag_readback_is_permitted(self):
         address = "google_project_iam_member.dev_app_cloudsql[0]"
         for before_etag, after_etag in ((None, "etag-after"), ("", "etag-after"),
@@ -1133,11 +1169,23 @@ class GuardTests(unittest.TestCase):
         plan = {"resource_drift": [cluster, iam]}
         report = "\n".join(diagnose_drift(plan))
         self.assertIn("project representation: before=project number; after=project number", report)
-        self.assertIn("network self-link: before=expected; after=expected", report)
+        self.assertIn("network reference: before=Compute self-link; after=Compute self-link", report)
+        self.assertIn("subnetwork reference: before=Compute self-link; after=Compute self-link", report)
         self.assertIn("before IAM role and member: expected", report)
         self.assertIn("etag representation: before=non-empty token; after=non-empty token", report)
         self.assertNotIn("etag-before", report)
         self.assertNotIn("etag-after", report)
+
+    def test_gke_diagnostic_classifies_relative_paths_without_printing_them(self):
+        drift = gke_resource_labels_drift()
+        for snapshot in (drift["change"]["before"], drift["change"]["after"]):
+            snapshot["network"] = VPC_PATH
+            snapshot["subnetwork"] = SUBNET_PATHS[0]
+        report = "\n".join(diagnose_drift({"resource_drift": [drift]}))
+        self.assertIn("network reference: before=GKE relative resource path; after=GKE relative resource path", report)
+        self.assertIn("subnetwork reference: before=GKE relative resource path; after=GKE relative resource path", report)
+        self.assertNotIn(VPC_PATH, report)
+        self.assertNotIn(SUBNET_PATHS[0], report)
 
     def test_gke_label_drift_rejects_unexpected_labels_or_cluster_changes(self):
         for mutate in (

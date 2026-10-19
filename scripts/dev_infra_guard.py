@@ -60,16 +60,23 @@ APPLY12_REMAINING = frozenset(PHASE7) - APPLY12_COMPLETED
 BASE = NETWORK | PHASE6
 EXPECTED = BASE | PHASE7
 VPC_LINK = f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/{VPC}"
-VPC_LINKS = tuple(
+VPC_SELF_LINKS = tuple(
     f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{VPC}"
     for project in (PROJECT, PROJECT_NUMBER)
 )
 VPC_PATH = f"projects/{PROJECT}/global/networks/{VPC}"
 VPC_PEERING_PATH = f"projects/{PROJECT_NUMBER}/global/networks/{VPC}"
-SUBNET_LINKS = tuple(
+VPC_PATHS = (VPC_PATH, VPC_PEERING_PATH)
+VPC_LINKS = VPC_SELF_LINKS + VPC_PATHS
+SUBNET_PATHS = tuple(
+    f"projects/{project}/regions/us-east1/subnetworks/{SUBNET}"
+    for project in (PROJECT, PROJECT_NUMBER)
+)
+SUBNET_SELF_LINKS = tuple(
     f"https://www.googleapis.com/compute/v1/projects/{project}/regions/us-east1/subnetworks/{SUBNET}"
     for project in (PROJECT, PROJECT_NUMBER)
 )
+SUBNET_LINKS = SUBNET_SELF_LINKS + SUBNET_PATHS
 PSA_ADDRESS = PREFIX + "google_compute_global_address.private_services"
 SUBNET_ADDRESS = PREFIX + "google_compute_subnetwork.this"
 REGISTRY_ADDRESS = "google_artifact_registry_repository.dev_images[0]"
@@ -801,6 +808,14 @@ def project_readback_status(value):
     return "unexpected (value withheld)"
 
 
+def gke_network_reference_status(value, *, self_links, relative_paths):
+    if value in self_links:
+        return "Compute self-link"
+    if value in relative_paths:
+        return "GKE relative resource path"
+    return "unexpected (value withheld)"
+
+
 def etag_readback_status(value):
     if value is MISSING:
         return "missing"
@@ -894,14 +909,22 @@ def diagnose_drift(plan):
         if entry.get("address") == CLUSTER_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
             lines.append("  project representation: before=" + project_readback_status(before.get("project", MISSING))
                          + "; after=" + project_readback_status(after.get("project", MISSING)))
-            lines.append("  network self-link: before="
-                         + ("expected" if before.get("network") in VPC_LINKS else "unexpected (value withheld)")
+            lines.append("  network reference: before="
+                         + gke_network_reference_status(before.get("network"),
+                                                        self_links=VPC_SELF_LINKS,
+                                                        relative_paths=VPC_PATHS)
                          + "; after="
-                         + ("expected" if after.get("network") in VPC_LINKS else "unexpected (value withheld)"))
-            lines.append("  subnetwork self-link: before="
-                         + ("expected" if before.get("subnetwork") in SUBNET_LINKS else "unexpected (value withheld)")
+                         + gke_network_reference_status(after.get("network"),
+                                                        self_links=VPC_SELF_LINKS,
+                                                        relative_paths=VPC_PATHS))
+            lines.append("  subnetwork reference: before="
+                         + gke_network_reference_status(before.get("subnetwork"),
+                                                        self_links=SUBNET_SELF_LINKS,
+                                                        relative_paths=SUBNET_PATHS)
                          + "; after="
-                         + ("expected" if after.get("subnetwork") in SUBNET_LINKS else "unexpected (value withheld)"))
+                         + gke_network_reference_status(after.get("subnetwork"),
+                                                        self_links=SUBNET_SELF_LINKS,
+                                                        relative_paths=SUBNET_PATHS))
             lines.append("  resource_labels: before="
                          + classify_address_labels(before.get("resource_labels", MISSING))
                          + "; after=" + classify_address_labels(after.get("resource_labels", MISSING)))
