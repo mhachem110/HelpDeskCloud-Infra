@@ -1034,16 +1034,38 @@ class GuardTests(unittest.TestCase):
         self.plan["resource_drift"] = [label_drift(), metadata_drift()]
         self.assertEqual(check_plan(self.plan), "no_changes")
 
-    def test_gke_label_and_exact_project_iam_etag_readbacks_are_permitted(self):
+    def test_gke_and_project_iam_project_number_readbacks_are_permitted(self):
         set_prior_phase7(self.plan, PHASE7)
         for change in self.plan["resource_changes"]:
             change["change"]["actions"] = ["no-op"]
-        drift = [gke_resource_labels_drift()]
-        drift.extend(project_iam_etag_drift(address) for address in (
+        cluster_drift = gke_resource_labels_drift()
+        for snapshot in (cluster_drift["change"]["before"], cluster_drift["change"]["after"]):
+            snapshot["project"] = "260283083469"
+            snapshot["network"] = (
+                "https://www.googleapis.com/compute/v1/projects/260283083469/global/networks/"
+                "helpdeskcloud-dev-vpc")
+            snapshot["subnetwork"] = (
+                "https://www.googleapis.com/compute/v1/projects/260283083469/regions/us-east1/subnetworks/"
+                "helpdeskcloud-dev-subnet")
+        cluster_planned = resource(self.plan, "google_container_cluster.dev[0]")["values"]
+        cluster_planned["project"] = "260283083469"
+        cluster_planned["network"] = (
+            "https://www.googleapis.com/compute/v1/projects/260283083469/global/networks/"
+            "helpdeskcloud-dev-vpc")
+        cluster_planned["subnetwork"] = (
+            "https://www.googleapis.com/compute/v1/projects/260283083469/regions/us-east1/subnetworks/"
+            "helpdeskcloud-dev-subnet")
+        drift = [cluster_drift]
+        iam_drift = [project_iam_etag_drift(address) for address in (
             "google_project_iam_member.dev_app_cloudsql[0]",
             "google_project_iam_member.dev_gke_node_runtime[0]",
             "google_project_iam_member.dev_migration_cloudsql[0]",
-        ))
+        )]
+        for entry in iam_drift:
+            entry["change"]["before"]["project"] = "260283083469"
+            entry["change"]["after"]["project"] = "260283083469"
+            resource(self.plan, entry["address"])["values"]["project"] = "260283083469"
+        drift.extend(iam_drift)
         self.plan["resource_drift"] = drift
         self.assertEqual(check_plan(self.plan), "no_changes")
 
@@ -1064,6 +1086,18 @@ class GuardTests(unittest.TestCase):
             with self.subTest(before=before_labels, after=after_labels):
                 self.assertTrue(permitted_drift(drift))
 
+    def test_gke_exact_project_number_readbacks_are_permitted(self):
+        drift = gke_resource_labels_drift()
+        for snapshot in (drift["change"]["before"], drift["change"]["after"]):
+            snapshot["project"] = "260283083469"
+            snapshot["network"] = (
+                "https://www.googleapis.com/compute/v1/projects/260283083469/global/networks/"
+                "helpdeskcloud-dev-vpc")
+            snapshot["subnetwork"] = (
+                "https://www.googleapis.com/compute/v1/projects/260283083469/regions/us-east1/subnetworks/"
+                "helpdeskcloud-dev-subnet")
+        self.assertTrue(permitted_drift(drift))
+
     def test_project_iam_missing_etag_readback_is_permitted(self):
         address = "google_project_iam_member.dev_app_cloudsql[0]"
         for before_etag, after_etag in ((None, "etag-after"), ("", "etag-after"),
@@ -1076,6 +1110,34 @@ class GuardTests(unittest.TestCase):
             drift["change"][missing_side].pop("etag")
             with self.subTest(missing_side=missing_side):
                 self.assertTrue(permitted_drift(drift))
+
+    def test_project_iam_exact_project_number_readback_is_permitted(self):
+        drift = project_iam_etag_drift("google_project_iam_member.dev_app_cloudsql[0]")
+        drift["change"]["before"]["project"] = "260283083469"
+        drift["change"]["after"]["project"] = "260283083469"
+        self.assertTrue(permitted_drift(drift))
+
+    def test_gke_and_project_iam_diagnostic_classifies_project_number_without_values(self):
+        cluster = gke_resource_labels_drift()
+        for snapshot in (cluster["change"]["before"], cluster["change"]["after"]):
+            snapshot["project"] = "260283083469"
+            snapshot["network"] = (
+                "https://www.googleapis.com/compute/v1/projects/260283083469/global/networks/"
+                "helpdeskcloud-dev-vpc")
+            snapshot["subnetwork"] = (
+                "https://www.googleapis.com/compute/v1/projects/260283083469/regions/us-east1/subnetworks/"
+                "helpdeskcloud-dev-subnet")
+        iam = project_iam_etag_drift("google_project_iam_member.dev_app_cloudsql[0]")
+        iam["change"]["before"]["project"] = "260283083469"
+        iam["change"]["after"]["project"] = "260283083469"
+        plan = {"resource_drift": [cluster, iam]}
+        report = "\n".join(diagnose_drift(plan))
+        self.assertIn("project representation: before=project number; after=project number", report)
+        self.assertIn("network self-link: before=expected; after=expected", report)
+        self.assertIn("before IAM role and member: expected", report)
+        self.assertIn("etag representation: before=non-empty token; after=non-empty token", report)
+        self.assertNotIn("etag-before", report)
+        self.assertNotIn("etag-after", report)
 
     def test_gke_label_drift_rejects_unexpected_labels_or_cluster_changes(self):
         for mutate in (
