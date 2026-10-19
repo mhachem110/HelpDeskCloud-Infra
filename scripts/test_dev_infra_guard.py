@@ -62,9 +62,15 @@ def fixture():
             "secret_manager_config": [{"enabled": True}], "release_channel": [{"channel": "REGULAR"}],
             "cluster_autoscaling": [{"auto_provisioning_defaults": [{"service_account": node}]}],
         },
-        "google_service_account.dev_gke_nodes[0]": {"project": project, "account_id": "helpdesk-gke-node-dev"},
-        "google_service_account.dev_app[0]": {"project": project, "account_id": "helpdesk-app-dev"},
-        "google_service_account.dev_migration[0]": {"project": project, "account_id": "helpdesk-migrate-dev"},
+        "google_service_account.dev_gke_nodes[0]": {"project": project, "account_id": "helpdesk-gke-node-dev",
+            "email": node, "member": f"serviceAccount:{node}",
+            "name": f"projects/{project}/serviceAccounts/{node}"},
+        "google_service_account.dev_app[0]": {"project": project, "account_id": "helpdesk-app-dev",
+            "email": app, "member": f"serviceAccount:{app}",
+            "name": f"projects/{project}/serviceAccounts/{app}"},
+        "google_service_account.dev_migration[0]": {"project": project, "account_id": "helpdesk-migrate-dev",
+            "email": migration, "member": f"serviceAccount:{migration}",
+            "name": f"projects/{project}/serviceAccounts/{migration}"},
         "google_project_iam_member.dev_gke_node_runtime[0]": {"project": project, "role": "roles/container.defaultNodeServiceAccount", "member": f"serviceAccount:{node}"},
         "google_project_iam_member.dev_app_cloudsql[0]": {"project": project, "role": "roles/cloudsql.client", "member": f"serviceAccount:{app}"},
         "google_project_iam_member.dev_migration_cloudsql[0]": {"project": project, "role": "roles/cloudsql.client", "member": f"serviceAccount:{migration}"},
@@ -72,10 +78,10 @@ def fixture():
             "project": project, "location": "us-east1", "repository": "helpdeskcloud-dev-images",
             "role": "roles/artifactregistry.reader", "member": f"serviceAccount:{node}"},
         "google_service_account_iam_member.dev_app_workload_identity[0]": {
-            "role": "roles/iam.workloadIdentityUser",
+            "role": "roles/iam.workloadIdentityUser", "service_account_id": f"projects/{project}/serviceAccounts/{app}",
             "member": f"serviceAccount:{project}.svc.id.goog[helpdesk-dev/helpdesk-dev-app]"},
         "google_service_account_iam_member.dev_migration_workload_identity[0]": {
-            "role": "roles/iam.workloadIdentityUser",
+            "role": "roles/iam.workloadIdentityUser", "service_account_id": f"projects/{project}/serviceAccounts/{migration}",
             "member": f"serviceAccount:{project}.svc.id.goog[helpdesk-dev/helpdesk-dev-migrate]"},
         "google_secret_manager_secret.dev_app_connection[0]": {
             "project": project, "secret_id": "helpdesk-dev-db-connection", "deletion_protection": True,
@@ -84,9 +90,13 @@ def fixture():
             "project": project, "secret_id": "helpdesk-dev-db-admin-password", "deletion_protection": True,
             "replication": [{"auto": [{}]}]},
         "google_secret_manager_secret_iam_member.dev_app_secret_access[0]": {
-            "role": "roles/secretmanager.secretAccessor", "member": principal + "helpdesk-dev-app"},
+            "role": "roles/secretmanager.secretAccessor",
+            "secret_id": f"projects/{project}/secrets/helpdesk-dev-db-connection",
+            "member": principal + "helpdesk-dev-app"},
         "google_secret_manager_secret_iam_member.dev_admin_secret_access[0]": {
-            "role": "roles/secretmanager.secretAccessor", "member": principal + "helpdesk-dev-migrate"},
+            "role": "roles/secretmanager.secretAccessor",
+            "secret_id": f"projects/{project}/secrets/helpdesk-dev-db-admin-password",
+            "member": principal + "helpdesk-dev-migrate"},
     }
     config = {
         "root_module": {
@@ -109,15 +119,38 @@ def fixture():
                      "cluster_autoscaling": [{"auto_provisioning_defaults": [{
                          "service_account": {"references": ["google_service_account.dev_gke_nodes[0].email"]}}]}]}},
                 {"address": "google_artifact_registry_repository_iam_member.dev_gke_image_pull",
-                 "expressions": {"member": {"references": ["google_service_account.dev_gke_nodes[0].member"]}}},
+                 "expressions": {"role": {"constant_value": "roles/artifactregistry.reader"},
+                                 "member": {"references": ["google_service_account.dev_gke_nodes[0].member"]}}},
                 {"address": "google_service_account_iam_member.dev_app_workload_identity",
-                 "expressions": {"service_account_id": {"references": ["google_service_account.dev_app[0].name"]}}},
+                 "expressions": {"role": {"constant_value": "roles/iam.workloadIdentityUser"},
+                                 "service_account_id": {"references": ["google_service_account.dev_app[0].name"]}}},
                 {"address": "google_service_account_iam_member.dev_migration_workload_identity",
-                 "expressions": {"service_account_id": {"references": ["google_service_account.dev_migration[0].name"]}}},
+                 "expressions": {"role": {"constant_value": "roles/iam.workloadIdentityUser"},
+                                 "service_account_id": {"references": ["google_service_account.dev_migration[0].name"]}}},
                 {"address": "google_secret_manager_secret_iam_member.dev_app_secret_access",
-                 "expressions": {"secret_id": {"references": ["google_secret_manager_secret.dev_app_connection[0].id"]}}},
+                 "expressions": {"role": {"constant_value": "roles/secretmanager.secretAccessor"},
+                                 "secret_id": {"references": ["google_secret_manager_secret.dev_app_connection[0].id"]}}},
                 {"address": "google_secret_manager_secret_iam_member.dev_admin_secret_access",
-                 "expressions": {"secret_id": {"references": ["google_secret_manager_secret.dev_admin_password[0].id"]}}},
+                 "expressions": {"role": {"constant_value": "roles/secretmanager.secretAccessor"},
+                                 "secret_id": {"references": ["google_secret_manager_secret.dev_admin_password[0].id"]}}},
+                {"address": "google_service_account.dev_gke_nodes", "expressions": {
+                    "account_id": {"constant_value": "helpdesk-gke-node-dev"},
+                    "project": {"references": ["var.project_id"]}}},
+                {"address": "google_service_account.dev_app", "expressions": {
+                    "account_id": {"constant_value": "helpdesk-app-dev"},
+                    "project": {"references": ["var.project_id"]}}},
+                {"address": "google_service_account.dev_migration", "expressions": {
+                    "account_id": {"constant_value": "helpdesk-migrate-dev"},
+                    "project": {"references": ["var.project_id"]}}},
+                {"address": "google_project_iam_member.dev_gke_node_runtime", "expressions": {
+                    "role": {"constant_value": "roles/container.defaultNodeServiceAccount"},
+                    "member": {"references": ["google_service_account.dev_gke_nodes[0].member"]}}},
+                {"address": "google_project_iam_member.dev_app_cloudsql", "expressions": {
+                    "role": {"constant_value": "roles/cloudsql.client"},
+                    "member": {"references": ["google_service_account.dev_app[0].member"]}}},
+                {"address": "google_project_iam_member.dev_migration_cloudsql", "expressions": {
+                    "role": {"constant_value": "roles/cloudsql.client"},
+                    "member": {"references": ["google_service_account.dev_migration[0].member"]}}},
             ],
             "module_calls": {"dev_network": {"module": {"resources": [
                 {"address": "google_compute_subnetwork.this", "expressions": {
@@ -143,6 +176,66 @@ def fixture():
         "resource_changes": changes,
         "configuration": config,
     }
+
+
+def resource(plan, address):
+    return next(r for r in plan["planned_values"]["root_module"]["resources"]
+                if r["address"] == address)
+
+
+def set_nested(document, path, value):
+    current = document
+    for index, part in enumerate(path[:-1]):
+        next_part = path[index + 1]
+        if isinstance(part, int):
+            while len(current) <= part:
+                current.append({} if not isinstance(next_part, int) else [])
+            current = current[part]
+        else:
+            current = current.setdefault(part, [] if isinstance(next_part, int) else {})
+    last = path[-1]
+    if isinstance(last, int):
+        while len(current) <= last:
+            current.append(None)
+        current[last] = value
+    else:
+        current[last] = value
+
+
+def mark_unknown(plan, address, field_path):
+    """Model Terraform plan JSON: null after-value plus matching after_unknown leaf."""
+    planned = resource(plan, address)["values"]
+    set_nested(planned, field_path, None)
+    change = next(c for c in plan["resource_changes"] if c["address"] == address)["change"]
+    set_nested(change.setdefault("after_unknown", {}), field_path, True)
+
+
+def unknown_identity_plan():
+    plan = fixture()
+    computed_fields = [
+        ("google_service_account.dev_gke_nodes[0]", ("email",)),
+        ("google_service_account.dev_gke_nodes[0]", ("member",)),
+        ("google_service_account.dev_gke_nodes[0]", ("name",)),
+        ("google_service_account.dev_app[0]", ("email",)),
+        ("google_service_account.dev_app[0]", ("member",)),
+        ("google_service_account.dev_app[0]", ("name",)),
+        ("google_service_account.dev_migration[0]", ("email",)),
+        ("google_service_account.dev_migration[0]", ("member",)),
+        ("google_service_account.dev_migration[0]", ("name",)),
+        ("google_container_cluster.dev[0]",
+         ("cluster_autoscaling", 0, "auto_provisioning_defaults", 0, "service_account")),
+        ("google_project_iam_member.dev_gke_node_runtime[0]", ("member",)),
+        ("google_project_iam_member.dev_app_cloudsql[0]", ("member",)),
+        ("google_project_iam_member.dev_migration_cloudsql[0]", ("member",)),
+        ("google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]", ("member",)),
+        ("google_service_account_iam_member.dev_app_workload_identity[0]", ("service_account_id",)),
+        ("google_service_account_iam_member.dev_migration_workload_identity[0]", ("service_account_id",)),
+        ("google_secret_manager_secret_iam_member.dev_app_secret_access[0]", ("secret_id",)),
+        ("google_secret_manager_secret_iam_member.dev_admin_secret_access[0]", ("secret_id",)),
+    ]
+    for address, field_path in computed_fields:
+        mark_unknown(plan, address, field_path)
+    return plan
 
 
 def label_drift():
@@ -281,6 +374,43 @@ class GuardTests(unittest.TestCase):
 
     def test_exact_phase7_creations(self):
         self.assertEqual(check_plan(self.plan), "apply")
+
+    def test_exact_after_unknown_computed_identity_values_allow_initial_creation(self):
+        self.assertEqual(check_plan(unknown_identity_plan()), "apply")
+
+    def test_null_computed_identity_without_after_unknown_marker_is_rejected(self):
+        plan = unknown_identity_plan()
+        address = "google_project_iam_member.dev_app_cloudsql[0]"
+        change = next(c for c in plan["resource_changes"] if c["address"] == address)["change"]
+        del change["after_unknown"]["member"]
+        with self.assertRaisesRegex(ValueError, "project IAM member"):
+            check_plan(plan)
+
+    def test_unknown_iam_identity_requires_the_exact_service_account_reference(self):
+        plan = unknown_identity_plan()
+        expression = next(r for r in plan["configuration"]["root_module"]["resources"]
+                          if r["address"] == "google_project_iam_member.dev_app_cloudsql")
+        expression["expressions"]["member"]["references"] = ["google_service_account.dev_migration[0].member"]
+        with self.assertRaisesRegex(ValueError, "unexpected Terraform reference"):
+            check_plan(plan)
+
+    def test_unknown_gke_node_identity_requires_the_exact_node_account_reference(self):
+        plan = unknown_identity_plan()
+        cluster = next(r for r in plan["configuration"]["root_module"]["resources"]
+                       if r["address"] == "google_container_cluster.dev")
+        cluster["expressions"]["cluster_autoscaling"][0]["auto_provisioning_defaults"][0]["service_account"][
+            "references"] = ["google_service_account.dev_app[0].email"]
+        with self.assertRaisesRegex(ValueError, "GKE node identity"):
+            check_plan(plan)
+
+    def test_invalid_iam_role_or_identity_is_rejected(self):
+        for field, bad in (("role", "roles/editor"),
+                           ("member", "serviceAccount:wrong@wrong-project.iam.gserviceaccount.com")):
+            plan = fixture()
+            planned = resource(plan, "google_project_iam_member.dev_app_cloudsql[0]")
+            planned["values"][field] = bad
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                check_plan(plan)
 
     def test_no_changes_even_when_no_op_entries_are_omitted(self):
         for change in self.plan["resource_changes"]:
