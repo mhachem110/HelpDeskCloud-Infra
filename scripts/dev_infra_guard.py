@@ -60,8 +60,16 @@ APPLY12_REMAINING = frozenset(PHASE7) - APPLY12_COMPLETED
 BASE = NETWORK | PHASE6
 EXPECTED = BASE | PHASE7
 VPC_LINK = f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/{VPC}"
+VPC_LINKS = tuple(
+    f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{VPC}"
+    for project in (PROJECT, PROJECT_NUMBER)
+)
 VPC_PATH = f"projects/{PROJECT}/global/networks/{VPC}"
 VPC_PEERING_PATH = f"projects/{PROJECT_NUMBER}/global/networks/{VPC}"
+SUBNET_LINKS = tuple(
+    f"https://www.googleapis.com/compute/v1/projects/{project}/regions/us-east1/subnetworks/{SUBNET}"
+    for project in (PROJECT, PROJECT_NUMBER)
+)
 PSA_ADDRESS = PREFIX + "google_compute_global_address.private_services"
 SUBNET_ADDRESS = PREFIX + "google_compute_subnetwork.this"
 REGISTRY_ADDRESS = "google_artifact_registry_repository.dev_images[0]"
@@ -360,12 +368,12 @@ def check_phase7(values, plan, creates):
         return values[address]
 
     cluster = item("google_container_cluster.dev[0]")
-    require(cluster.get("project") == PROJECT and cluster.get("name") == "helpdeskcloud-dev-gke"
+    require(cluster.get("project") in (PROJECT, PROJECT_NUMBER)
+            and cluster.get("name") == "helpdeskcloud-dev-gke"
             and cluster.get("location") == "us-east1", "Unexpected GKE identity")
     require(cluster.get("enable_autopilot") is True and cluster.get("deletion_protection") is True,
             "GKE Autopilot or deletion protection is missing")
-    require(cluster.get("network") == VPC_LINK and cluster.get("subnetwork") ==
-            f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/regions/us-east1/subnetworks/{SUBNET}",
+    require(cluster.get("network") in VPC_LINKS and cluster.get("subnetwork") in SUBNET_LINKS,
             "GKE must use the existing Dev VPC and subnet")
     require(cluster.get("networking_mode") == "VPC_NATIVE", "GKE must use alias IP networking")
     ranges = only_item(cluster.get("ip_allocation_policy"), "Missing GKE secondary ranges")
@@ -413,7 +421,7 @@ def check_phase7(values, plan, creates):
         ("google_project_iam_member.dev_migration_cloudsql[0]", "roles/cloudsql.client", "helpdesk-migrate-dev"),
     ):
         grant = item(address)
-        require(grant.get("project") == PROJECT and grant.get("role") == role,
+        require(grant.get("project") in (PROJECT, PROJECT_NUMBER) and grant.get("role") == role,
                 f"Unexpected project IAM grant: {address}")
         expected_or_unknown(grant, address, ("member",),
                             f"serviceAccount:{email}@{PROJECT}.iam.gserviceaccount.com",
@@ -504,14 +512,15 @@ def permitted_drift(entry):
                 == {key: value for key, value in after.items() if key not in SECRET_EMPTY_MAP_FIELDS})
 
     if address == CLUSTER_ADDRESS:
-        expected_identity = (PROJECT, "helpdeskcloud-dev-gke", "us-east1")
-        if (tuple(before.get(key) for key in ("project", "name", "location")) != expected_identity
-                or tuple(after.get(key) for key in ("project", "name", "location")) != expected_identity
+        expected_identity = ("helpdeskcloud-dev-gke", "us-east1")
+        if (before.get("project") not in (PROJECT, PROJECT_NUMBER)
+                or after.get("project") not in (PROJECT, PROJECT_NUMBER)
+                or tuple(before.get(key) for key in ("name", "location")) != expected_identity
+                or tuple(after.get(key) for key in ("name", "location")) != expected_identity
                 or before.get("deletion_protection") is not True
                 or after.get("deletion_protection") is not True
-                or before.get("network") != VPC_LINK or after.get("network") != VPC_LINK
-                or before.get("subnetwork") != f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/regions/us-east1/subnetworks/{SUBNET}"
-                or after.get("subnetwork") != f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/regions/us-east1/subnetworks/{SUBNET}"
+                or before.get("network") not in VPC_LINKS or after.get("network") not in VPC_LINKS
+                or before.get("subnetwork") not in SUBNET_LINKS or after.get("subnetwork") not in SUBNET_LINKS
                 or before.get("networking_mode") != "VPC_NATIVE"
                 or after.get("networking_mode") != "VPC_NATIVE"
                 or before.get("enable_autopilot") is not True
@@ -554,7 +563,8 @@ def permitted_drift(entry):
 
     if address in PROJECT_IAM_READBACKS:
         expected_role, expected_member = PROJECT_IAM_READBACKS[address]
-        if any(snapshot.get("project") != PROJECT or snapshot.get("role") != expected_role
+        if any(snapshot.get("project") not in (PROJECT, PROJECT_NUMBER)
+               or snapshot.get("role") != expected_role
                or snapshot.get("member") != expected_member
                for snapshot in (before, after)):
             return False
@@ -783,6 +793,26 @@ def classify_address_labels(value):
     return known_value(value, label=True)
 
 
+def project_readback_status(value):
+    if value == PROJECT:
+        return "project id"
+    if value == PROJECT_NUMBER:
+        return "project number"
+    return "unexpected (value withheld)"
+
+
+def etag_readback_status(value):
+    if value is MISSING:
+        return "missing"
+    if value is None:
+        return "null"
+    if value == "":
+        return "empty"
+    if isinstance(value, str):
+        return "non-empty token"
+    return "unexpected type (value withheld)"
+
+
 def empty_map_status(value):
     """Classify optional Secret Manager maps without exposing keys or values."""
     if value is MISSING:
@@ -861,6 +891,32 @@ def diagnose_drift(plan):
                      f"security-sensitive paths={'yes' if sensitive else 'possible'}; "
                      f"paths={', '.join(paths)}")
         before, after = change.get("before"), change.get("after")
+        if entry.get("address") == CLUSTER_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
+            lines.append("  project representation: before=" + project_readback_status(before.get("project", MISSING))
+                         + "; after=" + project_readback_status(after.get("project", MISSING)))
+            lines.append("  network self-link: before="
+                         + ("expected" if before.get("network") in VPC_LINKS else "unexpected (value withheld)")
+                         + "; after="
+                         + ("expected" if after.get("network") in VPC_LINKS else "unexpected (value withheld)"))
+            lines.append("  subnetwork self-link: before="
+                         + ("expected" if before.get("subnetwork") in SUBNET_LINKS else "unexpected (value withheld)")
+                         + "; after="
+                         + ("expected" if after.get("subnetwork") in SUBNET_LINKS else "unexpected (value withheld)"))
+            lines.append("  resource_labels: before="
+                         + classify_address_labels(before.get("resource_labels", MISSING))
+                         + "; after=" + classify_address_labels(after.get("resource_labels", MISSING)))
+        if entry.get("address") in PROJECT_IAM_READBACKS and isinstance(before, dict) and isinstance(after, dict):
+            expected_role, expected_member = PROJECT_IAM_READBACKS[entry["address"]]
+            lines.append("  project representation: before=" + project_readback_status(before.get("project", MISSING))
+                         + "; after=" + project_readback_status(after.get("project", MISSING)))
+            for snapshot_name, snapshot in (("before", before), ("after", after)):
+                identity_matches = (snapshot.get("role") == expected_role
+                                    and snapshot.get("member") == expected_member)
+                lines.append("  " + snapshot_name + " IAM role and member: "
+                             + ("expected" if identity_matches else "unexpected (values withheld)"))
+            lines.append("  etag representation: before="
+                         + etag_readback_status(before.get("etag", MISSING))
+                         + "; after=" + etag_readback_status(after.get("etag", MISSING)))
         if entry.get("address") == PSA_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
             lines.append("  labels: before=" + known_value(before.get("labels", MISSING), label=True)
                          + "; after=" + classify_address_labels(after.get("labels", MISSING)))
