@@ -47,9 +47,23 @@ It receives no project-wide Artifact Registry role, Terraform state access, Clou
 
 ## Plan and apply review
 
-`scripts/dev_infra_guard.py` now accepts only this exact four-resource Phase 8 creation batch after the complete Phase 7 inventory exists. It rejects partial batches, changed or deleted existing resources, broader WIF claims, a different subject, and a project-wide repository role. The protected Apply workflow's read-only post-apply check also verifies the new service account, provider, impersonation policy, and repository Writer binding.
+`scripts/dev_infra_guard.py` accepts this exact four-resource Phase 8 creation batch after the complete Phase 7 inventory exists. It rejects partial batches, changed or deleted existing resources, broader WIF claims, a different subject, and a project-wide repository role. The protected Apply workflow's read-only post-apply check also verifies the new service account, provider, impersonation policy, and repository Writer binding.
 
-Terraform CI runs on a feature PR to `dev` with backend access disabled and no cloud credentials. The remote Dev plan is available only from the trusted `dev` branch through the existing manual Plan workflow and existing infrastructure OIDC identity. After review and merge, a reviewer can dispatch that Plan workflow. No Apply has been run for this change.
+### Apply #21 partial completion and recovery
+
+Terraform Dev Apply #21 created the publisher service account, its exact-subject Workload Identity User binding, and the repository-scoped Artifact Registry Writer binding. Creation of `google_iam_workload_identity_pool_provider.dev_app_support_images[0]` failed because the Terraform identity lacks `iam.workloadIdentityPoolProviders.create` on the existing `helpdesk-github` pool. No permission change or manual provider creation is included in this recovery.
+
+The recovery guard accepts only a remote prior state containing the complete Phase 7 inventory and exactly these three Phase 8 resources, each with the approved identity, subject, role, project, location, and repository values:
+
+- `google_service_account.dev_app_support_image_publisher[0]`
+- `google_service_account_iam_member.dev_app_support_images_wif[0]`
+- `google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]`
+
+The only allowed creation is `google_iam_workload_identity_pool_provider.dev_app_support_images[0]`. Other partial inventories, another creation, any update, replacement, or deletion remain blocked. The guard checks the three existing resources directly in Terraform's prior state as well as checking all planned values.
+
+After Apply #21, the read-only Terraform Dev Plan reported exactly one resource to add, no changes, and no destroys. It also reported an etag-only readback for the existing GKE image-pull grant because the new Writer member changed the repository IAM policy etag. The guard permits only a different, non-empty etag when the existing reader's project, location, repository, role, member, and all other state fields remain identical. Other repository IAM drift remains blocked.
+
+Terraform CI runs on a feature PR to `dev` with backend access disabled and no cloud credentials. The remote Dev plan is available only from the trusted `dev` branch through the existing manual Plan workflow and existing infrastructure OIDC identity. After review and merge, a reviewer can dispatch that Plan workflow. The recovery PR changes only the plan guard, tests, and this runbook; it does not run Apply or alter the remote state.
 
 The existing `helpdesk-terraform-dev` role grants were not read from Cloud IAM in this branch. Before using the protected Apply workflow, verify that this infrastructure identity can:
 
@@ -58,6 +72,6 @@ The existing `helpdesk-terraform-dev` role grants were not read from Cloud IAM i
 - Create/read/update the new provider under the existing pool (`iam.workloadIdentityPoolProviders.create`, `.get`, `.update`). Pool creation permission is not needed.
 - Read and set IAM policy on the existing Artifact Registry repository (`artifactregistry.repositories.getIamPolicy`, `artifactregistry.repositories.setIamPolicy`).
 
-Grant only missing permissions to the infrastructure Terraform identity through a separately reviewed IAM change; do not grant the new publisher infrastructure privileges. Google documents these permissions in its [IAM role reference](https://docs.cloud.google.com/iam/docs/roles-permissions/iam), [WIF provider create API](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.locations.workloadIdentityPools.providers/create), and [Artifact Registry audit permission reference](https://docs.cloud.google.com/artifact-registry/docs/audit-logging). Also confirm the target provider ID is not already present. If it exists outside Terraform state, import and review it rather than attempting to recreate it.
+The Apply #21 failure confirms that `iam.workloadIdentityPoolProviders.create` is currently missing for the Terraform identity. Grant only that missing permission through a separately reviewed IAM change before the next protected Apply; do not grant the new publisher infrastructure privileges. Google documents these permissions in its [IAM role reference](https://docs.cloud.google.com/iam/docs/roles-permissions/iam), [WIF provider create API](https://docs.cloud.google.com/iam/docs/reference/rest/v1/projects.locations.workloadIdentityPools.providers/create), and [Artifact Registry audit permission reference](https://docs.cloud.google.com/artifact-registry/docs/audit-logging). The failed Apply and refreshed remote plan show the provider is the remaining resource; the recovery guard requires it to be absent from prior state before accepting its creation.
 
 The App publisher remains disabled until its dedicated provider/service account and scoped grant are reviewed, the protected Environment has required reviewers and a `dev` branch policy, and `DEV_SUPPORTING_IMAGES_PUBLISH_ENABLED` is explicitly set to `true`. Image publication remains a separate manual workflow dispatch and approval.
