@@ -55,7 +55,13 @@ PHASE8 = {
 }
 PHASE8_PROVIDER_ADDRESS = "google_iam_workload_identity_pool_provider.dev_app_support_images[0]"
 PHASE8_COMPLETED = frozenset(PHASE8) - {PHASE8_PROVIDER_ADDRESS}
-DEPLOYMENT_EVIDENCE_PATH_COUNT = 25
+PHASE9 = {
+    "google_service_account.dev_app_migration_runner[0]": "google_service_account",
+    "google_iam_workload_identity_pool_provider.dev_app_migration[0]": "google_iam_workload_identity_pool_provider",
+    "google_service_account_iam_member.dev_app_migration_runner_wif[0]": "google_service_account_iam_member",
+    "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]": "google_project_iam_member",
+}
+DEPLOYMENT_EVIDENCE_PATH_COUNT = 28
 ARTIFACT_READER_IAM_ADDRESS = "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]"
 SUPPORT_PUBLISHER_ACCOUNT_ID = "helpdesk-app-support-pub-dev"
 SUPPORT_PUBLISHER_DISPLAY_NAME = "helpdesk-app-support-image-publisher-dev"
@@ -91,6 +97,35 @@ SUPPORT_PUBLISHER_MEMBER = (
     f"principal://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/"
     f"workloadIdentityPools/helpdesk-github/subject/{SUPPORT_PUBLISHER_SUBJECT}"
 )
+MIGRATION_RUNNER_ACCOUNT_ID = "helpdesk-app-migr-runner-dev"
+MIGRATION_RUNNER_DISPLAY_NAME = "helpdesk-app-migration-runner-dev"
+MIGRATION_RUNNER_EMAIL = f"{MIGRATION_RUNNER_ACCOUNT_ID}@{PROJECT}.iam.gserviceaccount.com"
+MIGRATION_RUNNER_PROVIDER_ID = "github-app-migration-dev"
+MIGRATION_RUNNER_SUBJECT = (
+    "repo:mhachem110@150286776/HelpDeskCloud-App@1423008128:"
+    "environment:dev-db-migration"
+)
+MIGRATION_RUNNER_WORKFLOW_REF = (
+    "mhachem110/HelpDeskCloud-App/.github/workflows/"
+    "dev-db-migration.yml@refs/heads/dev"
+)
+MIGRATION_RUNNER_CONDITION = (
+    'attribute.repository == "mhachem110/HelpDeskCloud-App" && '
+    'attribute.repository_id == "1423008128" && '
+    'attribute.repository_owner_id == "150286776" && '
+    'attribute.ref == "refs/heads/dev" && '
+    'attribute.environment == "dev-db-migration" && '
+    'attribute.workflow_ref == "mhachem110/HelpDeskCloud-App/.github/workflows/'
+    'dev-db-migration.yml@refs/heads/dev"'
+)
+MIGRATION_RUNNER_MEMBER = (
+    f"principal://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/"
+    f"workloadIdentityPools/helpdesk-github/subject/{MIGRATION_RUNNER_SUBJECT}"
+)
+MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION = (
+    'resource.type == "container.googleapis.com/Cluster" && '
+    f'resource.name == "projects/{PROJECT}/locations/us-east1/clusters/helpdeskcloud-dev-gke"'
+)
 # Apply #12 logs confirm that these six Phase 7 resources completed before the
 # remaining operations failed. Recovery is allowed only if the fresh plan's
 # prior state and refresh show precisely this inventory.
@@ -104,7 +139,7 @@ APPLY12_COMPLETED = frozenset({
 })
 APPLY12_REMAINING = frozenset(PHASE7) - APPLY12_COMPLETED
 BASE = NETWORK | PHASE6
-EXPECTED = BASE | PHASE7 | PHASE8
+EXPECTED = BASE | PHASE7 | PHASE8 | PHASE9
 VPC_LINK = f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/{VPC}"
 VPC_SELF_LINKS = tuple(
     f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{VPC}"
@@ -162,6 +197,7 @@ STRICT_REFERENCE_PARENTS = {
     "google_service_account.dev_app[0]": "google_service_account.dev_app",
     "google_service_account.dev_migration[0]": "google_service_account.dev_migration",
     "google_service_account.dev_app_support_image_publisher[0]": "google_service_account.dev_app_support_image_publisher",
+    "google_service_account.dev_app_migration_runner[0]": "google_service_account.dev_app_migration_runner",
     "google_artifact_registry_repository.dev_images[0]": "google_artifact_registry_repository.dev_images",
     "google_secret_manager_secret.dev_app_connection[0]": "google_secret_manager_secret.dev_app_connection",
     "google_secret_manager_secret.dev_admin_password[0]": "google_secret_manager_secret.dev_admin_password",
@@ -349,6 +385,62 @@ def check_phase8(values, plan, creates, addresses=None):
                             changes, creates, "supporting-image repository writer")
 
 
+def check_phase9(values, plan, creates):
+    """Validate the dedicated App migration-runner identity and cluster-only access."""
+    changes = {c.get("address"): c for c in plan.get("resource_changes", [])}
+    account_address = "google_service_account.dev_app_migration_runner[0]"
+    account = values[account_address]
+    require(account.get("project") == PROJECT
+            and account.get("account_id") == MIGRATION_RUNNER_ACCOUNT_ID
+            and account.get("display_name") == MIGRATION_RUNNER_DISPLAY_NAME,
+            "Unexpected Dev migration-runner service account")
+    for field, expected in (
+        ("email", MIGRATION_RUNNER_EMAIL),
+        ("member", f"serviceAccount:{MIGRATION_RUNNER_EMAIL}"),
+        ("name", f"projects/{PROJECT}/serviceAccounts/{MIGRATION_RUNNER_EMAIL}"),
+    ):
+        expected_or_unknown(account, account_address, (field,), expected, changes, creates,
+                            f"migration-runner service-account {field}")
+
+    provider_address = "google_iam_workload_identity_pool_provider.dev_app_migration[0]"
+    provider = values[provider_address]
+    require(provider.get("project") == PROJECT
+            and provider.get("workload_identity_pool_id") == "helpdesk-github"
+            and provider.get("workload_identity_pool_provider_id") == MIGRATION_RUNNER_PROVIDER_ID
+            and provider.get("disabled") is False,
+            "Unexpected Dev migration-runner Workload Identity provider")
+    require(provider.get("attribute_mapping") == SUPPORT_PUBLISHER_MAPPING,
+            "Unexpected Dev migration-runner provider attribute mapping")
+    require(normalize_cel(provider.get("attribute_condition")) == MIGRATION_RUNNER_CONDITION,
+            "Dev migration-runner provider trust condition is not exact")
+    oidc = only_item(provider.get("oidc"), "Expected one Dev migration-runner OIDC issuer")
+    require(oidc.get("issuer_uri") == "https://token.actions.githubusercontent.com",
+            "Unexpected Dev migration-runner OIDC issuer")
+
+    binding_address = "google_service_account_iam_member.dev_app_migration_runner_wif[0]"
+    binding = values[binding_address]
+    require(binding.get("role") == "roles/iam.workloadIdentityUser"
+            and binding.get("member") == MIGRATION_RUNNER_MEMBER,
+            "Migration-runner impersonation binding must use the exact verified Environment subject")
+    expected_or_unknown(binding, binding_address, ("service_account_id",),
+                        f"projects/{PROJECT}/serviceAccounts/{MIGRATION_RUNNER_EMAIL}",
+                        changes, creates, "migration-runner Workload Identity target")
+
+    viewer_address = "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]"
+    viewer = values[viewer_address]
+    require(viewer.get("project") in (PROJECT, PROJECT_NUMBER)
+            and viewer.get("role") == "roles/container.clusterViewer",
+            "Migration runner must receive only the reviewed GKE clusterViewer role")
+    expected_or_unknown(viewer, viewer_address, ("member",),
+                        f"serviceAccount:{MIGRATION_RUNNER_EMAIL}", changes, creates,
+                        "migration-runner GKE cluster identity")
+    condition = only_item(viewer.get("condition"), "Expected one migration-runner cluster IAM condition")
+    require(condition.get("title") == "helpdesk-dev-migration-runner-cluster"
+            and condition.get("description") == "Allow cluster discovery only for the existing Dev GKE cluster"
+            and normalize_cel(condition.get("expression")) == MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
+            "Migration-runner clusterViewer condition must match only the existing Dev GKE cluster")
+
+
 def check_references(plan):
     root = plan.get("configuration", {}).get("root_module", {})
     module = root.get("module_calls", {}).get("dev_network", {}).get("module", {})
@@ -416,6 +508,8 @@ def check_references(plan):
         ("google_service_account_iam_member.dev_app_workload_identity", "service_account_id", "google_service_account.dev_app[0].name"),
         ("google_service_account_iam_member.dev_migration_workload_identity", "service_account_id", "google_service_account.dev_migration[0].name"),
         ("google_service_account_iam_member.dev_app_support_images_wif", "service_account_id", "google_service_account.dev_app_support_image_publisher[0].name"),
+        ("google_service_account_iam_member.dev_app_migration_runner_wif", "service_account_id", "google_service_account.dev_app_migration_runner[0].name"),
+        ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "member", "google_service_account.dev_app_migration_runner[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
     ):
@@ -428,6 +522,7 @@ def check_references(plan):
         ("google_service_account.dev_app", "helpdesk-app-dev"),
         ("google_service_account.dev_migration", "helpdesk-migrate-dev"),
         ("google_service_account.dev_app_support_image_publisher", SUPPORT_PUBLISHER_ACCOUNT_ID),
+        ("google_service_account.dev_app_migration_runner", MIGRATION_RUNNER_ACCOUNT_ID),
     ):
         expressions = resources.get(address, {}).get("expressions", {})
         require(expressions.get("account_id", {}).get("constant_value") == account_id,
@@ -450,6 +545,10 @@ def check_references(plan):
          "service_account_id", "google_service_account.dev_migration[0].name"),
         ("google_service_account_iam_member.dev_app_support_images_wif", "roles/iam.workloadIdentityUser",
          "service_account_id", "google_service_account.dev_app_support_image_publisher[0].name"),
+        ("google_service_account_iam_member.dev_app_migration_runner_wif", "roles/iam.workloadIdentityUser",
+         "service_account_id", "google_service_account.dev_app_migration_runner[0].name"),
+        ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "roles/container.clusterViewer",
+         "member", "google_service_account.dev_app_migration_runner[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "roles/secretmanager.secretAccessor",
          "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "roles/secretmanager.secretAccessor",
@@ -474,6 +573,50 @@ def check_references(plan):
     require(provider_expressions.get("attribute_mapping", {}).get("constant_value")
             == SUPPORT_PUBLISHER_MAPPING,
             "Supporting-image provider mapping expression is not exact")
+
+    migration_provider = resources.get("google_iam_workload_identity_pool_provider.dev_app_migration", {})
+    migration_provider_expressions = migration_provider.get("expressions", {})
+    require(migration_provider_expressions.get("workload_identity_pool_id", {}).get("constant_value")
+            == "helpdesk-github"
+            and migration_provider_expressions.get("workload_identity_pool_provider_id", {}).get("constant_value")
+            == MIGRATION_RUNNER_PROVIDER_ID,
+            "Unexpected migration-runner provider identity expression")
+    require(normalize_cel(migration_provider_expressions.get("attribute_condition", {}).get("constant_value"))
+            == MIGRATION_RUNNER_CONDITION
+            and migration_provider_expressions.get("attribute_mapping", {}).get("constant_value")
+            == SUPPORT_PUBLISHER_MAPPING,
+            "Migration-runner provider trust expression or mapping is not exact")
+
+    migration_binding = resources.get("google_service_account_iam_member.dev_app_migration_runner_wif", {})
+    migration_binding_expressions = migration_binding.get("expressions", {})
+    require(migration_binding_expressions.get("role", {}).get("constant_value")
+            == "roles/iam.workloadIdentityUser"
+            and migration_binding_expressions.get("member", {}).get("constant_value")
+            == MIGRATION_RUNNER_MEMBER,
+            "Migration-runner impersonation role or exact Environment subject is not configured")
+    references(migration_binding_expressions.get("service_account_id", {}),
+               "google_service_account.dev_app_migration_runner[0].name",
+               "migration-runner Workload Identity target", exact=True)
+
+    cluster_viewer = resources.get("google_project_iam_member.dev_app_migration_runner_cluster_viewer", {})
+    cluster_viewer_expressions = cluster_viewer.get("expressions", {})
+    require(cluster_viewer_expressions.get("role", {}).get("constant_value")
+            == "roles/container.clusterViewer",
+            "Migration-runner cluster lookup role is not exact")
+    references(cluster_viewer_expressions.get("project", {}), "var.project_id",
+               "migration-runner IAM project", exact=True)
+    references(cluster_viewer_expressions.get("member", {}),
+               "google_service_account.dev_app_migration_runner[0].member",
+               "migration-runner cluster lookup identity", exact=True)
+    viewer_condition = only_item(cluster_viewer_expressions.get("condition"),
+                                 "Missing migration-runner clusterViewer condition")
+    require(viewer_condition.get("title", {}).get("constant_value")
+            == "helpdesk-dev-migration-runner-cluster"
+            and viewer_condition.get("description", {}).get("constant_value")
+            == "Allow cluster discovery only for the existing Dev GKE cluster"
+            and normalize_cel(viewer_condition.get("expression", {}).get("constant_value"))
+            == MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
+            "Migration-runner clusterViewer condition must be exactly cluster-scoped")
 
     support_binding = resources.get("google_service_account_iam_member.dev_app_support_images_wif", {})
     support_binding_expressions = support_binding.get("expressions", {})
@@ -929,6 +1072,9 @@ def check_plan(plan):
     support_creates = {address for address in PHASE8 if actions.get(address) == ["create"]}
     require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"]) for address in PHASE8),
             "Phase 8 update, replacement, or deletion requires review")
+    migration_runner_creates = {address for address in PHASE9 if actions.get(address) == ["create"]}
+    require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"]) for address in PHASE9),
+            "Phase 9 update, replacement, or deletion requires review")
     prior_state = plan.get("prior_state")
     require(isinstance(prior_state, dict), "Terraform prior state is required to classify the Dev plan")
     prior = prior_state.get("values", {}).get("root_module")
@@ -946,6 +1092,7 @@ def check_plan(plan):
             "Terraform prior state is missing an existing Phase 5-6 resource")
     prior_phase7 = prior_addresses & set(PHASE7)
     prior_phase8 = prior_addresses & set(PHASE8)
+    prior_phase9 = prior_addresses & set(PHASE9)
     full_initial_create = creates == set(PHASE7) and not prior_phase7
     exact_apply12_recovery = creates == APPLY12_REMAINING and prior_phase7 == APPLY12_COMPLETED
     complete_no_changes = not creates and prior_phase7 == set(PHASE7)
@@ -962,11 +1109,21 @@ def check_plan(plan):
         and not prior_phase8 and support_creates == set(PHASE8)
     )
     support_images_complete = not support_creates and prior_phase8 == set(PHASE8)
+    migration_runner_initial_create = (
+        not creates and not support_creates
+        and prior_phase7 == set(PHASE7) and prior_phase8 == set(PHASE8)
+        and not prior_phase9 and migration_runner_creates == set(PHASE9)
+    )
+    migration_runner_complete = not migration_runner_creates and prior_phase9 == set(PHASE9)
+    require(not prior_phase9 or prior_phase9 == set(PHASE9),
+            "Partial Phase 9 migration-runner state requires review")
     require(full_initial_create or exact_apply12_recovery or complete_no_changes
             or exact_phase8_provider_recovery,
             "Partial or inconsistent Phase 7 state/creation batch requires review")
     require(support_images_initial_create or support_images_complete or exact_phase8_provider_recovery,
             "Phase 8 must be created as one exact batch after Phase 7, or already be complete")
+    require(migration_runner_initial_create or migration_runner_complete,
+            "Phase 9 migration-runner resources must be created as one exact batch after Phase 8, or already be complete")
     if exact_phase8_provider_recovery:
         prior_phase8_values = {
             resource["address"]: resource.get("values", {})
@@ -980,8 +1137,9 @@ def check_plan(plan):
     check_phase6(by_type)
     check_phase7(by_address, plan, creates)
     check_phase8(by_address, plan, support_creates)
+    check_phase9(by_address, plan, migration_runner_creates)
     check_references(plan)
-    return "apply" if creates or support_creates else "no_changes"
+    return "apply" if creates or support_creates or migration_runner_creates else "no_changes"
 
 
 SENSITIVE_PARTS = {"id", "name", "project", "region", "self_link", "network", "subnetwork", "ip_cidr_range",
@@ -1397,10 +1555,14 @@ def verify_deployment(paths):
     }.items():
         require(expected and outputs.get(key, {}).get("value") == expected, f"Terraform output {key} mismatch")
 
-    verify_phase7(*[read_json(path) for path in paths[10:20]], registry_iam, project_iam, outputs)
+    phase7_evidence = [read_json(path) for path in paths[10:20]]
+    app_secret_iam, admin_secret_iam = phase7_evidence[8], phase7_evidence[9]
+    verify_phase7(*phase7_evidence, registry_iam, project_iam, outputs)
     state = read_json(paths[20])
     verify_phase8(read_json(paths[21]), read_json(paths[22]), read_json(paths[23]),
                   registry_iam, project_iam)
+    verify_phase9(read_json(paths[24]), read_json(paths[25]), read_json(paths[26]),
+                  project_iam, app_secret_iam, admin_secret_iam, outputs)
     resources = state.get("values", {}).get("root_module", {}).get("resources", [])
     protected = {
         "google_container_cluster.dev[0]": "GKE",
@@ -1451,6 +1613,59 @@ def verify_phase8(publisher_sa, publisher_sa_iam, provider, registry_iam, projec
     require(not has_binding(project_iam, "roles/artifactregistry.writer", publisher_member)
             and not has_binding(project_iam, "roles/artifactregistry.admin", publisher_member),
             "Supporting-image publisher has a project-wide Artifact Registry grant")
+
+
+def verify_phase9(runner_sa, runner_sa_iam, provider, project_iam, app_secret_iam,
+                  admin_secret_iam, outputs):
+    """Verify that GitHub can only submit the reviewed namespace migration Job."""
+    require(runner_sa.get("email") == MIGRATION_RUNNER_EMAIL
+            and runner_sa.get("disabled") is not True,
+            "Migration-runner service account identity or status mismatch")
+    check_iam(runner_sa_iam, "migration-runner service account")
+    wif_bindings = [set(binding.get("members", [])) for binding in runner_sa_iam.get("bindings", [])
+                    if binding.get("role") == "roles/iam.workloadIdentityUser"]
+    require(wif_bindings == [{MIGRATION_RUNNER_MEMBER}]
+            and len(runner_sa_iam.get("bindings", [])) == 1,
+            "Migration-runner impersonation binding differs from the exact verified Environment subject")
+
+    expected_provider_names = {
+        f"projects/{PROJECT}/locations/global/workloadIdentityPools/helpdesk-github/providers/"
+        f"{MIGRATION_RUNNER_PROVIDER_ID}",
+        f"projects/{PROJECT_NUMBER}/locations/global/workloadIdentityPools/helpdesk-github/providers/"
+        f"{MIGRATION_RUNNER_PROVIDER_ID}",
+    }
+    require(provider.get("name") in expected_provider_names and provider.get("state") == "ACTIVE",
+            "Migration-runner Workload Identity provider identity or status mismatch")
+    require(provider.get("attributeMapping") == SUPPORT_PUBLISHER_MAPPING
+            and normalize_cel(provider.get("attributeCondition")) == MIGRATION_RUNNER_CONDITION
+            and provider.get("oidc", {}).get("issuerUri") == "https://token.actions.githubusercontent.com",
+            "Migration-runner provider trust configuration mismatch")
+
+    runner_member = f"serviceAccount:{MIGRATION_RUNNER_EMAIL}"
+    runner_project_bindings = [binding for binding in project_iam.get("bindings", [])
+                               if runner_member in binding.get("members", [])]
+    require(len(runner_project_bindings) == 1,
+            "Migration runner must have exactly one direct project IAM binding")
+    viewer = runner_project_bindings[0]
+    condition = viewer.get("condition", {})
+    require(viewer.get("role") == "roles/container.clusterViewer"
+            and condition.get("title") == "helpdesk-dev-migration-runner-cluster"
+            and condition.get("description") == "Allow cluster discovery only for the existing Dev GKE cluster"
+            and normalize_cel(condition.get("expression")) == MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
+            "Migration-runner GKE IAM access is not limited to the existing Dev cluster")
+
+    for policy, label in ((app_secret_iam, "application Secret Manager"),
+                          (admin_secret_iam, "migration Secret Manager")):
+        require(not any(runner_member in binding.get("members", [])
+                        and str(binding.get("role", "")).startswith("roles/secretmanager.")
+                        for binding in policy.get("bindings", [])),
+                f"Migration runner has direct access to the {label} resource")
+    require(not any(runner_member in binding.get("members", [])
+                    and str(binding.get("role", "")).startswith(("roles/cloudsql.", "roles/secretmanager."))
+                    for binding in project_iam.get("bindings", [])),
+            "Migration runner has direct Cloud SQL or Secret Manager project access")
+    require(outputs.get("migration_runner_service_account", {}).get("value") == MIGRATION_RUNNER_EMAIL,
+            "Terraform migration-runner service-account output mismatch")
 
 
 def verify_phase7(cluster, node_sa, app_sa, migration_sa, app_secret, admin_secret,
@@ -1577,7 +1792,8 @@ def main():
                              "SQL DATABASES OUTPUTS "
                              "CLUSTER NODE_SA APP_SA MIGRATION_SA APP_SECRET ADMIN_SECRET APP_SA_IAM MIGRATION_SA_IAM "
                              "APP_SECRET_IAM ADMIN_SECRET_IAM STATE_JSON SUPPORT_IMAGE_PUBLISHER_SA "
-                             "SUPPORT_IMAGE_PUBLISHER_SA_IAM SUPPORT_IMAGE_PROVIDER STATE_LIST")
+                             "SUPPORT_IMAGE_PUBLISHER_SA_IAM SUPPORT_IMAGE_PROVIDER MIGRATION_RUNNER_SA "
+                             "MIGRATION_RUNNER_SA_IAM MIGRATION_RUNNER_PROVIDER STATE_LIST")
     except (ValueError, KeyError, IndexError, TypeError, OSError, json.JSONDecodeError) as error:
         print(f"Dev infrastructure guard stopped: {error}", file=sys.stderr)
         sys.exit(1)

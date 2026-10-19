@@ -168,6 +168,11 @@ output "migration_service_account" {
   value       = try(google_service_account.dev_migration[0].email, null)
 }
 
+output "migration_runner_service_account" {
+  description = "Dev GitHub Actions identity for approved namespace-scoped migration Job submission."
+  value       = try(google_service_account.dev_app_migration_runner[0].email, null)
+}
+
 output "app_connection_secret" {
   description = "Secret Manager resource name; the payload is never in Terraform."
   value       = try(google_secret_manager_secret.dev_app_connection[0].id, null)
