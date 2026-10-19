@@ -48,7 +48,7 @@ jobs:
       - name: Initialize existing Dev GCS state
         run: terraform init -input=false -no-color -lockfile=readonly -backend-config=environments/dev.gcs.tfbackend
 
-      # A temporary saved plan permits path-only drift diagnosis. Neither file is uploaded.
+      # A temporary saved plan permits value-safe drift diagnosis. Neither file is uploaded.
       - name: Plan Dev infrastructure and report drift paths
         run: |
           set -euo pipefail
@@ -58,3 +58,7 @@ jobs:
           terraform plan -input=false -no-color -lock-timeout=5m -var-file=environments/dev.tfvars -out="$plan_file"
           terraform show -json "$plan_file" > "$json_file"
           python ../scripts/dev_infra_guard.py diagnose-drift "$json_file"
+
+      # Use the same strict decision as protected Apply, without changing GCP resources.
+      - name: Check saved plan with the Dev Apply guard
+        run: python ../scripts/dev_infra_guard.py check-plan "$RUNNER_TEMP/dev-diagnostic.json"

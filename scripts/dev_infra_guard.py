@@ -50,6 +50,8 @@ VPC_PATH = f"projects/{PROJECT}/global/networks/{VPC}"
 VPC_PEERING_PATH = f"projects/260283083469/global/networks/{VPC}"
 PSA_ADDRESS = PREFIX + "google_compute_global_address.private_services"
 SUBNET_ADDRESS = PREFIX + "google_compute_subnetwork.this"
+REGISTRY_ADDRESS = "google_artifact_registry_repository.dev_images[0]"
+SQL_ADDRESS = "google_sql_database_instance.dev_postgres[0]"
 ATTRIBUTION_LABEL = {"goog-terraform-provisioned": "true"}
 MISSING = object()
 
@@ -495,6 +497,14 @@ def changed_paths(before, after, prefix=""):
     return [prefix or "<unknown>"]
 
 
+def safe_drift_path(path):
+    """Do not expose user-defined label keys in workflow logs."""
+    for field in ("labels", "terraform_labels", "effective_labels"):
+        if path.startswith(field + "."):
+            return field + ".<key withheld>"
+    return path
+
+
 def known_value(value, label=False):
     """Show only the two documented, non-secret attribute representations."""
     if value is MISSING:
@@ -532,14 +542,52 @@ def attribution_status(value):
     return "expected attribution label absent or different (contents withheld)"
 
 
+def empty_set_status(value):
+    """Classify optional API lists without printing any configured names."""
+    if value is MISSING:
+        return "missing"
+    if value is None:
+        return "null"
+    if value == []:
+        return "[]"
+    return "<unexpected value withheld>"
+
+
+def settings_version_status(value):
+    """The Cloud SQL settings generation is non-secret; reject other value types."""
+    if value is MISSING:
+        return "missing"
+    if value is None:
+        return "null"
+    if type(value) is int and 0 <= value < 10**18:
+        return str(value)
+    if isinstance(value, str) and value.isascii() and value.isdecimal() and len(value) <= 18:
+        return value
+    return "<unexpected value withheld>"
+
+
+def single_block(value):
+    if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
+        return value[0]
+    return {}
+
+
+def ca_mode_status(value):
+    if value in ("GOOGLE_MANAGED_INTERNAL_CA", "GOOGLE_MANAGED_CAS_CA", "CUSTOMER_MANAGED_CAS_CA"):
+        return value
+    return known_value(value)
+
+
 def diagnose_drift(plan):
     drift = plan.get("resource_drift", [])
     if not drift:
         return ["No resource_drift entries in this plan; this does not prove the earlier drift is resolved."]
-    lines = [f"Terraform reported drift for {len(drift)} resource(s). Only two known non-secret fields are summarized."]
+    lines = [f"Terraform reported drift for {len(drift)} resource(s). Only approved non-secret fields are classified."]
     for entry in drift:
         change = entry.get("change", {})
-        paths = changed_paths(change.get("before"), change.get("after")) or ["<unknown>"]
+        paths = list(dict.fromkeys(safe_drift_path(path)
+                                   for path in changed_paths(change.get("before"), change.get("after"))))
+        paths = paths or ["<unknown>"]
         sensitive = any(any(part in SENSITIVE_PARTS for part in path.replace("[", ".").split("."))
                         for path in paths)
         lines.append(f"{entry.get('address', '<unknown>')} ({entry.get('type', '<unknown>')}): "
@@ -560,6 +608,39 @@ def diagnose_drift(plan):
                 lines.append("  log_config[0].metadata_fields: before="
                              + known_value(before_logs[0].get("metadata_fields", MISSING))
                              + "; after=" + known_value(after_logs[0].get("metadata_fields", MISSING)))
+        if entry.get("address") == REGISTRY_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
+            identity = all(snapshot.get("project") == PROJECT
+                           and snapshot.get("location") == "us-east1"
+                           and snapshot.get("repository_id") == "helpdeskcloud-dev-images"
+                           for snapshot in (before, after))
+            lines.append("  repository identity: " + ("expected" if identity else "unexpected (values withheld)"))
+            lines.append("  labels: before=" + classify_address_labels(before.get("labels", MISSING))
+                         + "; after=" + classify_address_labels(after.get("labels", MISSING)))
+            for field in ("terraform_labels", "effective_labels"):
+                first, second = before.get(field, MISSING), after.get(field, MISSING)
+                lines.append("  " + field + ": before=" + attribution_status(first)
+                             + "; after=" + attribution_status(second)
+                             + "; exact attribution only=" + str(first == second == ATTRIBUTION_LABEL).lower()
+                             + "; unchanged=" + str(first == second).lower())
+        if entry.get("address") == SQL_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
+            identity = all(snapshot.get("project") == PROJECT
+                           and snapshot.get("name") == "helpdeskcloud-dev-postgres"
+                           and snapshot.get("region") == "us-east1"
+                           and snapshot.get("database_version") == "POSTGRES_17"
+                           for snapshot in (before, after))
+            lines.append("  Cloud SQL identity and PostgreSQL 17: "
+                         + ("expected" if identity else "unexpected (values withheld)"))
+            first_settings, second_settings = single_block(before.get("settings")), single_block(after.get("settings"))
+            lines.append("  settings[0].version: before="
+                         + settings_version_status(first_settings.get("version", MISSING))
+                         + "; after=" + settings_version_status(second_settings.get("version", MISSING)))
+            first_ip = single_block(first_settings.get("ip_configuration"))
+            second_ip = single_block(second_settings.get("ip_configuration"))
+            for field in ("server_ca_mode", "custom_subject_alternative_names"):
+                classify = ca_mode_status if field == "server_ca_mode" else empty_set_status
+                lines.append("  settings[0].ip_configuration[0]." + field + ": before="
+                             + classify(first_ip.get(field, MISSING))
+                             + "; after=" + classify(second_ip.get(field, MISSING)))
     lines.append("Only exact documented normalization patterns may pass; all other drift remains blocked.")
     return lines
 

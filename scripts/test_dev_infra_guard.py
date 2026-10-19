@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 
 from dev_infra_guard import (ATTRIBUTION_LABEL, BASE, EXPECTED, NETWORK, PHASE6, PHASE7, PSA_ADDRESS,
-                             SUBNET_ADDRESS, VPC_LINK, VPC_PATH, check_plan, diagnose_drift, verify_deployment)
+                             REGISTRY_ADDRESS, SQL_ADDRESS, SUBNET_ADDRESS, VPC_LINK, VPC_PATH,
+                             check_plan, diagnose_drift, verify_deployment)
 
 
 def fixture():
@@ -256,6 +257,29 @@ def metadata_drift(after_fields=None, omit_after=False):
     else:
         after["log_config"][0]["metadata_fields"] = [] if after_fields is None else after_fields
     return {"mode": "managed", "address": SUBNET_ADDRESS, "type": "google_compute_subnetwork",
+            "change": {"actions": ["update"], "before": before, "after": after}}
+
+
+def registry_drift():
+    before = {"project": "helpdeskcloud-capstone-511905", "location": "us-east1",
+              "repository_id": "helpdeskcloud-dev-images", "labels": None,
+              "terraform_labels": ATTRIBUTION_LABEL, "effective_labels": ATTRIBUTION_LABEL}
+    after = copy.deepcopy(before)
+    after["labels"] = {}
+    return {"mode": "managed", "address": REGISTRY_ADDRESS, "type": "google_artifact_registry_repository",
+            "change": {"actions": ["update"], "before": before, "after": after}}
+
+
+def sql_readback_drift():
+    before = {"project": "helpdeskcloud-capstone-511905", "name": "helpdeskcloud-dev-postgres",
+              "region": "us-east1", "database_version": "POSTGRES_17",
+              "settings": [{"version": 1, "ip_configuration": [{
+                  "server_ca_mode": "GOOGLE_MANAGED_INTERNAL_CA",
+                  "custom_subject_alternative_names": None}]}]}
+    after = copy.deepcopy(before)
+    after["settings"][0]["version"] = 2
+    after["settings"][0]["ip_configuration"][0]["custom_subject_alternative_names"] = []
+    return {"mode": "managed", "address": SQL_ADDRESS, "type": "google_sql_database_instance",
             "change": {"actions": ["update"], "before": before, "after": after}}
 
 
@@ -526,6 +550,43 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(check_plan(self.plan), "apply")
         self.plan["resource_drift"] = [metadata_drift()]
         self.assertEqual(check_plan(self.plan), "apply")
+
+    def test_phase6_readback_diagnostic_classifies_only_non_secret_values(self):
+        self.plan["resource_drift"] = [registry_drift(), sql_readback_drift()]
+        report = "\n".join(diagnose_drift(self.plan))
+        self.assertIn("repository identity: expected", report)
+        self.assertIn("labels: before=null; after=empty map", report)
+        self.assertIn("exact attribution only=true; unchanged=true", report)
+        self.assertIn("Cloud SQL identity and PostgreSQL 17: expected", report)
+        self.assertIn("settings[0].version: before=1; after=2", report)
+        self.assertIn("custom_subject_alternative_names: before=null; after=[]", report)
+        self.assertIn("server_ca_mode: before=GOOGLE_MANAGED_INTERNAL_CA; "
+                      "after=GOOGLE_MANAGED_INTERNAL_CA", report)
+        with self.assertRaisesRegex(ValueError, "drift"):
+            check_plan(self.plan)
+
+    def test_phase6_diagnostic_withholds_unexpected_values_and_keeps_guard_closed(self):
+        registry = registry_drift()
+        registry["change"]["after"]["labels"] = {"owner": "private-value"}
+        registry["change"]["after"]["project"] = "wrong-project"
+        sql = sql_readback_drift()
+        sql["change"]["after"]["settings"][0]["version"] = "private-value"
+        sql["change"]["after"]["settings"][0]["ip_configuration"][0][
+            "custom_subject_alternative_names"] = ["private-value"]
+        sql["change"]["after"]["database_version"] = "POSTGRES_16"
+        self.plan["resource_drift"] = [registry, sql]
+        report = "\n".join(diagnose_drift(self.plan))
+        self.assertIn("repository identity: unexpected (values withheld)", report)
+        self.assertIn("labels: before=null; after=unexpected map (contents withheld)", report)
+        self.assertIn("Cloud SQL identity and PostgreSQL 17: unexpected (values withheld)", report)
+        self.assertIn("settings[0].version: before=1; after=<unexpected value withheld>", report)
+        self.assertIn("custom_subject_alternative_names: before=null; "
+                      "after=<unexpected value withheld>", report)
+        self.assertNotIn("private-value", report)
+        self.assertNotIn("wrong-project", report)
+        self.assertNotIn("POSTGRES_16", report)
+        with self.assertRaisesRegex(ValueError, "drift"):
+            check_plan(self.plan)
 
     def test_exact_drift_is_permitted_with_zero_change_plan(self):
         self.plan["resource_changes"] = []
