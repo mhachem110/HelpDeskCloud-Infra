@@ -967,18 +967,56 @@ def permitted_drift(entry):
         return {k: v for k, v in before.items() if k != "labels"} == {
             k: v for k, v in after.items() if k != "labels"}
 
+    
     if address == REGISTRY_ADDRESS:
         expected_identity = (PROJECT, "us-east1", "helpdeskcloud-dev-images")
-        if (tuple(before.get(key) for key in ("project", "location", "repository_id")) != expected_identity
-                or tuple(after.get(key) for key in ("project", "location", "repository_id")) != expected_identity
-                or before.get("labels", MISSING) is not None or after.get("labels", MISSING) != {}
-                or before.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL
-                or after.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL
-                or before.get("effective_labels", MISSING) != ATTRIBUTION_LABEL
-                or after.get("effective_labels", MISSING) != ATTRIBUTION_LABEL):
+
+        if (
+            tuple(before.get(k) for k in ("project", "location", "repository_id"))
+            != expected_identity
+            or tuple(after.get(k) for k in ("project", "location", "repository_id"))
+            != expected_identity
+            or before.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL
+            or after.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL
+            or before.get("effective_labels", MISSING) != ATTRIBUTION_LABEL
+            or after.get("effective_labels", MISSING) != ATTRIBUTION_LABEL
+        ):
             return False
-        return {k: v for k, v in before.items() if k != "labels"} == {
-            k: v for k, v in after.items() if k != "labels"}
+
+        # Accept only the known empty-label representations.
+        before_labels = before.get("labels", MISSING)
+        after_labels = after.get("labels", MISSING)
+
+        if not (
+            (before_labels is None and after_labels == {})
+            or (before_labels == {} and after_labels == {})
+        ):
+            return False
+
+        # Publishing images can change repository update_time.
+        before_time = before.get("update_time", MISSING)
+        after_time = after.get("update_time", MISSING)
+        time_changed = before_time != after_time
+
+        if time_changed and not (
+            isinstance(before_time, str)
+            and bool(before_time)
+            and isinstance(after_time, str)
+            and bool(after_time)
+        ):
+            return False
+
+        if before_labels == after_labels and not time_changed:
+            return False
+
+        # Every actual repository configuration field must match.
+        ignored = {"labels", "update_time"}
+        return (
+            {k: v for k, v in before.items() if k not in ignored}
+            ==
+            {k: v for k, v in after.items() if k not in ignored}
+        )
+
 
     if address == SQL_ADDRESS:
         identity = (PROJECT, "helpdeskcloud-dev-postgres", "us-east1", "POSTGRES_17")
