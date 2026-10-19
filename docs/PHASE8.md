@@ -63,7 +63,7 @@ The only allowed creation is `google_iam_workload_identity_pool_provider.dev_app
 
 After Apply #21, the read-only Terraform Dev Plan reported exactly one resource to add, no changes, and no destroys. It also reported an etag-only readback for the existing GKE image-pull grant because the new Writer member changed the repository IAM policy etag. The guard permits only a different, non-empty etag when the existing reader's project, location, repository, role, member, and all other state fields remain identical. Other repository IAM drift remains blocked.
 
-Terraform CI runs on a feature PR to `dev` with backend access disabled and no cloud credentials. The remote Dev plan is available only from the trusted `dev` branch through the existing manual Plan workflow and existing infrastructure OIDC identity. After review and merge, a reviewer can dispatch that Plan workflow. The recovery PR changes only the plan guard and tests; it does not run Apply or alter the remote state.
+Terraform CI runs on a feature PR to `dev` with backend access disabled and no cloud credentials. The remote Dev plan is available only from the trusted `dev` branch through the existing manual Plan workflow and existing infrastructure OIDC identity. After review and merge, a reviewer can dispatch that Plan workflow. The recovery PR changes only the plan guard, tests, and this runbook; it does not run Apply or alter the remote state.
 
 The existing `helpdesk-terraform-dev` role grants were not read from Cloud IAM in this branch. Before using the protected Apply workflow, verify that this infrastructure identity can:
 
