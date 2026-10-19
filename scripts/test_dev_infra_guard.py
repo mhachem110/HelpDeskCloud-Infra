@@ -864,6 +864,10 @@ class GuardTests(unittest.TestCase):
             "google_service_account.dev_app[0].member": "google_service_account.dev_migration[0].member",
             "google_service_account.dev_migration[0].name": "google_service_account.dev_app[0].name",
             "google_service_account.dev_migration[0].member": "google_service_account.dev_app[0].member",
+            "google_service_account.dev_app_support_image_publisher[0].name": "google_service_account.dev_migration[0].name",
+            "google_service_account.dev_app_support_image_publisher[0].member": "google_service_account.dev_migration[0].member",
+            "google_artifact_registry_repository.dev_images[0].location": "google_artifact_registry_repository.other[0].location",
+            "google_artifact_registry_repository.dev_images[0].repository_id": "google_artifact_registry_repository.other[0].repository_id",
             "google_secret_manager_secret.dev_app_connection[0].id": "google_secret_manager_secret.dev_admin_password[0].id",
             "google_secret_manager_secret.dev_admin_password[0].id": "google_secret_manager_secret.dev_app_connection[0].id",
             "var.project_id": "var.other_project",
@@ -1566,7 +1570,8 @@ class GuardTests(unittest.TestCase):
              "deletion protection"),
         )
         with tempfile.TemporaryDirectory() as temporary:
-            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(21)]
+            values = evidence()
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
             state_addresses = Path(temporary) / "state-addresses.txt"
             state_addresses.write_text("\n".join(EXPECTED), encoding="utf-8")
             filenames = [str(path) for path in paths] + [str(state_addresses)]
