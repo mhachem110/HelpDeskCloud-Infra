@@ -4,9 +4,13 @@ import copy
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
-from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_LABEL, BASE, EXPECTED,
+from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_LABEL, BASE,
+                             DEPLOYMENT_EVIDENCE_PATH_COUNT, EXPECTED,
                              NETWORK, PHASE6, PHASE7, PHASE8, PSA_ADDRESS, REGISTRY_ADDRESS, SQL_ADDRESS,
                              SUBNET_ADDRESS, SUBNET_PATHS, SUPPORT_PUBLISHER_ACCOUNT_ID,
                              SUPPORT_PUBLISHER_CONDITION, SUPPORT_PUBLISHER_DISPLAY_NAME,
@@ -16,7 +20,7 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              PHASE8_PROVIDER_ADDRESS,
                              REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH,
                              VPC_LINK, VPC_PATH, VPC_PATHS,
-                             check_plan, diagnose_drift, permitted_drift, verify_deployment)
+                             check_plan, diagnose_drift, main, permitted_drift, verify_deployment)
 
 
 def terraform_references(attribute_reference):
@@ -1694,6 +1698,29 @@ class GuardTests(unittest.TestCase):
             paths[8].write_text(json.dumps(values[8]), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "database"):
                 verify_deployment(filenames)
+
+    def test_verify_deployment_cli_accepts_phase8_evidence_arguments(self):
+        argv = ["dev_infra_guard.py", "verify-deployment"] + [
+            f"evidence-{index}.json" for index in range(DEPLOYMENT_EVIDENCE_PATH_COUNT)
+        ]
+        with patch("dev_infra_guard.sys.argv", argv), \
+                patch("dev_infra_guard.verify_deployment") as verify, \
+                redirect_stdout(StringIO()):
+            main()
+        verify.assert_called_once_with(argv[2:])
+
+    def test_verify_deployment_cli_rejects_stale_argument_count(self):
+        argv = ["dev_infra_guard.py", "verify-deployment"] + [
+            f"evidence-{index}.json" for index in range(DEPLOYMENT_EVIDENCE_PATH_COUNT - 3)
+        ]
+        stderr = StringIO()
+        with patch("dev_infra_guard.sys.argv", argv), \
+                patch("dev_infra_guard.verify_deployment") as verify, \
+                redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+            main()
+        self.assertEqual(error.exception.code, 1)
+        self.assertIn("SUPPORT_IMAGE_PROVIDER STATE_LIST", stderr.getvalue())
+        verify.assert_not_called()
 
     def test_phase7_read_only_verification_rejects_unsafe_api_responses(self):
         # The fixture follows GKE, IAM and Secret Manager's documented JSON nesting.
