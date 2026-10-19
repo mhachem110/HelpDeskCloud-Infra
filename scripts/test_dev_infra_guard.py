@@ -1206,6 +1206,38 @@ class GuardTests(unittest.TestCase):
                 with self.subTest(index=index, message=message), self.assertRaisesRegex(ValueError, message):
                     verify_deployment(filenames)
 
+    def test_secret_manager_accepts_canonical_project_number_resource_names(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            values = evidence()
+            values[14]["name"] = (
+                "projects/260283083469/secrets/helpdesk-dev-db-connection"
+            )
+            values[15]["name"] = (
+                "projects/260283083469/secrets/helpdesk-dev-db-admin-password"
+            )
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+            for path, value in zip(paths, values):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            state = Path(temporary) / "state-addresses.txt"
+            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            verify_deployment([str(path) for path in paths] + [str(state)])
+
+    def test_secret_manager_rejects_unapproved_project_number_resource_names(self):
+        for index, name in (
+            (14, "projects/999999999999/secrets/helpdesk-dev-db-connection"),
+            (15, "projects/260283083469/secrets/unexpected-secret"),
+        ):
+            with self.subTest(index=index, name=name), tempfile.TemporaryDirectory() as temporary:
+                values = evidence()
+                values[index]["name"] = name
+                paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+                for path, value in zip(paths, values):
+                    path.write_text(json.dumps(value), encoding="utf-8")
+                state = Path(temporary) / "state-addresses.txt"
+                state.write_text("\n".join(EXPECTED), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "metadata or replication"):
+                    verify_deployment([str(path) for path in paths] + [str(state)])
+
     def test_artifact_registry_outputs_match_apply_log_and_api_formats(self):
         with tempfile.TemporaryDirectory() as temporary:
             values = evidence()

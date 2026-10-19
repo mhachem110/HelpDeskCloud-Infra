@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 PROJECT = "helpdeskcloud-capstone-511905"
+PROJECT_NUMBER = "260283083469"
 VPC = "helpdeskcloud-dev-vpc"
 SUBNET = "helpdeskcloud-dev-subnet"
 PSA = "helpdeskcloud-dev-psa"
@@ -60,7 +61,7 @@ BASE = NETWORK | PHASE6
 EXPECTED = BASE | PHASE7
 VPC_LINK = f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/{VPC}"
 VPC_PATH = f"projects/{PROJECT}/global/networks/{VPC}"
-VPC_PEERING_PATH = f"projects/260283083469/global/networks/{VPC}"
+VPC_PEERING_PATH = f"projects/{PROJECT_NUMBER}/global/networks/{VPC}"
 PSA_ADDRESS = PREFIX + "google_compute_global_address.private_services"
 SUBNET_ADDRESS = PREFIX + "google_compute_subnetwork.this"
 REGISTRY_ADDRESS = "google_artifact_registry_repository.dev_images[0]"
@@ -1011,7 +1012,13 @@ def verify_phase7(cluster, node_sa, app_sa, migration_sa, app_secret, admin_secr
         (app_secret, app_secret_iam, "helpdesk-dev-db-connection", "helpdesk-dev-app"),
         (admin_secret, admin_secret_iam, "helpdesk-dev-db-admin-password", "helpdesk-dev-migrate"),
     ):
-        require(secret.get("name") == f"projects/{PROJECT}/secrets/{name}"
+        # Secret Manager can return the canonical resource name with the
+        # project's numeric ID even when the request used its project ID.
+        expected_names = {
+            f"projects/{PROJECT}/secrets/{name}",
+            f"projects/{PROJECT_NUMBER}/secrets/{name}",
+        }
+        require(secret.get("name") in expected_names
                 and isinstance(secret.get("replication", {}).get("automatic"), dict),
                 "Secret Manager metadata or replication mismatch")
         check_iam(policy, name)
@@ -1027,7 +1034,8 @@ def verify_phase7(cluster, node_sa, app_sa, migration_sa, app_secret, admin_secr
         "gke_mode": "AUTOPILOT", "gke_workload_pool": f"{PROJECT}.svc.id.goog",
         "gke_node_service_account": node_email, "app_service_account": app_email,
         "migration_service_account": migration_email,
-        "app_connection_secret": app_secret["name"], "migration_admin_secret": admin_secret["name"],
+        "app_connection_secret": f"projects/{PROJECT}/secrets/helpdesk-dev-db-connection",
+        "migration_admin_secret": f"projects/{PROJECT}/secrets/helpdesk-dev-db-admin-password",
     }.items():
         require(outputs.get(key, {}).get("value") == expected, f"Terraform output {key} mismatch")
 
