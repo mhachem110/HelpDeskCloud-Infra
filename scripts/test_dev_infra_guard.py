@@ -2,6 +2,7 @@
 
 import copy
 import json
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -18,6 +19,7 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              SUPPORT_PUBLISHER_MEMBER, SUPPORT_PUBLISHER_PROVIDER_ID,
                              ARTIFACT_READER_IAM_ADDRESS, PHASE8_COMPLETED,
                              PHASE8_PROVIDER_ADDRESS,
+                             MISSING,
                              REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH,
                              VPC_LINK, VPC_PATH, VPC_PATHS,
                              check_plan, diagnose_drift, main, permitted_drift, verify_deployment)
@@ -336,6 +338,26 @@ def support_images_provider_recovery_plan():
         elif address in PHASE8:
             change["change"]["actions"] = ["no-op"]
     plan["resource_drift"] = [artifact_reader_etag_drift()]
+    return plan
+
+
+def support_provider_audience_drift(before_value, after_value):
+    """Model a provider readback where only the unset audience representation differs."""
+    plan = fixture()
+    values = resource(plan, PHASE8_PROVIDER_ADDRESS)["values"]
+    before, after = copy.deepcopy(values), copy.deepcopy(values)
+    for snapshot, audience_value in ((before, before_value), (after, after_value)):
+        audiences = snapshot["oidc"][0]
+        if audience_value is MISSING:
+            audiences.pop("allowed_audiences", None)
+        else:
+            audiences["allowed_audiences"] = copy.deepcopy(audience_value)
+    plan["resource_drift"] = [{
+        "mode": "managed",
+        "address": PHASE8_PROVIDER_ADDRESS,
+        "type": PHASE8[PHASE8_PROVIDER_ADDRESS],
+        "change": {"actions": ["update"], "before": before, "after": after},
+    }]
     return plan
 
 
@@ -1121,6 +1143,66 @@ class GuardTests(unittest.TestCase):
             resource(plan, writer_address)["values"]["repository"] = repository
             self.assertEqual(check_plan(plan), "apply")
 
+    def test_supporting_image_provider_accepts_only_unset_audience_readback_forms(self):
+        for before, after in ((MISSING, None), (None, []), ([], MISSING), (MISSING, [])):
+            with self.subTest(before=before, after=after):
+                plan = support_provider_audience_drift(before, after)
+                set_prior_phase7(plan, PHASE7)
+                for change in plan["resource_changes"]:
+                    change["change"]["actions"] = ["no-op"]
+                self.assertEqual(check_plan(plan), "no_changes")
+                report = "\n".join(diagnose_drift(plan))
+                self.assertIn("provider identity: expected", report)
+                self.assertIn("oidc[0].allowed_audiences", report)
+
+    def test_supporting_image_provider_rejects_nonempty_or_unchanged_audiences(self):
+        for before, after in (
+            (None, None),
+            (["https://unexpected.example"], []),
+            ([], ["https://unexpected.example"]),
+            (["https://first.example"], ["https://second.example"]),
+        ):
+            with self.subTest(before=before, after=after), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(support_provider_audience_drift(before, after))
+
+    def test_supporting_image_provider_readback_rejects_identity_or_other_field_drift(self):
+        invalid_identities = (
+            ("project", "another-project"),
+            ("workload_identity_pool_id", "another-pool"),
+            ("workload_identity_pool_provider_id", "another-provider"),
+            ("disabled", True),
+            ("attribute_mapping", {}),
+            ("attribute_condition", "true"),
+            ("id", "projects/another-project/locations/global/workloadIdentityPools/helpdesk-github/providers/"
+             "github-app-support-images-dev"),
+        )
+        for field, value in invalid_identities:
+            plan = support_provider_audience_drift(MISSING, [])
+            drift = plan["resource_drift"][0]["change"]
+            for snapshot in (drift["before"], drift["after"]):
+                snapshot[field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(plan)
+
+        plan = support_provider_audience_drift(MISSING, [])
+        drift = plan["resource_drift"][0]["change"]
+        drift["after"]["oidc"][0]["issuer_uri"] = "https://attacker.example"
+        with self.assertRaisesRegex(ValueError, "drift"):
+            check_plan(plan)
+
+        plan = support_provider_audience_drift(MISSING, [])
+        drift = plan["resource_drift"][0]["change"]
+        drift["after"]["display_name"] = "unexpected provider name"
+        with self.assertRaisesRegex(ValueError, "drift"):
+            check_plan(plan)
+
+    def test_supporting_image_provider_drift_diagnostic_withholds_nonempty_audiences(self):
+        sentinel_audience = "https://sensitive.example/should-not-be-logged"
+        plan = support_provider_audience_drift([sentinel_audience], [])
+        report = "\n".join(diagnose_drift(plan))
+        self.assertIn("<unexpected value withheld>", report)
+        self.assertNotIn(sentinel_audience, report)
+
     def test_supporting_image_identity_cannot_be_created_before_phase7_is_complete(self):
         plan = support_images_create_plan()
         set_prior_phase7(plan, set(PHASE7) - {sorted(PHASE7)[0]})
@@ -1721,6 +1803,29 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 1)
         self.assertIn("SUPPORT_IMAGE_PROVIDER STATE_LIST", stderr.getvalue())
         verify.assert_not_called()
+
+    def test_apply_workflow_evidence_arguments_match_guard_contract(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows"
+                    / "terraform-dev-apply.yml").read_text(encoding="utf-8")
+        lines = workflow.splitlines()
+        command_index = next(index for index, line in enumerate(lines)
+                             if "python ../scripts/dev_infra_guard.py verify-deployment" in line)
+        argument_names = []
+        for line in lines[command_index + 1:]:
+            argument_names.extend(re.findall(r'"\$RUNNER_TEMP/([A-Za-z0-9._-]+)"', line))
+            if not line.rstrip().endswith("\\"):
+                break
+
+        expected_names = (
+            "vpc.json", "subnet.json", "psa.json", "connections.json", "registry.json",
+            "registry-iam.json", "project-iam.json", "sql.json", "databases.json", "outputs.json",
+            "cluster.json", "node-sa.json", "app-sa.json", "migration-sa.json", "app-secret.json",
+            "admin-secret.json", "app-sa-iam.json", "migration-sa-iam.json", "app-secret-iam.json",
+            "admin-secret-iam.json", "state.json", "support-image-publisher-sa.json",
+            "support-image-publisher-sa-iam.json", "support-image-provider.json", "state-addresses.txt",
+        )
+        self.assertEqual(DEPLOYMENT_EVIDENCE_PATH_COUNT, len(expected_names))
+        self.assertEqual(tuple(argument_names), expected_names)
 
     def test_phase7_read_only_verification_rejects_unsafe_api_responses(self):
         # The fixture follows GKE, IAM and Secret Manager's documented JSON nesting.
