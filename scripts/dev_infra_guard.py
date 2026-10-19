@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 PROJECT = "helpdeskcloud-capstone-511905"
+PROJECT_NUMBER = "260283083469"
 VPC = "helpdeskcloud-dev-vpc"
 SUBNET = "helpdeskcloud-dev-subnet"
 PSA = "helpdeskcloud-dev-psa"
@@ -60,7 +61,7 @@ BASE = NETWORK | PHASE6
 EXPECTED = BASE | PHASE7
 VPC_LINK = f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/{VPC}"
 VPC_PATH = f"projects/{PROJECT}/global/networks/{VPC}"
-VPC_PEERING_PATH = f"projects/260283083469/global/networks/{VPC}"
+VPC_PEERING_PATH = f"projects/{PROJECT_NUMBER}/global/networks/{VPC}"
 PSA_ADDRESS = PREFIX + "google_compute_global_address.private_services"
 SUBNET_ADDRESS = PREFIX + "google_compute_subnetwork.this"
 REGISTRY_ADDRESS = "google_artifact_registry_repository.dev_images[0]"
@@ -69,9 +70,24 @@ REGISTRY_REPOSITORY_PATH = (
     f"projects/{PROJECT}/locations/us-east1/repositories/{REGISTRY_REPOSITORY_ID}"
 )
 SQL_ADDRESS = "google_sql_database_instance.dev_postgres[0]"
+CLUSTER_ADDRESS = "google_container_cluster.dev[0]"
 SECRET_READBACK_NAMES = {
     "google_secret_manager_secret.dev_app_connection[0]": "helpdesk-dev-db-connection",
     "google_secret_manager_secret.dev_admin_password[0]": "helpdesk-dev-db-admin-password",
+}
+PROJECT_IAM_READBACKS = {
+    "google_project_iam_member.dev_gke_node_runtime[0]": (
+        "roles/container.defaultNodeServiceAccount",
+        f"serviceAccount:helpdesk-gke-node-dev@{PROJECT}.iam.gserviceaccount.com",
+    ),
+    "google_project_iam_member.dev_app_cloudsql[0]": (
+        "roles/cloudsql.client",
+        f"serviceAccount:helpdesk-app-dev@{PROJECT}.iam.gserviceaccount.com",
+    ),
+    "google_project_iam_member.dev_migration_cloudsql[0]": (
+        "roles/cloudsql.client",
+        f"serviceAccount:helpdesk-migrate-dev@{PROJECT}.iam.gserviceaccount.com",
+    ),
 }
 SECRET_EMPTY_MAP_FIELDS = ("annotations", "labels", "version_aliases")
 ATTRIBUTION_LABEL = {"goog-terraform-provisioned": "true"}
@@ -356,8 +372,10 @@ def check_phase7(values, plan, creates):
     require(ranges.get("cluster_secondary_range_name") == "helpdeskcloud-dev-pods"
             and ranges.get("services_secondary_range_name") == "helpdeskcloud-dev-services",
             "GKE secondary ranges do not match the existing subnet")
-    require(only_item(cluster.get("private_cluster_config"), "Missing private node config")
-            .get("enable_private_nodes") is True, "GKE nodes must be private")
+    private_config = only_item(cluster.get("private_cluster_config"), "Missing private node config")
+    require(private_config.get("enable_private_nodes") is True, "GKE nodes must be private")
+    require(private_config.get("enable_private_endpoint") is True,
+            "GKE private endpoint setting must preserve the existing cluster configuration")
     endpoints = only_item(cluster.get("control_plane_endpoints_config"), "Missing control plane endpoints")
     require(only_item(endpoints.get("dns_endpoint_config"), "Missing DNS endpoint")
             .get("allow_external_traffic") is True, "Cloud Shell DNS endpoint is missing")
@@ -459,6 +477,8 @@ def permitted_drift(entry):
         SUBNET_ADDRESS: NETWORK[SUBNET_ADDRESS],
         REGISTRY_ADDRESS: PHASE6[REGISTRY_ADDRESS],
         SQL_ADDRESS: PHASE6[SQL_ADDRESS],
+        CLUSTER_ADDRESS: PHASE7[CLUSTER_ADDRESS],
+        **{address: "google_project_iam_member" for address in PROJECT_IAM_READBACKS},
         **{secret: PHASE7[secret] for secret in SECRET_READBACK_NAMES},
     }.get(address)
     if entry.get("mode") != "managed" or expected_type is None or entry.get("type") != expected_type:
@@ -482,6 +502,64 @@ def permitted_drift(entry):
         # diagnostic classifies the live snapshots without exposing contents.
         return ({key: value for key, value in before.items() if key not in SECRET_EMPTY_MAP_FIELDS}
                 == {key: value for key, value in after.items() if key not in SECRET_EMPTY_MAP_FIELDS})
+
+    if address == CLUSTER_ADDRESS:
+        expected_identity = (PROJECT, "helpdeskcloud-dev-gke", "us-east1")
+        if (tuple(before.get(key) for key in ("project", "name", "location")) != expected_identity
+                or tuple(after.get(key) for key in ("project", "name", "location")) != expected_identity
+                or before.get("deletion_protection") is not True
+                or after.get("deletion_protection") is not True
+                or before.get("network") != VPC_LINK or after.get("network") != VPC_LINK
+                or before.get("subnetwork") != f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/regions/us-east1/subnetworks/{SUBNET}"
+                or after.get("subnetwork") != f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/regions/us-east1/subnetworks/{SUBNET}"
+                or before.get("networking_mode") != "VPC_NATIVE"
+                or after.get("networking_mode") != "VPC_NATIVE"
+                or before.get("enable_autopilot") is not True
+                or after.get("enable_autopilot") is not True):
+            return False
+        for snapshot in (before, after):
+            private = snapshot.get("private_cluster_config")
+            endpoints = snapshot.get("control_plane_endpoints_config")
+            workload_identity = snapshot.get("workload_identity_config")
+            if (not isinstance(private, list) or len(private) != 1
+                    or not isinstance(private[0], dict)
+                    or private[0].get("enable_private_nodes") is not True
+                    or private[0].get("enable_private_endpoint") is not True
+                    or not isinstance(endpoints, list) or len(endpoints) != 1
+                    or not isinstance(endpoints[0], dict)
+                    or endpoints[0].get("ip_endpoints_config") != [{"enabled": False}]
+                    or not isinstance(workload_identity, list) or len(workload_identity) != 1
+                    or not isinstance(workload_identity[0], dict)
+                    or workload_identity[0].get("workload_pool") != f"{PROJECT}.svc.id.goog"):
+                return False
+        # GKE's resourceLabels readback may normalize an absent map to the
+        # provider's single attribution label. No user label is accepted here.
+        before_labels = before.get("resource_labels", MISSING)
+        after_labels = after.get("resource_labels", MISSING)
+        empty_representations = (MISSING, None, {})
+        exact_normalization = (
+            before_labels == ATTRIBUTION_LABEL and after_labels in empty_representations
+        ) or (
+            after_labels == ATTRIBUTION_LABEL and before_labels in empty_representations
+        )
+        if not exact_normalization:
+            return False
+        return ({key: value for key, value in before.items() if key != "resource_labels"}
+                == {key: value for key, value in after.items() if key != "resource_labels"})
+
+    if address in PROJECT_IAM_READBACKS:
+        expected_role, expected_member = PROJECT_IAM_READBACKS[address]
+        if any(snapshot.get("project") != PROJECT or snapshot.get("role") != expected_role
+               or snapshot.get("member") != expected_member
+               or not isinstance(snapshot.get("etag"), str) or not snapshot.get("etag")
+               for snapshot in (before, after)):
+            return False
+        if before["etag"] == after["etag"]:
+            return False
+        # Project policy etags are concurrency metadata. Require every grant
+        # field and all other provider values to remain identical.
+        return ({key: value for key, value in before.items() if key != "etag"}
+                == {key: value for key, value in after.items() if key != "etag"})
 
     if address == PSA_ADDRESS:
         if (before.get("name") != PSA or after.get("name") != PSA
@@ -1011,7 +1089,13 @@ def verify_phase7(cluster, node_sa, app_sa, migration_sa, app_secret, admin_secr
         (app_secret, app_secret_iam, "helpdesk-dev-db-connection", "helpdesk-dev-app"),
         (admin_secret, admin_secret_iam, "helpdesk-dev-db-admin-password", "helpdesk-dev-migrate"),
     ):
-        require(secret.get("name") == f"projects/{PROJECT}/secrets/{name}"
+        # Secret Manager can return the canonical resource name with the
+        # project's numeric ID even when the request used its project ID.
+        expected_names = {
+            f"projects/{PROJECT}/secrets/{name}",
+            f"projects/{PROJECT_NUMBER}/secrets/{name}",
+        }
+        require(secret.get("name") in expected_names
                 and isinstance(secret.get("replication", {}).get("automatic"), dict),
                 "Secret Manager metadata or replication mismatch")
         check_iam(policy, name)
@@ -1027,7 +1111,8 @@ def verify_phase7(cluster, node_sa, app_sa, migration_sa, app_secret, admin_secr
         "gke_mode": "AUTOPILOT", "gke_workload_pool": f"{PROJECT}.svc.id.goog",
         "gke_node_service_account": node_email, "app_service_account": app_email,
         "migration_service_account": migration_email,
-        "app_connection_secret": app_secret["name"], "migration_admin_secret": admin_secret["name"],
+        "app_connection_secret": f"projects/{PROJECT}/secrets/helpdesk-dev-db-connection",
+        "migration_admin_secret": f"projects/{PROJECT}/secrets/helpdesk-dev-db-admin-password",
     }.items():
         require(outputs.get(key, {}).get("value") == expected, f"Terraform output {key} mismatch")
 

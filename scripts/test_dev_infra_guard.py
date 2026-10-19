@@ -89,7 +89,7 @@ def fixture():
             "networking_mode": "VPC_NATIVE",
             "ip_allocation_policy": [{"cluster_secondary_range_name": "helpdeskcloud-dev-pods",
                                       "services_secondary_range_name": "helpdeskcloud-dev-services"}],
-            "private_cluster_config": [{"enable_private_nodes": True}],
+            "private_cluster_config": [{"enable_private_nodes": True, "enable_private_endpoint": True}],
             "control_plane_endpoints_config": [{"dns_endpoint_config": [{"allow_external_traffic": True}],
                                                 "ip_endpoints_config": [{"enabled": False}]}],
             "workload_identity_config": [{"workload_pool": f"{project}.svc.id.goog"}],
@@ -386,6 +386,45 @@ def secret_empty_map_drift(address):
         after[field] = {}
     return {"mode": "managed", "address": address, "type": "google_secret_manager_secret",
             "change": {"actions": ["update"], "before": before, "after": after}}
+
+
+def gke_resource_labels_drift():
+    before = {
+        "project": "helpdeskcloud-capstone-511905", "name": "helpdeskcloud-dev-gke",
+        "location": "us-east1", "deletion_protection": True, "enable_autopilot": True,
+        "network": "https://www.googleapis.com/compute/v1/projects/helpdeskcloud-capstone-511905/global/networks/helpdeskcloud-dev-vpc",
+        "subnetwork": "https://www.googleapis.com/compute/v1/projects/helpdeskcloud-capstone-511905/regions/us-east1/subnetworks/helpdeskcloud-dev-subnet",
+        "networking_mode": "VPC_NATIVE",
+        "resource_labels": None,
+        "private_cluster_config": [{"enable_private_nodes": True, "enable_private_endpoint": True}],
+        "control_plane_endpoints_config": [{"ip_endpoints_config": [{"enabled": False}]}],
+        "workload_identity_config": [{"workload_pool": "helpdeskcloud-capstone-511905.svc.id.goog"}],
+    }
+    after = copy.deepcopy(before)
+    after["resource_labels"] = {"goog-terraform-provisioned": "true"}
+    return {"mode": "managed", "address": "google_container_cluster.dev[0]",
+            "type": "google_container_cluster",
+            "change": {"actions": ["update"], "before": before, "after": after}}
+
+
+def project_iam_etag_drift(address):
+    project = "helpdeskcloud-capstone-511905"
+    identities = {
+        "google_project_iam_member.dev_gke_node_runtime[0]": (
+            "roles/container.defaultNodeServiceAccount", "helpdesk-gke-node-dev"),
+        "google_project_iam_member.dev_app_cloudsql[0]": (
+            "roles/cloudsql.client", "helpdesk-app-dev"),
+        "google_project_iam_member.dev_migration_cloudsql[0]": (
+            "roles/cloudsql.client", "helpdesk-migrate-dev"),
+    }
+    role, account = identities[address]
+    base = {"project": project, "role": role,
+            "member": f"serviceAccount:{account}@{project}.iam.gserviceaccount.com",
+            "etag": "etag-before"}
+    after = copy.deepcopy(base)
+    after["etag"] = "etag-after"
+    return {"mode": "managed", "address": address, "type": "google_project_iam_member",
+            "change": {"actions": ["update"], "before": base, "after": after}}
 
 
 def evidence():
@@ -995,6 +1034,65 @@ class GuardTests(unittest.TestCase):
         self.plan["resource_drift"] = [label_drift(), metadata_drift()]
         self.assertEqual(check_plan(self.plan), "no_changes")
 
+    def test_gke_label_and_exact_project_iam_etag_readbacks_are_permitted(self):
+        set_prior_phase7(self.plan, PHASE7)
+        for change in self.plan["resource_changes"]:
+            change["change"]["actions"] = ["no-op"]
+        drift = [gke_resource_labels_drift()]
+        drift.extend(project_iam_etag_drift(address) for address in (
+            "google_project_iam_member.dev_app_cloudsql[0]",
+            "google_project_iam_member.dev_gke_node_runtime[0]",
+            "google_project_iam_member.dev_migration_cloudsql[0]",
+        ))
+        self.plan["resource_drift"] = drift
+        self.assertEqual(check_plan(self.plan), "no_changes")
+
+        for address in ("google_container_cluster.dev[0]",
+                        "google_project_iam_member.dev_app_cloudsql[0]"):
+            change = next(c for c in self.plan["resource_changes"] if c["address"] == address)
+            change["change"]["actions"] = ["update"]
+            with self.subTest(address=address), self.assertRaisesRegex(ValueError, "readback only"):
+                check_plan(self.plan)
+            change["change"]["actions"] = ["no-op"]
+
+    def test_gke_label_drift_rejects_unexpected_labels_or_cluster_changes(self):
+        for mutate in (
+            lambda d: d["change"]["after"].update(resource_labels={"owner": "someone"}),
+            lambda d: d["change"]["after"].update(resource_labels={
+                "goog-terraform-provisioned": "false"}),
+            lambda d: d["change"]["after"].update(name="unexpected-cluster"),
+            lambda d: d["change"]["after"].update(deletion_protection=False),
+            lambda d: d["change"]["after"].update(network="unexpected-vpc"),
+            lambda d: d["change"]["after"]["private_cluster_config"][0].update(
+                enable_private_endpoint=False),
+            lambda d: d["change"]["after"]["control_plane_endpoints_config"][0][
+                "ip_endpoints_config"][0].update(enabled=True),
+            lambda d: d["change"]["after"]["workload_identity_config"][0].update(
+                workload_pool="unexpected-pool"),
+            lambda d: d["change"].update(actions=["delete", "create"]),
+        ):
+            drift = gke_resource_labels_drift()
+            mutate(drift)
+            self.plan["resource_drift"] = [drift]
+            with self.subTest(drift=drift), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(self.plan)
+
+    def test_project_iam_etag_drift_rejects_wrong_identity_or_any_other_field_change(self):
+        address = "google_project_iam_member.dev_app_cloudsql[0]"
+        for mutate in (
+            lambda d: d["change"]["after"].update(project="other-project"),
+            lambda d: d["change"]["after"].update(role="roles/owner"),
+            lambda d: d["change"]["after"].update(member="user:someone@example.com"),
+            lambda d: d["change"]["after"].update(etag=""),
+            lambda d: d["change"]["after"].update(extra="unexpected"),
+            lambda d: d["change"].update(actions=["delete"]),
+        ):
+            drift = project_iam_etag_drift(address)
+            mutate(drift)
+            self.plan["resource_drift"] = [drift]
+            with self.subTest(drift=drift), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(self.plan)
+
     def test_attribution_drift_rejects_other_labels_and_resource_changes(self):
         for mutate in (
             lambda d: d["change"]["after"]["labels"].update({"owner": "someone"}),
@@ -1205,6 +1303,38 @@ class GuardTests(unittest.TestCase):
                     path.write_text(json.dumps(value), encoding="utf-8")
                 with self.subTest(index=index, message=message), self.assertRaisesRegex(ValueError, message):
                     verify_deployment(filenames)
+
+    def test_secret_manager_accepts_canonical_project_number_resource_names(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            values = evidence()
+            values[14]["name"] = (
+                "projects/260283083469/secrets/helpdesk-dev-db-connection"
+            )
+            values[15]["name"] = (
+                "projects/260283083469/secrets/helpdesk-dev-db-admin-password"
+            )
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+            for path, value in zip(paths, values):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            state = Path(temporary) / "state-addresses.txt"
+            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            verify_deployment([str(path) for path in paths] + [str(state)])
+
+    def test_secret_manager_rejects_unapproved_project_number_resource_names(self):
+        for index, name in (
+            (14, "projects/999999999999/secrets/helpdesk-dev-db-connection"),
+            (15, "projects/260283083469/secrets/unexpected-secret"),
+        ):
+            with self.subTest(index=index, name=name), tempfile.TemporaryDirectory() as temporary:
+                values = evidence()
+                values[index]["name"] = name
+                paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
+                for path, value in zip(paths, values):
+                    path.write_text(json.dumps(value), encoding="utf-8")
+                state = Path(temporary) / "state-addresses.txt"
+                state.write_text("\n".join(EXPECTED), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "metadata or replication"):
+                    verify_deployment([str(path) for path in paths] + [str(state)])
 
     def test_artifact_registry_outputs_match_apply_log_and_api_formats(self):
         with tempfile.TemporaryDirectory() as temporary:

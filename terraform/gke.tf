@@ -19,6 +19,9 @@ resource "google_container_cluster" "dev" {
   # Nodes have internal addresses. Cloud Shell can use the authenticated DNS endpoint.
   private_cluster_config {
     enable_private_nodes = true
+    # Preserve the value already recorded for this cluster. With provider 7.8.0,
+    # omitting it plans true -> null even when IP endpoints are disabled.
+    enable_private_endpoint = true
   }
 
   control_plane_endpoints_config {
