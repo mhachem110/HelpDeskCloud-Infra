@@ -55,6 +55,7 @@ PHASE8 = {
 }
 PHASE8_PROVIDER_ADDRESS = "google_iam_workload_identity_pool_provider.dev_app_support_images[0]"
 PHASE8_COMPLETED = frozenset(PHASE8) - {PHASE8_PROVIDER_ADDRESS}
+DEPLOYMENT_EVIDENCE_PATH_COUNT = 25
 ARTIFACT_READER_IAM_ADDRESS = "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]"
 SUPPORT_PUBLISHER_ACCOUNT_ID = "helpdesk-app-support-pub-dev"
 SUPPORT_PUBLISHER_DISPLAY_NAME = "helpdesk-app-support-image-publisher-dev"
@@ -1215,7 +1216,8 @@ def diagnose_drift(plan):
 
 
 def verify_deployment(paths):
-    require(len(paths) == 25, "Expected read-only Phase 7-8 evidence, Terraform state, and addresses")
+    require(len(paths) == DEPLOYMENT_EVIDENCE_PATH_COUNT,
+            "Expected read-only Phase 7-8 evidence, Terraform state, and addresses")
     network, subnet, address, connections, registry, registry_iam, project_iam, sql, databases, outputs = [read_json(p) for p in paths[:10]]
     state_addresses = set(Path(paths[-1]).read_text(encoding="utf-8").splitlines())
     require(state_addresses == set(EXPECTED), "Dev state does not contain exactly the approved resources")
@@ -1480,15 +1482,17 @@ def main():
         elif len(sys.argv) == 3 and sys.argv[1] == "check-project-iam":
             check_iam(read_json(sys.argv[2]), "project")
             print("No direct public project IAM binding found")
-        elif len(sys.argv) == 24 and sys.argv[1] == "verify-deployment":
+        elif len(sys.argv) == DEPLOYMENT_EVIDENCE_PATH_COUNT + 2 and sys.argv[1] == "verify-deployment":
             verify_deployment(sys.argv[2:])
             print("Approved Dev resources, IAM, outputs, and deletion protection verified")
         else:
             raise ValueError("Usage: dev_infra_guard.py check-plan PLAN_JSON | diagnose-drift PLAN_JSON | "
                              "check-project-iam PROJECT_IAM_JSON | "
-                             "verify-deployment VPC SUBNET ADDRESS CONNECTIONS REGISTRY REGISTRY_IAM PROJECT_IAM SQL DATABASES OUTPUTS "
+                             "verify-deployment VPC SUBNET ADDRESS CONNECTIONS REGISTRY REGISTRY_IAM PROJECT_IAM "
+                             "SQL DATABASES OUTPUTS "
                              "CLUSTER NODE_SA APP_SA MIGRATION_SA APP_SECRET ADMIN_SECRET APP_SA_IAM MIGRATION_SA_IAM "
-                             "APP_SECRET_IAM ADMIN_SECRET_IAM STATE_JSON STATE_LIST")
+                             "APP_SECRET_IAM ADMIN_SECRET_IAM STATE_JSON SUPPORT_IMAGE_PUBLISHER_SA "
+                             "SUPPORT_IMAGE_PUBLISHER_SA_IAM SUPPORT_IMAGE_PROVIDER STATE_LIST")
     except (ValueError, KeyError, IndexError, TypeError, OSError, json.JSONDecodeError) as error:
         print(f"Dev infrastructure guard stopped: {error}", file=sys.stderr)
         sys.exit(1)
