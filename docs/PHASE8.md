@@ -32,7 +32,7 @@ Google service-account IDs are limited to 30 characters. The requested `helpdesk
 helpdesk-app-support-pub-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
 ```
 
-The App publisher workflow must use this valid email before an approved publication run. Its current workflow references the overlength local part; that integration update must be merged before publication.
+The App supporting-image workflow uses this valid email in the reviewed Dev workflow; publication remains separately gated and disabled until its prerequisites are approved.
 
 Reference: [Create service accounts](https://cloud.google.com/iam/docs/service-accounts-create).
 
@@ -81,6 +81,20 @@ Apply #21 failed at that time because the Terraform identity lacked `iam.workloa
 Apply #22 created the remaining supporting-image provider successfully (`1 added, 0 changed, 0 destroyed`). The job then failed before post-apply evidence validation because the guard CLI still enforced its earlier Phase 7 argument count, while the workflow supplied the three additional Phase 8 evidence files and `verify_deployment` already expected all 25 inputs. The CLI arity and usage now match the workflow, with a regression test for the 25-file invocation and the obsolete count. Run a fresh protected Dev operation after this fix to validate the deployed state; the failed Apply #22 has already committed its provider creation to Terraform state.
 
 The App publisher remains disabled until its dedicated provider/service account and scoped grant are reviewed, the protected Environment has required reviewers and a `dev` branch policy, and `DEV_SUPPORTING_IMAGES_PUBLISH_ENABLED` is explicitly set to `true`. Image publication remains a separate manual workflow dispatch and approval.
+
+## Phase 9 — one-time database migration runner
+
+The App migration runner uses a separate service account and provider in the existing `helpdesk-github` pool. Terraform adds only these four Dev resources after the complete Phase 7 and Phase 8 inventories are present: service account `helpdesk-app-migr-runner-dev`, provider `github-app-migration-dev`, its exact-subject `roles/iam.workloadIdentityUser` binding, and a conditional `roles/container.clusterViewer` grant. The service-account ID is 28 characters (under Google's 30-character limit); the display name remains `helpdesk-app-migration-runner-dev`.
+
+The verified immutable subject prefix is `repo:mhachem110@150286776/HelpDeskCloud-App@1423008128`; the migration job's GitHub Environment appends `:environment:dev-db-migration`. Its provider condition independently requires owner ID `150286776`, repository ID `1423008128`, repository `mhachem110/HelpDeskCloud-App`, `refs/heads/dev`, the `dev-db-migration` Environment, and `.github/workflows/dev-db-migration.yml@refs/heads/dev`. It uses the existing GitHub OIDC issuer and does not change the infrastructure provider or supporting-image publisher.
+
+Google documents `roles/container.clusterViewer` as the least-privileged predefined role for GKE credential discovery. Terraform grants it through a project IAM member condition guarded by `resource.type == "container.googleapis.com/Cluster"` and the exact resource name `projects/helpdeskcloud-capstone-511905/locations/us-east1/clusters/helpdeskcloud-dev-gke`. This keeps the project-level binding effective only for the existing cluster. The migration runner receives no Cloud SQL Client or Secret Manager role; the existing `helpdesk-dev-migrate` Kubernetes ServiceAccount and `helpdesk-migrate-dev` Google service account retain the workload's Cloud SQL and admin-secret access.
+
+The namespace Role and RoleBinding remain managed in the App repository as `k8s/dev-migration-runner-rbac.yaml`; the RoleBinding subject is the runner's short Google service-account email. They must be applied through the separately reviewed Kubernetes bootstrap procedure. The existing `dev-db-migration.yml` remains manual-only, disabled by `DEV_DB_MIGRATION_ENABLED`, requires the exact typed confirmation and protected `dev-db-migration` Environment, refuses to replace its fixed Job, and does not run as part of normal application delivery.
+
+The Dev plan guard permits the complete four-resource Phase 9 creation as one batch only after Phase 7 and Phase 8 are complete. It rejects partial inventories, different WIF claims, another service account, broader roles, a different IAM Condition or any update, replacement, or deletion. Post-apply verification reads the new service account, service-account IAM policy and provider, and validates the cluster-only IAM condition plus absence of direct runner access on the two existing Secret Manager resources. The existing protected Apply workflow performs that verification; this PR does not run it.
+
+The coordinated App PR updates `dev-db-migration.yml`, the namespace RoleBinding and Phase 8 runbook to use the valid service-account ID. The App workflow and repository variable remain inactive until the Infra change is approved/applied, the namespace RBAC and protected GitHub Environment are reviewed, and image digests are approved. No migration, image publication, application delivery, Cloud IAM update or Terraform Apply is part of this preparation.
 
 ### Apply #23 read-only plan and provider audience readback
 

@@ -12,13 +12,17 @@ from unittest.mock import patch
 
 from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_LABEL, BASE,
                              DEPLOYMENT_EVIDENCE_PATH_COUNT, EXPECTED,
-                             NETWORK, PHASE6, PHASE7, PHASE8, PSA_ADDRESS, REGISTRY_ADDRESS, SQL_ADDRESS,
+                             NETWORK, PHASE6, PHASE7, PHASE8, PHASE9, PSA_ADDRESS, REGISTRY_ADDRESS, SQL_ADDRESS,
                              SUBNET_ADDRESS, SUBNET_PATHS, SUPPORT_PUBLISHER_ACCOUNT_ID,
                              SUPPORT_PUBLISHER_CONDITION, SUPPORT_PUBLISHER_DISPLAY_NAME,
                              SUPPORT_PUBLISHER_EMAIL, SUPPORT_PUBLISHER_MAPPING,
                              SUPPORT_PUBLISHER_MEMBER, SUPPORT_PUBLISHER_PROVIDER_ID,
                              ARTIFACT_READER_IAM_ADDRESS, PHASE8_COMPLETED,
                              PHASE8_PROVIDER_ADDRESS,
+                             MIGRATION_RUNNER_ACCOUNT_ID, MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
+                             MIGRATION_RUNNER_CONDITION, MIGRATION_RUNNER_DISPLAY_NAME,
+                             MIGRATION_RUNNER_EMAIL, MIGRATION_RUNNER_MEMBER,
+                             MIGRATION_RUNNER_PROVIDER_ID,
                              MISSING,
                              REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH,
                              VPC_LINK, VPC_PATH, VPC_PATHS,
@@ -55,11 +59,14 @@ def strict_reference_cases(plan):
         ("google_service_account_iam_member.dev_app_workload_identity", "service_account_id", "google_service_account.dev_app[0].name"),
         ("google_service_account_iam_member.dev_migration_workload_identity", "service_account_id", "google_service_account.dev_migration[0].name"),
         ("google_service_account_iam_member.dev_app_support_images_wif", "service_account_id", "google_service_account.dev_app_support_image_publisher[0].name"),
+        ("google_service_account_iam_member.dev_app_migration_runner_wif", "service_account_id", "google_service_account.dev_app_migration_runner[0].name"),
+        ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "member", "google_service_account.dev_app_migration_runner[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
         ("google_project_iam_member.dev_gke_node_runtime", "member", "google_service_account.dev_gke_nodes[0].member"),
         ("google_project_iam_member.dev_app_cloudsql", "member", "google_service_account.dev_app[0].member"),
         ("google_project_iam_member.dev_migration_cloudsql", "member", "google_service_account.dev_migration[0].member"),
+        ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "project", "var.project_id"),
         ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "member", "google_service_account.dev_app_support_image_publisher[0].member"),
         ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "location", "google_artifact_registry_repository.dev_images[0].location"),
         ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "repository", "google_artifact_registry_repository.dev_images[0].repository_id"),
@@ -67,7 +74,8 @@ def strict_reference_cases(plan):
         cases.append((f"{address}.{field}", resources[address][field], expected))
     for address in ("google_service_account.dev_gke_nodes", "google_service_account.dev_app",
                     "google_service_account.dev_migration",
-                    "google_service_account.dev_app_support_image_publisher"):
+                     "google_service_account.dev_app_support_image_publisher",
+                     "google_service_account.dev_app_migration_runner"):
         cases.append((f"{address}.project", resources[address]["project"], "var.project_id"))
     return cases
 
@@ -108,6 +116,7 @@ def fixture():
     app = f"helpdesk-app-dev@{project}.iam.gserviceaccount.com"
     migration = f"helpdesk-migrate-dev@{project}.iam.gserviceaccount.com"
     support_publisher = SUPPORT_PUBLISHER_EMAIL
+    migration_runner = MIGRATION_RUNNER_EMAIL
     principal = f"principal://iam.googleapis.com/projects/260283083469/locations/global/workloadIdentityPools/{project}.svc.id.goog/subject/ns/helpdesk-dev/sa/"
     phase7 = {
         "google_container_cluster.dev[0]": {
@@ -181,6 +190,30 @@ def fixture():
         "google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]": {
             "project": project, "location": "us-east1", "repository": REGISTRY_REPOSITORY_PATH,
             "role": "roles/artifactregistry.writer", "member": f"serviceAccount:{support_publisher}"},
+    }
+    phase9 = {
+        "google_service_account.dev_app_migration_runner[0]": {
+            "project": project, "account_id": MIGRATION_RUNNER_ACCOUNT_ID,
+            "display_name": MIGRATION_RUNNER_DISPLAY_NAME, "email": migration_runner,
+            "member": f"serviceAccount:{migration_runner}",
+            "name": f"projects/{project}/serviceAccounts/{migration_runner}"},
+        "google_iam_workload_identity_pool_provider.dev_app_migration[0]": {
+            "project": project, "workload_identity_pool_id": "helpdesk-github",
+            "workload_identity_pool_provider_id": MIGRATION_RUNNER_PROVIDER_ID,
+            "display_name": "App database migration Dev", "disabled": False,
+            "attribute_mapping": SUPPORT_PUBLISHER_MAPPING,
+            "attribute_condition": MIGRATION_RUNNER_CONDITION,
+            "oidc": [{"issuer_uri": "https://token.actions.githubusercontent.com"}]},
+        "google_service_account_iam_member.dev_app_migration_runner_wif[0]": {
+            "role": "roles/iam.workloadIdentityUser",
+            "service_account_id": f"projects/{project}/serviceAccounts/{migration_runner}",
+            "member": MIGRATION_RUNNER_MEMBER},
+        "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]": {
+            "project": project, "role": "roles/container.clusterViewer",
+            "member": f"serviceAccount:{migration_runner}",
+            "condition": [{"title": "helpdesk-dev-migration-runner-cluster",
+                           "description": "Allow cluster discovery only for the existing Dev GKE cluster",
+                           "expression": MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION}]},
     }
     config = {
         "root_module": {
@@ -262,6 +295,30 @@ def fixture():
                         "google_artifact_registry_repository.dev_images[0].repository_id")},
                     "member": {"references": terraform_references(
                         "google_service_account.dev_app_support_image_publisher[0].member")}}},
+                {"address": "google_service_account.dev_app_migration_runner", "expressions": {
+                    "account_id": {"constant_value": MIGRATION_RUNNER_ACCOUNT_ID},
+                    "display_name": {"constant_value": MIGRATION_RUNNER_DISPLAY_NAME},
+                    "project": {"references": ["var.project_id"]}}},
+                {"address": "google_iam_workload_identity_pool_provider.dev_app_migration", "expressions": {
+                    "project": {"references": ["var.project_id"]},
+                    "workload_identity_pool_id": {"constant_value": "helpdesk-github"},
+                    "workload_identity_pool_provider_id": {"constant_value": MIGRATION_RUNNER_PROVIDER_ID},
+                    "attribute_mapping": {"constant_value": SUPPORT_PUBLISHER_MAPPING},
+                    "attribute_condition": {"constant_value": MIGRATION_RUNNER_CONDITION}}},
+                {"address": "google_service_account_iam_member.dev_app_migration_runner_wif",
+                 "expressions": {"role": {"constant_value": "roles/iam.workloadIdentityUser"},
+                                 "member": {"constant_value": MIGRATION_RUNNER_MEMBER},
+                                 "service_account_id": {"references": terraform_references(
+                                     "google_service_account.dev_app_migration_runner[0].name")}}},
+                {"address": "google_project_iam_member.dev_app_migration_runner_cluster_viewer",
+                 "expressions": {"role": {"constant_value": "roles/container.clusterViewer"},
+                                 "project": {"references": ["var.project_id"]},
+                                 "member": {"references": terraform_references(
+                                     "google_service_account.dev_app_migration_runner[0].member")},
+                                 "condition": [{
+                                     "title": {"constant_value": "helpdesk-dev-migration-runner-cluster"},
+                                     "description": {"constant_value": "Allow cluster discovery only for the existing Dev GKE cluster"},
+                                     "expression": {"constant_value": MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION}}]}},
             ],
             "module_calls": {"dev_network": {"module": {"resources": [
                 {"address": "google_compute_subnetwork.this", "expressions": {
@@ -275,14 +332,16 @@ def fixture():
         }
     }
     planned = [{"mode": "managed", "address": address, "type": kind,
-                "values": (phase8[address] if address in PHASE8
+                "values": (phase9[address] if address in PHASE9
+                           else phase8[address] if address in PHASE8
                            else phase7[address] if address in PHASE7
                            else (network | phase6)[kind])}
                for address, kind in EXPECTED.items()]
     changes = [{"mode": "managed", "address": address, "type": kind,
-                "change": {"actions": ["no-op"] if address in (BASE | PHASE8) else ["create"]}}
+                "change": {"actions": ["no-op"] if address in (BASE | PHASE8 | PHASE9) else ["create"]}}
                for address, kind in EXPECTED.items()]
-    prior_state = [copy.deepcopy(resource) for resource in planned if resource["address"] in (BASE | PHASE8)]
+    prior_state = [copy.deepcopy(resource) for resource in planned
+                   if resource["address"] in (BASE | PHASE8 | PHASE9)]
     return {
         "variables": {key: {"value": value} for key, value in {
             "project_id": "helpdeskcloud-capstone-511905", "region": "us-east1", "environment": "dev"}.items()},
@@ -300,7 +359,7 @@ def resource(plan, address):
 
 def set_prior_phase7(plan, addresses):
     """Set the prior state to the fixture's baseline plus selected Phase 7 addresses."""
-    allowed = set(BASE) | set(addresses) | set(PHASE8)
+    allowed = set(BASE) | set(addresses) | set(PHASE8) | set(PHASE9)
     plan["prior_state"]["values"]["root_module"]["resources"] = [
         copy.deepcopy(item) for item in plan["planned_values"]["root_module"]["resources"]
         if item["address"] in allowed
@@ -348,6 +407,31 @@ def support_images_provider_recovery_plan():
         elif address in PHASE8:
             change["change"]["actions"] = ["no-op"]
     plan["resource_drift"] = [artifact_reader_etag_drift()]
+    return plan
+
+
+def migration_runner_create_plan():
+    """Model the exact Phase 9 batch after Phase 7 and Phase 8 are deployed."""
+    plan = fixture()
+    set_prior_phase7(plan, PHASE7)
+    plan["prior_state"]["values"]["root_module"]["resources"] = [
+        item for item in plan["prior_state"]["values"]["root_module"]["resources"]
+        if item["address"] not in PHASE9
+    ]
+    for change in plan["resource_changes"]:
+        address = change["address"]
+        if address in PHASE7 or address in PHASE8:
+            change["change"]["actions"] = ["no-op"]
+        elif address in PHASE9:
+            change["change"]["actions"] = ["create"]
+    for address, field in (
+        ("google_service_account.dev_app_migration_runner[0]", "email"),
+        ("google_service_account.dev_app_migration_runner[0]", "member"),
+        ("google_service_account.dev_app_migration_runner[0]", "name"),
+        ("google_service_account_iam_member.dev_app_migration_runner_wif[0]", "service_account_id"),
+        ("google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]", "member"),
+    ):
+        mark_unknown(plan, address, (field,))
     return plan
 
 
@@ -616,6 +700,7 @@ def evidence():
         "gke_node_service_account": "helpdesk-gke-node-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com",
         "app_service_account": "helpdesk-app-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com",
         "migration_service_account": "helpdesk-migrate-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com",
+        "migration_runner_service_account": MIGRATION_RUNNER_EMAIL,
         "app_connection_secret": "projects/helpdeskcloud-capstone-511905/secrets/helpdesk-dev-db-connection",
         "migration_admin_secret": "projects/helpdeskcloud-capstone-511905/secrets/helpdesk-dev-db-admin-password",
     }.items()}
@@ -623,9 +708,12 @@ def evidence():
     node_email = f"helpdesk-gke-node-dev@{project}.iam.gserviceaccount.com"
     app_email = f"helpdesk-app-dev@{project}.iam.gserviceaccount.com"
     migration_email = f"helpdesk-migrate-dev@{project}.iam.gserviceaccount.com"
+    migration_runner_email = MIGRATION_RUNNER_EMAIL
     node_member = f"serviceAccount:{node_email}"
     app_member = f"serviceAccount:{app_email}"
     migration_member = f"serviceAccount:{migration_email}"
+    migration_runner_member = f"serviceAccount:{migration_runner_email}"
+    migration_runner_wif_member = MIGRATION_RUNNER_MEMBER
     app_ksa = f"serviceAccount:{project}.svc.id.goog[helpdesk-dev/helpdesk-dev-app]"
     migration_ksa = f"serviceAccount:{project}.svc.id.goog[helpdesk-dev/helpdesk-dev-migrate]"
     principal = (f"principal://iam.googleapis.com/projects/260283083469/locations/global/"
@@ -672,7 +760,11 @@ def evidence():
                        {"role": "roles/artifactregistry.writer",
                         "members": [f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}"]}]},
         {"bindings": [{"role": "roles/container.defaultNodeServiceAccount", "members": [node_member]},
-                      {"role": "roles/cloudsql.client", "members": [app_member, migration_member]}]}, sql,
+                      {"role": "roles/cloudsql.client", "members": [app_member, migration_member]},
+                      {"role": "roles/container.clusterViewer", "members": [migration_runner_member],
+                       "condition": {"title": "helpdesk-dev-migration-runner-cluster",
+                                     "description": "Allow cluster discovery only for the existing Dev GKE cluster",
+                                     "expression": MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION}}]}, sql,
         [{"name": "helpdesk", "instance": "helpdeskcloud-dev-postgres"}], outputs,
         cluster,
         {"email": node_email}, {"email": app_email}, {"email": migration_email},
@@ -689,6 +781,13 @@ def evidence():
         {"name": f"projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/{SUPPORT_PUBLISHER_PROVIDER_ID}",
          "state": "ACTIVE", "attributeMapping": SUPPORT_PUBLISHER_MAPPING,
          "attributeCondition": SUPPORT_PUBLISHER_CONDITION,
+         "oidc": {"issuerUri": "https://token.actions.githubusercontent.com"}},
+        {"email": migration_runner_email, "disabled": False},
+        {"bindings": [{"role": "roles/iam.workloadIdentityUser",
+                        "members": [migration_runner_wif_member]}]},
+        {"name": f"projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/{MIGRATION_RUNNER_PROVIDER_ID}",
+         "state": "ACTIVE", "attributeMapping": SUPPORT_PUBLISHER_MAPPING,
+         "attributeCondition": MIGRATION_RUNNER_CONDITION,
          "oidc": {"issuerUri": "https://token.actions.githubusercontent.com"}},
     ]
 
@@ -940,6 +1039,8 @@ class GuardTests(unittest.TestCase):
             "google_service_account.dev_migration[0].member": "google_service_account.dev_app[0].member",
             "google_service_account.dev_app_support_image_publisher[0].name": "google_service_account.dev_migration[0].name",
             "google_service_account.dev_app_support_image_publisher[0].member": "google_service_account.dev_migration[0].member",
+            "google_service_account.dev_app_migration_runner[0].name": "google_service_account.dev_migration[0].name",
+            "google_service_account.dev_app_migration_runner[0].member": "google_service_account.dev_migration[0].member",
             "google_artifact_registry_repository.dev_images[0].location": "google_artifact_registry_repository.other[0].location",
             "google_artifact_registry_repository.dev_images[0].repository_id": "google_artifact_registry_repository.other[0].repository_id",
             "google_secret_manager_secret.dev_app_connection[0].id": "google_secret_manager_secret.dev_admin_password[0].id",
@@ -1077,6 +1178,81 @@ class GuardTests(unittest.TestCase):
             mutate(prior["values"])
             with self.subTest(address=address), self.assertRaisesRegex(ValueError, message):
                 check_plan(plan)
+
+    def test_migration_runner_is_created_as_one_exact_phase9_batch(self):
+        plan = migration_runner_create_plan()
+        self.assertEqual(len(MIGRATION_RUNNER_ACCOUNT_ID), 28)
+        self.assertLessEqual(len(MIGRATION_RUNNER_ACCOUNT_ID), 30)
+        self.assertEqual(check_plan(plan), "apply")
+        creates = {change["address"] for change in plan["resource_changes"]
+                   if change["change"]["actions"] == ["create"]}
+        self.assertEqual(creates, set(PHASE9))
+
+    def test_migration_runner_rejects_partial_state_or_partial_creation(self):
+        plan = migration_runner_create_plan()
+        plan["prior_state"]["values"]["root_module"]["resources"].append(
+            copy.deepcopy(resource(plan, next(iter(PHASE9)))))
+        with self.assertRaisesRegex(ValueError, "Phase 9"):
+            check_plan(plan)
+
+        for address in PHASE9:
+            plan = migration_runner_create_plan()
+            next(change for change in plan["resource_changes"]
+                 if change["address"] == address)["change"]["actions"] = ["no-op"]
+            with self.subTest(address=address), self.assertRaisesRegex(ValueError, "Phase 9"):
+                check_plan(plan)
+
+    def test_migration_runner_rejects_unsafe_wif_and_iam_mutations(self):
+        mutations = (
+            ("google_service_account.dev_app_migration_runner[0]",
+             lambda value: value.update(project="another-project")),
+            ("google_service_account.dev_app_migration_runner[0]",
+             lambda value: value.update(account_id="helpdesk-migration-runner-too-long")),
+            ("google_iam_workload_identity_pool_provider.dev_app_migration[0]",
+             lambda value: value.update(workload_identity_pool_id="another-pool")),
+            ("google_iam_workload_identity_pool_provider.dev_app_migration[0]",
+             lambda value: value.update(workload_identity_pool_provider_id="another-provider")),
+            ("google_iam_workload_identity_pool_provider.dev_app_migration[0]",
+             lambda value: value.update(attribute_condition=value["attribute_condition"].replace(
+                 "1423008128", "1423008129"))),
+            ("google_iam_workload_identity_pool_provider.dev_app_migration[0]",
+             lambda value: value.update(attribute_condition=value["attribute_condition"].replace(
+                 "refs/heads/dev", "refs/heads/main"))),
+            ("google_iam_workload_identity_pool_provider.dev_app_migration[0]",
+             lambda value: value.update(attribute_condition=value["attribute_condition"].replace(
+                 "dev-db-migration", "another-environment"))),
+            ("google_iam_workload_identity_pool_provider.dev_app_migration[0]",
+             lambda value: value.update(attribute_condition=value["attribute_condition"].replace(
+                 "dev-db-migration.yml", "another-workflow.yml"))),
+            ("google_service_account_iam_member.dev_app_migration_runner_wif[0]",
+             lambda value: value.update(member="principalSet://iam.googleapis.com/*")),
+            ("google_service_account_iam_member.dev_app_migration_runner_wif[0]",
+             lambda value: value.update(role="roles/iam.serviceAccountTokenCreator")),
+            ("google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]",
+             lambda value: value.update(project="another-project")),
+            ("google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]",
+             lambda value: value.update(role="roles/container.admin")),
+            ("google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]",
+             lambda value: value["condition"][0].update(expression=(
+                 'resource.type == "container.googleapis.com/Cluster" && '
+                 'resource.name == "projects/another-project/locations/us-east1/clusters/helpdeskcloud-dev-gke"'))),
+            ("google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]",
+             lambda value: value["condition"][0].update(title="unrestricted")),
+        )
+        for address, mutate in mutations:
+            plan = migration_runner_create_plan()
+            mutate(resource(plan, address)["values"])
+            with self.subTest(address=address), self.assertRaises(ValueError):
+                check_plan(plan)
+
+    def test_migration_runner_rejects_resource_replacement_update_and_deletion(self):
+        for address in PHASE9:
+            for actions in (["update"], ["delete"], ["delete", "create"]):
+                plan = fixture()
+                next(change for change in plan["resource_changes"]
+                     if change["address"] == address)["change"]["actions"] = actions
+                with self.subTest(address=address, actions=actions), self.assertRaisesRegex(ValueError, "Phase 9"):
+                    check_plan(plan)
 
     def test_apply21_recovery_rejects_other_phase8_actions_or_existing_provider(self):
         for address, actions in (
@@ -1869,7 +2045,7 @@ class GuardTests(unittest.TestCase):
                 redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
             main()
         self.assertEqual(error.exception.code, 1)
-        self.assertIn("SUPPORT_IMAGE_PROVIDER STATE_LIST", stderr.getvalue())
+        self.assertIn("MIGRATION_RUNNER_PROVIDER STATE_LIST", stderr.getvalue())
         verify.assert_not_called()
 
     def test_apply_workflow_evidence_arguments_match_guard_contract(self):
@@ -1890,7 +2066,9 @@ class GuardTests(unittest.TestCase):
             "cluster.json", "node-sa.json", "app-sa.json", "migration-sa.json", "app-secret.json",
             "admin-secret.json", "app-sa-iam.json", "migration-sa-iam.json", "app-secret-iam.json",
             "admin-secret-iam.json", "state.json", "support-image-publisher-sa.json",
-            "support-image-publisher-sa-iam.json", "support-image-provider.json", "state-addresses.txt",
+            "support-image-publisher-sa-iam.json", "support-image-provider.json",
+            "migration-runner-sa.json", "migration-runner-sa-iam.json",
+            "migration-runner-provider.json", "state-addresses.txt",
         )
         self.assertEqual(DEPLOYMENT_EVIDENCE_PATH_COUNT, len(expected_names))
         self.assertEqual(tuple(argument_names), expected_names)
