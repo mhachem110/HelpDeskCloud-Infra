@@ -559,11 +559,24 @@ def registry_drift():
     before = {"project": "helpdeskcloud-capstone-511905", "location": "us-east1",
               "repository_id": "helpdeskcloud-dev-images", "format": "DOCKER",
               "docker_config": [{"immutable_tags": True}], "labels": None,
+              "update_time": "2026-10-19T12:00:00.123456789Z",
               "terraform_labels": ATTRIBUTION_LABEL, "effective_labels": ATTRIBUTION_LABEL}
     after = copy.deepcopy(before)
     after["labels"] = {}
     return {"mode": "managed", "address": REGISTRY_ADDRESS, "type": "google_artifact_registry_repository",
             "change": {"actions": ["update"], "before": before, "after": after}}
+
+
+def registry_timestamp_drift(before_time, after_time):
+    """Model image publication changing only the repository's update timestamp."""
+    drift = registry_drift()
+    before = drift["change"]["before"]
+    after = drift["change"]["after"]
+    before["labels"] = {}
+    after["labels"] = {}
+    before["update_time"] = before_time
+    after["update_time"] = after_time
+    return drift
 
 
 def sql_readback_drift():
@@ -1540,8 +1553,11 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(check_plan(self.plan), "apply")
 
     def test_registry_normalization_rejects_wrong_identity_labels_or_other_changes(self):
+        before_time = "2026-10-19T12:00:00.123456789Z"
+        after_time = "2026-10-19T12:15:42.987654321Z"
         mutations = (
             lambda d: d["change"]["after"].update(project="another-project"),
+            lambda d: d["change"]["after"].update(location="us-west1"),
             lambda d: d["change"]["after"].update(repository_id="another-repository"),
             lambda d: d["change"]["after"].update(format="MAVEN"),
             lambda d: d["change"]["after"].update(labels={"owner": "private-value"}),
@@ -1550,7 +1566,7 @@ class GuardTests(unittest.TestCase):
             lambda d: d["change"]["after"]["docker_config"][0].update(immutable_tags=False),
         )
         for mutate in mutations:
-            drift = registry_drift()
+            drift = registry_timestamp_drift(before_time, after_time)
             mutate(drift)
             self.plan["resource_drift"] = [drift]
             with self.subTest(drift=drift), self.assertRaisesRegex(ValueError, "drift"):
@@ -1561,6 +1577,33 @@ class GuardTests(unittest.TestCase):
         change["change"]["actions"] = ["update"]
         self.plan["resource_drift"] = [drift]
         with self.assertRaisesRegex(ValueError, "readback only"):
+            check_plan(self.plan)
+
+    def test_registry_timestamp_only_drift_is_allowed_for_unchanged_repository(self):
+        self.plan["resource_drift"] = [registry_timestamp_drift(
+            "2026-10-19T12:00:00.123456789Z", "2026-10-19T12:15:42.987654321Z")]
+        self.assertEqual(check_plan(self.plan), "apply")
+
+    def test_registry_timestamp_drift_rejects_malformed_timestamp_values(self):
+        valid = "2026-10-19T12:00:00.123456789Z"
+        malformed_values = (
+            "not-a-timestamp",
+            "2026-02-30T12:00:00Z",
+            "2026-10-19T12:00:00",
+            "",
+            None,
+            1760875200,
+        )
+        for malformed in malformed_values:
+            for before_time, after_time in ((malformed, valid), (valid, malformed)):
+                self.plan["resource_drift"] = [registry_timestamp_drift(before_time, after_time)]
+                with self.subTest(before_time=before_time, after_time=after_time):
+                    with self.assertRaisesRegex(ValueError, "drift"):
+                        check_plan(self.plan)
+
+        # Equal malformed metadata is still not a provider timestamp representation.
+        self.plan["resource_drift"] = [registry_timestamp_drift("bad", "bad")]
+        with self.assertRaisesRegex(ValueError, "drift"):
             check_plan(self.plan)
 
     def test_sql_readback_normalization_rejects_other_versions_and_configuration_changes(self):

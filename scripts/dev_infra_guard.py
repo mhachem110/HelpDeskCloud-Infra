@@ -5,8 +5,10 @@ only a decision or a short error, never plan or state contents.
 """
 
 import json
+import re
 import sys
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 
 
@@ -188,6 +190,9 @@ PROJECT_IAM_READBACKS = {
 SECRET_EMPTY_MAP_FIELDS = ("annotations", "labels", "version_aliases")
 ATTRIBUTION_LABEL = {"goog-terraform-provisioned": "true"}
 MISSING = object()
+RFC3339_TIMESTAMP = re.compile(
+    r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z"
+)
 
 # Terraform records these counted resource traversals alongside their selected
 # attribute. Keep this allowlist literal: another instance, attribute, or
@@ -808,6 +813,17 @@ def check_phase7(values, plan, creates):
                             f"Secret Manager target: {address}")
 
 
+def valid_rfc3339_timestamp(value):
+    """Return whether a provider update_time is a valid timezone-aware RFC3339 value."""
+    if not isinstance(value, str) or not RFC3339_TIMESTAMP.fullmatch(value):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
 def permitted_drift(entry):
     """Accept only exact provider readbacks, with every other field identical."""
     address = entry.get("address")
@@ -967,18 +983,53 @@ def permitted_drift(entry):
         return {k: v for k, v in before.items() if k != "labels"} == {
             k: v for k, v in after.items() if k != "labels"}
 
+    
     if address == REGISTRY_ADDRESS:
         expected_identity = (PROJECT, "us-east1", "helpdeskcloud-dev-images")
-        if (tuple(before.get(key) for key in ("project", "location", "repository_id")) != expected_identity
-                or tuple(after.get(key) for key in ("project", "location", "repository_id")) != expected_identity
-                or before.get("labels", MISSING) is not None or after.get("labels", MISSING) != {}
-                or before.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL
-                or after.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL
-                or before.get("effective_labels", MISSING) != ATTRIBUTION_LABEL
-                or after.get("effective_labels", MISSING) != ATTRIBUTION_LABEL):
+
+        if (
+            tuple(before.get(k) for k in ("project", "location", "repository_id"))
+            != expected_identity
+            or tuple(after.get(k) for k in ("project", "location", "repository_id"))
+            != expected_identity
+            or before.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL
+            or after.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL
+            or before.get("effective_labels", MISSING) != ATTRIBUTION_LABEL
+            or after.get("effective_labels", MISSING) != ATTRIBUTION_LABEL
+        ):
             return False
-        return {k: v for k, v in before.items() if k != "labels"} == {
-            k: v for k, v in after.items() if k != "labels"}
+
+        # Accept only the known empty-label representations.
+        before_labels = before.get("labels", MISSING)
+        after_labels = after.get("labels", MISSING)
+
+        if not (
+            (before_labels is None and after_labels == {})
+            or (before_labels == {} and after_labels == {})
+        ):
+            return False
+
+        # Publishing images can change repository update_time.
+        before_time = before.get("update_time", MISSING)
+        after_time = after.get("update_time", MISSING)
+        time_changed = before_time != after_time
+
+        if ((before_time is not MISSING or after_time is not MISSING)
+                and not (valid_rfc3339_timestamp(before_time)
+                         and valid_rfc3339_timestamp(after_time))):
+            return False
+
+        if before_labels == after_labels and not time_changed:
+            return False
+
+        # Every actual repository configuration field must match.
+        ignored = {"labels", "update_time"}
+        return (
+            {k: v for k, v in before.items() if k not in ignored}
+            ==
+            {k: v for k, v in after.items() if k not in ignored}
+        )
+
 
     if address == SQL_ADDRESS:
         identity = (PROJECT, "helpdeskcloud-dev-postgres", "us-east1", "POSTGRES_17")
