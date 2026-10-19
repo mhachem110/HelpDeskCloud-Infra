@@ -22,7 +22,17 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              MISSING,
                              REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH,
                              VPC_LINK, VPC_PATH, VPC_PATHS,
-                             check_plan, diagnose_drift, main, permitted_drift, verify_deployment)
+                             check_plan, diagnose_drift, main, normalize_cel, permitted_drift,
+                             support_provider_identity_checks, verify_deployment)
+
+
+SUPPORT_PUBLISHER_MULTILINE_CONDITION = '''\
+attribute.repository == "mhachem110/HelpDeskCloud-App" &&
+attribute.repository_id == "1423008128" &&
+attribute.repository_owner_id == "150286776" &&
+attribute.ref == "refs/heads/dev" &&
+attribute.environment == "dev-supporting-images-publish" &&
+attribute.workflow_ref == "mhachem110/HelpDeskCloud-App/.github/workflows/supporting-images-ci.yml@refs/heads/dev"'''
 
 
 def terraform_references(attribute_reference):
@@ -1154,6 +1164,64 @@ class GuardTests(unittest.TestCase):
                 report = "\n".join(diagnose_drift(plan))
                 self.assertIn("provider identity: expected", report)
                 self.assertIn("oidc[0].allowed_audiences", report)
+
+    def test_supporting_image_provider_accepts_multiline_cel_readback_only(self):
+        plan = support_provider_audience_drift(None, [])
+        set_prior_phase7(plan, PHASE7)
+        for change in plan["resource_changes"]:
+            change["change"]["actions"] = ["no-op"]
+        drift = plan["resource_drift"][0]["change"]
+        expected_id = (
+            "projects/helpdeskcloud-capstone-511905/locations/global/"
+            "workloadIdentityPools/helpdesk-github/providers/github-app-support-images-dev"
+        )
+        for snapshot in (drift["before"], drift["after"]):
+            snapshot["attribute_condition"] = SUPPORT_PUBLISHER_MULTILINE_CONDITION
+            snapshot["id"] = expected_id
+
+        self.assertEqual(check_plan(plan), "no_changes")
+        report = "\n".join(diagnose_drift(plan))
+        self.assertIn("before provider identity checks: project=expected", report)
+        self.assertIn("attribute_condition=expected", report)
+        self.assertIn("resource_id=expected", report)
+        self.assertNotIn(SUPPORT_PUBLISHER_MULTILINE_CONDITION, report)
+
+    def test_cel_normalization_preserves_quoted_trust_values(self):
+        self.assertEqual(normalize_cel(SUPPORT_PUBLISHER_MULTILINE_CONDITION),
+                         normalize_cel(SUPPORT_PUBLISHER_CONDITION))
+        unsafe_conditions = (
+            SUPPORT_PUBLISHER_MULTILINE_CONDITION.replace('"1423008128"', '"1423008129"'),
+            SUPPORT_PUBLISHER_MULTILINE_CONDITION.replace('"150286776"', '"150286777"'),
+            SUPPORT_PUBLISHER_MULTILINE_CONDITION.replace('"refs/heads/dev"', '"refs/heads/main"'),
+            SUPPORT_PUBLISHER_MULTILINE_CONDITION.replace(
+                '"dev-supporting-images-publish"', '"other-environment"'),
+            SUPPORT_PUBLISHER_MULTILINE_CONDITION.replace(
+                '"mhachem110/HelpDeskCloud-App"', '"mhachem110 /HelpDeskCloud-App"'),
+        )
+        for condition in unsafe_conditions:
+            with self.subTest(condition=condition.splitlines()[0]):
+                self.assertNotEqual(normalize_cel(condition),
+                                    normalize_cel(SUPPORT_PUBLISHER_CONDITION))
+                plan = support_provider_audience_drift(None, [])
+                drift = plan["resource_drift"][0]["change"]
+                for snapshot in (drift["before"], drift["after"]):
+                    snapshot["attribute_condition"] = condition
+                with self.assertRaisesRegex(ValueError, "drift"):
+                    check_plan(plan)
+
+    def test_support_provider_identity_requires_project_id_provider_path(self):
+        plan = support_provider_audience_drift(None, [])
+        drift = plan["resource_drift"][0]["change"]
+        project_number_path = (
+            "projects/260283083469/locations/global/"
+            "workloadIdentityPools/helpdesk-github/providers/github-app-support-images-dev"
+        )
+        drift["before"]["id"] = project_number_path
+        checks = support_provider_identity_checks(drift["before"])
+        self.assertFalse(checks["resource_id"])
+        self.assertFalse(all(checks.values()))
+        with self.assertRaisesRegex(ValueError, "drift"):
+            check_plan(plan)
 
     def test_supporting_image_provider_rejects_nonempty_or_unchanged_audiences(self):
         for before, after in (

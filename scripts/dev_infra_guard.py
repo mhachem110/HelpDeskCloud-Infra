@@ -261,8 +261,33 @@ def check_phase6(values):
 
 
 def normalize_cel(expression):
-    """Ignore only insignificant CEL whitespace when comparing reviewed conditions."""
-    return " ".join(expression.split()) if isinstance(expression, str) else None
+    """Collapse CEL whitespace outside string literals without changing claims."""
+    if not isinstance(expression, str):
+        return None
+
+    normalized = []
+    in_string = False
+    escaped = False
+    pending_space = False
+    for character in expression:
+        if in_string:
+            normalized.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+        elif character.isspace():
+            pending_space = True
+        else:
+            if pending_space and normalized:
+                normalized.append(" ")
+            normalized.append(character)
+            pending_space = False
+            if character == '"':
+                in_string = True
+    return "".join(normalized).strip()
 
 
 def check_phase8(values, plan, creates, addresses=None):
@@ -1107,22 +1132,32 @@ def single_block(value):
     return {}
 
 
-def support_provider_identity_matches(snapshot):
+def support_provider_identity_checks(snapshot):
     expected_provider_id = (
         f"projects/{PROJECT}/locations/global/workloadIdentityPools/helpdesk-github/"
         f"providers/{SUPPORT_PUBLISHER_PROVIDER_ID}"
     )
     oidc = single_block(snapshot.get("oidc"))
-    return (
-        snapshot.get("project") in (PROJECT, PROJECT_NUMBER)
-        and snapshot.get("workload_identity_pool_id") == "helpdesk-github"
-        and snapshot.get("workload_identity_pool_provider_id") == SUPPORT_PUBLISHER_PROVIDER_ID
-        and snapshot.get("disabled") is False
-        and snapshot.get("attribute_mapping") == SUPPORT_PUBLISHER_MAPPING
-        and snapshot.get("attribute_condition") == SUPPORT_PUBLISHER_CONDITION
-        and oidc.get("issuer_uri") == "https://token.actions.githubusercontent.com"
-        and snapshot.get("id", expected_provider_id) == expected_provider_id
-    )
+    return {
+        "project": snapshot.get("project") in (PROJECT, PROJECT_NUMBER),
+        "pool": snapshot.get("workload_identity_pool_id") == "helpdesk-github",
+        "provider": snapshot.get("workload_identity_pool_provider_id") == SUPPORT_PUBLISHER_PROVIDER_ID,
+        "enabled": snapshot.get("disabled") is False,
+        "mapping": snapshot.get("attribute_mapping") == SUPPORT_PUBLISHER_MAPPING,
+        # Google may read the same CEL expression back with the Terraform heredoc's
+        # multiline formatting. normalize_cel ignores only whitespace outside the
+        # quoted claim values; repository IDs, branch, Environment, and workflow
+        # text inside those literals remain byte-for-byte exact.
+        "attribute_condition": normalize_cel(snapshot.get("attribute_condition"))
+        == normalize_cel(SUPPORT_PUBLISHER_CONDITION),
+        "issuer": oidc.get("issuer_uri") == "https://token.actions.githubusercontent.com",
+        # Apply #22's provider output confirmed the canonical path uses project ID.
+        "resource_id": snapshot.get("id", expected_provider_id) == expected_provider_id,
+    }
+
+
+def support_provider_identity_matches(snapshot):
+    return all(support_provider_identity_checks(snapshot).values())
 
 
 def ca_mode_status(value):
@@ -1177,6 +1212,10 @@ def diagnose_drift(plan):
                 lines.append("  " + snapshot_name + " provider identity: "
                              + ("expected" if support_provider_identity_matches(snapshot)
                                 else "unexpected (values withheld)"))
+                checks = support_provider_identity_checks(snapshot)
+                lines.append("  " + snapshot_name + " provider identity checks: "
+                             + ", ".join(f"{name}={'expected' if matches else 'unexpected'}"
+                                          for name, matches in checks.items()))
                 lines.append("  " + snapshot_name + " oidc[0].allowed_audiences: "
                              + empty_set_status(oidc.get("allowed_audiences", MISSING)))
         if entry.get("address") in PROJECT_IAM_READBACKS and isinstance(before, dict) and isinstance(after, dict):
