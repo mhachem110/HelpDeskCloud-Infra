@@ -27,6 +27,9 @@ resource "google_secret_manager_secret_iam_member" "dev_app_secret_access" {
   secret_id = google_secret_manager_secret.dev_app_connection[0].id
   role      = "roles/secretmanager.secretAccessor"
   member    = "principal://iam.googleapis.com/projects/260283083469/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/helpdesk-dev/sa/helpdesk-dev-app"
+
+  # GKE creates the workload pool referenced by this principal URI.
+  depends_on = [google_container_cluster.dev]
 }
 
 resource "google_secret_manager_secret_iam_member" "dev_admin_secret_access" {
@@ -34,4 +37,6 @@ resource "google_secret_manager_secret_iam_member" "dev_admin_secret_access" {
   secret_id = google_secret_manager_secret.dev_admin_password[0].id
   role      = "roles/secretmanager.secretAccessor"
   member    = "principal://iam.googleapis.com/projects/260283083469/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/helpdesk-dev/sa/helpdesk-dev-migrate"
+
+  depends_on = [google_container_cluster.dev]
 }

@@ -6,8 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dev_infra_guard import (ATTRIBUTION_LABEL, BASE, EXPECTED, NETWORK, PHASE6, PHASE7, PSA_ADDRESS,
-                             REGISTRY_ADDRESS, SQL_ADDRESS, SUBNET_ADDRESS, VPC_LINK, VPC_PATH,
+from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_LABEL, BASE, EXPECTED,
+                             NETWORK, PHASE6, PHASE7, PSA_ADDRESS, REGISTRY_ADDRESS, SQL_ADDRESS,
+                             SUBNET_ADDRESS, VPC_LINK, VPC_PATH,
                              check_plan, diagnose_drift, verify_deployment)
 
 
@@ -155,15 +156,19 @@ def fixture():
                  "expressions": {"role": {"constant_value": "roles/artifactregistry.reader"},
                                  "member": {"references": terraform_references("google_service_account.dev_gke_nodes[0].member")}}},
                 {"address": "google_service_account_iam_member.dev_app_workload_identity",
+                 "depends_on": ["google_container_cluster.dev"],
                  "expressions": {"role": {"constant_value": "roles/iam.workloadIdentityUser"},
                                  "service_account_id": {"references": terraform_references("google_service_account.dev_app[0].name")}}},
                 {"address": "google_service_account_iam_member.dev_migration_workload_identity",
+                 "depends_on": ["google_container_cluster.dev"],
                  "expressions": {"role": {"constant_value": "roles/iam.workloadIdentityUser"},
                                  "service_account_id": {"references": terraform_references("google_service_account.dev_migration[0].name")}}},
                 {"address": "google_secret_manager_secret_iam_member.dev_app_secret_access",
+                 "depends_on": ["google_container_cluster.dev"],
                  "expressions": {"role": {"constant_value": "roles/secretmanager.secretAccessor"},
                                  "secret_id": {"references": terraform_references("google_secret_manager_secret.dev_app_connection[0].id")}}},
                 {"address": "google_secret_manager_secret_iam_member.dev_admin_secret_access",
+                 "depends_on": ["google_container_cluster.dev"],
                  "expressions": {"role": {"constant_value": "roles/secretmanager.secretAccessor"},
                                  "secret_id": {"references": terraform_references("google_secret_manager_secret.dev_admin_password[0].id")}}},
                 {"address": "google_service_account.dev_gke_nodes", "expressions": {
@@ -202,9 +207,11 @@ def fixture():
     changes = [{"mode": "managed", "address": address, "type": kind,
                 "change": {"actions": ["no-op"] if address in BASE else ["create"]}}
                for address, kind in EXPECTED.items()]
+    prior_state = [copy.deepcopy(resource) for resource in planned if resource["address"] in BASE]
     return {
         "variables": {key: {"value": value} for key, value in {
             "project_id": "helpdeskcloud-capstone-511905", "region": "us-east1", "environment": "dev"}.items()},
+        "prior_state": {"values": {"root_module": {"resources": prior_state}}},
         "planned_values": {"root_module": {"resources": planned}},
         "resource_changes": changes,
         "configuration": config,
@@ -214,6 +221,25 @@ def fixture():
 def resource(plan, address):
     return next(r for r in plan["planned_values"]["root_module"]["resources"]
                 if r["address"] == address)
+
+
+def set_prior_phase7(plan, addresses):
+    """Set the prior state to the fixture's baseline plus selected Phase 7 addresses."""
+    allowed = set(BASE) | set(addresses)
+    plan["prior_state"]["values"]["root_module"]["resources"] = [
+        copy.deepcopy(item) for item in plan["planned_values"]["root_module"]["resources"]
+        if item["address"] in allowed
+    ]
+
+
+def apply12_recovery_plan():
+    """Model a refreshed plan after Apply #12 created exactly its six successful resources."""
+    plan = fixture()
+    for change in plan["resource_changes"]:
+        if change["address"] in APPLY12_COMPLETED:
+            change["change"]["actions"] = ["no-op"]
+    set_prior_phase7(plan, APPLY12_COMPLETED)
+    return plan
 
 
 def set_nested(document, path, value):
@@ -456,6 +482,51 @@ class GuardTests(unittest.TestCase):
     def test_exact_phase7_creations(self):
         self.assertEqual(check_plan(self.plan), "apply")
 
+    def test_exact_apply12_partial_state_allows_only_the_verified_remainder(self):
+        plan = apply12_recovery_plan()
+        self.assertEqual(check_plan(plan), "apply")
+        creates = {change["address"] for change in plan["resource_changes"]
+                   if change["change"]["actions"] == ["create"]}
+        self.assertEqual(creates, APPLY12_REMAINING)
+
+    def test_apply12_recovery_rejects_a_different_created_inventory(self):
+        plan = apply12_recovery_plan()
+        completed = sorted(APPLY12_COMPLETED)[0]
+        remaining = sorted(APPLY12_REMAINING)[0]
+        next(c for c in plan["resource_changes"] if c["address"] == completed)["change"]["actions"] = ["create"]
+        next(c for c in plan["resource_changes"] if c["address"] == remaining)["change"]["actions"] = ["no-op"]
+        with self.assertRaisesRegex(ValueError, "Partial or inconsistent"):
+            check_plan(plan)
+
+    def test_apply12_recovery_requires_matching_prior_state(self):
+        plan = apply12_recovery_plan()
+        set_prior_phase7(plan, APPLY12_COMPLETED - {sorted(APPLY12_COMPLETED)[0]})
+        with self.assertRaisesRegex(ValueError, "Partial or inconsistent"):
+            check_plan(plan)
+
+    def test_apply12_recovery_rejects_unexpected_iam_or_resource_changes(self):
+        for actions in (["update"], ["delete"], ["delete", "create"]):
+            plan = apply12_recovery_plan()
+            next(c for c in plan["resource_changes"]
+                 if c["address"] == "google_project_iam_member.dev_app_cloudsql[0]")["change"]["actions"] = actions
+            with self.subTest(actions=actions), self.assertRaisesRegex(ValueError, "Phase 7"):
+                check_plan(plan)
+
+    def test_workload_and_secret_bindings_wait_for_gke_pool(self):
+        protected = (
+            "google_service_account_iam_member.dev_app_workload_identity",
+            "google_service_account_iam_member.dev_migration_workload_identity",
+            "google_secret_manager_secret_iam_member.dev_app_secret_access",
+            "google_secret_manager_secret_iam_member.dev_admin_secret_access",
+        )
+        for address in protected:
+            plan = fixture()
+            resource_config = next(item for item in plan["configuration"]["root_module"]["resources"]
+                                   if item["address"] == address)
+            resource_config["depends_on"] = []
+            with self.subTest(address=address), self.assertRaisesRegex(ValueError, "wait for the GKE"):
+                check_plan(plan)
+
     def test_exact_after_unknown_computed_identity_values_allow_initial_creation(self):
         self.assertEqual(check_plan(unknown_identity_plan()), "apply")
 
@@ -587,6 +658,7 @@ class GuardTests(unittest.TestCase):
     def test_no_changes_even_when_no_op_entries_are_omitted(self):
         for change in self.plan["resource_changes"]:
             change["change"]["actions"] = ["no-op"]
+        set_prior_phase7(self.plan, PHASE7)
         self.assertEqual(check_plan(self.plan), "no_changes")
         self.plan["resource_changes"] = []
         self.assertEqual(check_plan(self.plan), "no_changes")
@@ -600,6 +672,7 @@ class GuardTests(unittest.TestCase):
 
     def test_unexpected_network_cidr_is_rejected_even_without_a_change_entry(self):
         self.plan["resource_changes"] = []
+        set_prior_phase7(self.plan, PHASE7)
         self.values("google_compute_subnetwork")["ip_cidr_range"] = "10.21.0.0/20"
         with self.assertRaisesRegex(ValueError, "CIDR"):
             check_plan(self.plan)
@@ -791,6 +864,7 @@ class GuardTests(unittest.TestCase):
 
     def test_exact_drift_is_permitted_with_zero_change_plan(self):
         self.plan["resource_changes"] = []
+        set_prior_phase7(self.plan, PHASE7)
         self.plan["resource_drift"] = [label_drift(), metadata_drift()]
         self.assertEqual(check_plan(self.plan), "no_changes")
 
