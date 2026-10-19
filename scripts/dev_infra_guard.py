@@ -649,6 +649,7 @@ def permitted_drift(entry):
         REGISTRY_ADDRESS: PHASE6[REGISTRY_ADDRESS],
         SQL_ADDRESS: PHASE6[SQL_ADDRESS],
         CLUSTER_ADDRESS: PHASE7[CLUSTER_ADDRESS],
+        PHASE8_PROVIDER_ADDRESS: PHASE8[PHASE8_PROVIDER_ADDRESS],
         ARTIFACT_READER_IAM_ADDRESS: "google_artifact_registry_repository_iam_member",
         **{address: "google_project_iam_member" for address in PROJECT_IAM_READBACKS},
         **{secret: PHASE7[secret] for secret in SECRET_READBACK_NAMES},
@@ -659,6 +660,25 @@ def permitted_drift(entry):
     before, after = change.get("before"), change.get("after")
     if change.get("actions") != ["update"] or not isinstance(before, dict) or not isinstance(after, dict):
         return False
+
+    if address == PHASE8_PROVIDER_ADDRESS:
+        if not all(support_provider_identity_matches(snapshot) for snapshot in (before, after)):
+            return False
+
+        before_oidc, after_oidc = single_block(before.get("oidc")), single_block(after.get("oidc"))
+        before_audiences = before_oidc.get("allowed_audiences", MISSING)
+        after_audiences = after_oidc.get("allowed_audiences", MISSING)
+        empty_audiences = (MISSING, None, [])
+        if (before_audiences not in empty_audiences or after_audiences not in empty_audiences
+                or before_audiences == after_audiences):
+            return False
+
+        # The Google API and provider may represent the unset optional audience
+        # list as missing, null, or []. Keep every other provider value exact.
+        before_copy, after_copy = deepcopy(before), deepcopy(after)
+        single_block(before_copy.get("oidc")).pop("allowed_audiences", None)
+        single_block(after_copy.get("oidc")).pop("allowed_audiences", None)
+        return before_copy == after_copy
 
     if address in SECRET_READBACK_NAMES:
         secret_id = SECRET_READBACK_NAMES[address]
@@ -1087,6 +1107,24 @@ def single_block(value):
     return {}
 
 
+def support_provider_identity_matches(snapshot):
+    expected_provider_id = (
+        f"projects/{PROJECT}/locations/global/workloadIdentityPools/helpdesk-github/"
+        f"providers/{SUPPORT_PUBLISHER_PROVIDER_ID}"
+    )
+    oidc = single_block(snapshot.get("oidc"))
+    return (
+        snapshot.get("project") in (PROJECT, PROJECT_NUMBER)
+        and snapshot.get("workload_identity_pool_id") == "helpdesk-github"
+        and snapshot.get("workload_identity_pool_provider_id") == SUPPORT_PUBLISHER_PROVIDER_ID
+        and snapshot.get("disabled") is False
+        and snapshot.get("attribute_mapping") == SUPPORT_PUBLISHER_MAPPING
+        and snapshot.get("attribute_condition") == SUPPORT_PUBLISHER_CONDITION
+        and oidc.get("issuer_uri") == "https://token.actions.githubusercontent.com"
+        and snapshot.get("id", expected_provider_id) == expected_provider_id
+    )
+
+
 def ca_mode_status(value):
     if value in ("GOOGLE_MANAGED_INTERNAL_CA", "GOOGLE_MANAGED_CAS_CA", "CUSTOMER_MANAGED_CAS_CA"):
         return value
@@ -1133,6 +1171,14 @@ def diagnose_drift(plan):
             lines.append("  resource_labels: before="
                          + classify_address_labels(before.get("resource_labels", MISSING))
                          + "; after=" + classify_address_labels(after.get("resource_labels", MISSING)))
+        if entry.get("address") == PHASE8_PROVIDER_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
+            for snapshot_name, snapshot in (("before", before), ("after", after)):
+                oidc = single_block(snapshot.get("oidc"))
+                lines.append("  " + snapshot_name + " provider identity: "
+                             + ("expected" if support_provider_identity_matches(snapshot)
+                                else "unexpected (values withheld)"))
+                lines.append("  " + snapshot_name + " oidc[0].allowed_audiences: "
+                             + empty_set_status(oidc.get("allowed_audiences", MISSING)))
         if entry.get("address") in PROJECT_IAM_READBACKS and isinstance(before, dict) and isinstance(after, dict):
             expected_role, expected_member = PROJECT_IAM_READBACKS[entry["address"]]
             lines.append("  project representation: before=" + project_readback_status(before.get("project", MISSING))
