@@ -312,7 +312,10 @@ def check_phase8(values, plan, creates, addresses=None):
     if writer_address in addresses:
         writer = values[writer_address]
         require(writer.get("project") == PROJECT and writer.get("location") == "us-east1"
-                and writer.get("repository") == REGISTRY_REPOSITORY_ID
+                # The Google provider canonicalizes this IAM resource's repository
+                # field to the full resource path during refresh/import. Accept only
+                # that exact path or the repository ID used by the configuration.
+                and writer.get("repository") in (REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH)
                 and writer.get("role") == "roles/artifactregistry.writer",
                 "Supporting-image Writer must target only the existing Dev repository")
         expected_or_unknown(writer, writer_address, ("member",),

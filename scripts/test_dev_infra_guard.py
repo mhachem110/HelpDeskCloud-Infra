@@ -14,6 +14,7 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              SUPPORT_PUBLISHER_MEMBER, SUPPORT_PUBLISHER_PROVIDER_ID,
                              ARTIFACT_READER_IAM_ADDRESS, PHASE8_COMPLETED,
                              PHASE8_PROVIDER_ADDRESS,
+                             REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH,
                              VPC_LINK, VPC_PATH, VPC_PATHS,
                              check_plan, diagnose_drift, permitted_drift, verify_deployment)
 
@@ -162,7 +163,7 @@ def fixture():
             "service_account_id": f"projects/{project}/serviceAccounts/{support_publisher}",
             "member": SUPPORT_PUBLISHER_MEMBER},
         "google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]": {
-            "project": project, "location": "us-east1", "repository": "helpdeskcloud-dev-images",
+            "project": project, "location": "us-east1", "repository": REGISTRY_REPOSITORY_PATH,
             "role": "roles/artifactregistry.writer", "member": f"serviceAccount:{support_publisher}"},
     }
     config = {
@@ -1087,12 +1088,34 @@ class GuardTests(unittest.TestCase):
              lambda values: values.update(repository="another-repository"), "existing Dev repository"),
             ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]",
              lambda values: values.update(role="roles/artifactregistry.admin"), "existing Dev repository"),
+            ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]",
+             lambda values: values.update(project="another-project"), "existing Dev repository"),
+            ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]",
+             lambda values: values.update(location="us-west1"), "existing Dev repository"),
+            ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]",
+             lambda values: values.update(repository=(
+                 "projects/another-project/locations/us-east1/repositories/helpdeskcloud-dev-images")),
+             "existing Dev repository"),
+            ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]",
+             lambda values: values.update(repository=(
+                 "projects/helpdeskcloud-capstone-511905/locations/us-west1/repositories/helpdeskcloud-dev-images")),
+             "existing Dev repository"),
+            ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]",
+             lambda values: values.update(member="serviceAccount:unexpected@helpdeskcloud-capstone-511905.iam.gserviceaccount.com"),
+             "supporting-image repository writer"),
         )
         for address, mutate, message in mutations:
             plan = fixture()
             mutate(resource(plan, address)["values"])
             with self.subTest(address=address), self.assertRaisesRegex(ValueError, message):
                 check_plan(plan)
+
+    def test_supporting_image_writer_accepts_only_the_repository_id_or_canonical_path(self):
+        writer_address = "google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]"
+        for repository in (REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH):
+            plan = fixture()
+            resource(plan, writer_address)["values"]["repository"] = repository
+            self.assertEqual(check_plan(plan), "apply")
 
     def test_supporting_image_identity_cannot_be_created_before_phase7_is_complete(self):
         plan = support_images_create_plan()
