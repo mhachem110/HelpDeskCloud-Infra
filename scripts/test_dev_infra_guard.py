@@ -7,8 +7,12 @@ import unittest
 from pathlib import Path
 
 from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_LABEL, BASE, EXPECTED,
-                             NETWORK, PHASE6, PHASE7, PSA_ADDRESS, REGISTRY_ADDRESS, SQL_ADDRESS,
-                             SUBNET_ADDRESS, SUBNET_PATHS, VPC_LINK, VPC_PATH, VPC_PATHS,
+                             NETWORK, PHASE6, PHASE7, PHASE8, PSA_ADDRESS, REGISTRY_ADDRESS, SQL_ADDRESS,
+                             SUBNET_ADDRESS, SUBNET_PATHS, SUPPORT_PUBLISHER_ACCOUNT_ID,
+                             SUPPORT_PUBLISHER_CONDITION, SUPPORT_PUBLISHER_DISPLAY_NAME,
+                             SUPPORT_PUBLISHER_EMAIL, SUPPORT_PUBLISHER_MAPPING,
+                             SUPPORT_PUBLISHER_MEMBER, SUPPORT_PUBLISHER_PROVIDER_ID,
+                             VPC_LINK, VPC_PATH, VPC_PATHS,
                              check_plan, diagnose_drift, permitted_drift, verify_deployment)
 
 
@@ -31,15 +35,20 @@ def strict_reference_cases(plan):
         ("google_artifact_registry_repository_iam_member.dev_gke_image_pull", "member", "google_service_account.dev_gke_nodes[0].member"),
         ("google_service_account_iam_member.dev_app_workload_identity", "service_account_id", "google_service_account.dev_app[0].name"),
         ("google_service_account_iam_member.dev_migration_workload_identity", "service_account_id", "google_service_account.dev_migration[0].name"),
+        ("google_service_account_iam_member.dev_app_support_images_wif", "service_account_id", "google_service_account.dev_app_support_image_publisher[0].name"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
         ("google_project_iam_member.dev_gke_node_runtime", "member", "google_service_account.dev_gke_nodes[0].member"),
         ("google_project_iam_member.dev_app_cloudsql", "member", "google_service_account.dev_app[0].member"),
         ("google_project_iam_member.dev_migration_cloudsql", "member", "google_service_account.dev_migration[0].member"),
+        ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "member", "google_service_account.dev_app_support_image_publisher[0].member"),
+        ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "location", "google_artifact_registry_repository.dev_images[0].location"),
+        ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "repository", "google_artifact_registry_repository.dev_images[0].repository_id"),
     ):
         cases.append((f"{address}.{field}", resources[address][field], expected))
     for address in ("google_service_account.dev_gke_nodes", "google_service_account.dev_app",
-                    "google_service_account.dev_migration"):
+                    "google_service_account.dev_migration",
+                    "google_service_account.dev_app_support_image_publisher"):
         cases.append((f"{address}.project", resources[address]["project"], "var.project_id"))
     return cases
 
@@ -79,6 +88,7 @@ def fixture():
     node = f"helpdesk-gke-node-dev@{project}.iam.gserviceaccount.com"
     app = f"helpdesk-app-dev@{project}.iam.gserviceaccount.com"
     migration = f"helpdesk-migrate-dev@{project}.iam.gserviceaccount.com"
+    support_publisher = SUPPORT_PUBLISHER_EMAIL
     principal = f"principal://iam.googleapis.com/projects/260283083469/locations/global/workloadIdentityPools/{project}.svc.id.goog/subject/ns/helpdesk-dev/sa/"
     phase7 = {
         "google_container_cluster.dev[0]": {
@@ -131,6 +141,27 @@ def fixture():
             "role": "roles/secretmanager.secretAccessor",
             "secret_id": f"projects/{project}/secrets/helpdesk-dev-db-admin-password",
             "member": principal + "helpdesk-dev-migrate"},
+    }
+    phase8 = {
+        "google_service_account.dev_app_support_image_publisher[0]": {
+            "project": project, "account_id": SUPPORT_PUBLISHER_ACCOUNT_ID,
+            "display_name": SUPPORT_PUBLISHER_DISPLAY_NAME, "email": support_publisher,
+            "member": f"serviceAccount:{support_publisher}",
+            "name": f"projects/{project}/serviceAccounts/{support_publisher}"},
+        "google_iam_workload_identity_pool_provider.dev_app_support_images[0]": {
+            "project": project, "workload_identity_pool_id": "helpdesk-github",
+            "workload_identity_pool_provider_id": SUPPORT_PUBLISHER_PROVIDER_ID,
+            "display_name": "App supporting images Dev", "disabled": False,
+            "attribute_mapping": SUPPORT_PUBLISHER_MAPPING,
+            "attribute_condition": SUPPORT_PUBLISHER_CONDITION,
+            "oidc": [{"issuer_uri": "https://token.actions.githubusercontent.com"}]},
+        "google_service_account_iam_member.dev_app_support_images_wif[0]": {
+            "role": "roles/iam.workloadIdentityUser",
+            "service_account_id": f"projects/{project}/serviceAccounts/{support_publisher}",
+            "member": SUPPORT_PUBLISHER_MEMBER},
+        "google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]": {
+            "project": project, "location": "us-east1", "repository": "helpdeskcloud-dev-images",
+            "role": "roles/artifactregistry.writer", "member": f"serviceAccount:{support_publisher}"},
     }
     config = {
         "root_module": {
@@ -189,6 +220,29 @@ def fixture():
                 {"address": "google_project_iam_member.dev_migration_cloudsql", "expressions": {
                     "role": {"constant_value": "roles/cloudsql.client"},
                     "member": {"references": terraform_references("google_service_account.dev_migration[0].member")}}},
+                {"address": "google_service_account.dev_app_support_image_publisher", "expressions": {
+                    "account_id": {"constant_value": SUPPORT_PUBLISHER_ACCOUNT_ID},
+                    "display_name": {"constant_value": SUPPORT_PUBLISHER_DISPLAY_NAME},
+                    "project": {"references": ["var.project_id"]}}},
+                {"address": "google_iam_workload_identity_pool_provider.dev_app_support_images", "expressions": {
+                    "workload_identity_pool_id": {"constant_value": "helpdesk-github"},
+                    "workload_identity_pool_provider_id": {"constant_value": SUPPORT_PUBLISHER_PROVIDER_ID},
+                    "attribute_mapping": {"constant_value": SUPPORT_PUBLISHER_MAPPING},
+                    "attribute_condition": {"constant_value": SUPPORT_PUBLISHER_CONDITION}}},
+                {"address": "google_service_account_iam_member.dev_app_support_images_wif", "expressions": {
+                    "role": {"constant_value": "roles/iam.workloadIdentityUser"},
+                    "member": {"constant_value": SUPPORT_PUBLISHER_MEMBER},
+                    "service_account_id": {"references": terraform_references(
+                        "google_service_account.dev_app_support_image_publisher[0].name")}}},
+                {"address": "google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "expressions": {
+                    "role": {"constant_value": "roles/artifactregistry.writer"},
+                    "project": {"references": ["var.project_id"]},
+                    "location": {"references": terraform_references(
+                        "google_artifact_registry_repository.dev_images[0].location")},
+                    "repository": {"references": terraform_references(
+                        "google_artifact_registry_repository.dev_images[0].repository_id")},
+                    "member": {"references": terraform_references(
+                        "google_service_account.dev_app_support_image_publisher[0].member")}}},
             ],
             "module_calls": {"dev_network": {"module": {"resources": [
                 {"address": "google_compute_subnetwork.this", "expressions": {
@@ -202,12 +256,14 @@ def fixture():
         }
     }
     planned = [{"mode": "managed", "address": address, "type": kind,
-                "values": phase7[address] if address in PHASE7 else (network | phase6)[kind]}
+                "values": (phase8[address] if address in PHASE8
+                           else phase7[address] if address in PHASE7
+                           else (network | phase6)[kind])}
                for address, kind in EXPECTED.items()]
     changes = [{"mode": "managed", "address": address, "type": kind,
-                "change": {"actions": ["no-op"] if address in BASE else ["create"]}}
+                "change": {"actions": ["no-op"] if address in (BASE | PHASE8) else ["create"]}}
                for address, kind in EXPECTED.items()]
-    prior_state = [copy.deepcopy(resource) for resource in planned if resource["address"] in BASE]
+    prior_state = [copy.deepcopy(resource) for resource in planned if resource["address"] in (BASE | PHASE8)]
     return {
         "variables": {key: {"value": value} for key, value in {
             "project_id": "helpdeskcloud-capstone-511905", "region": "us-east1", "environment": "dev"}.items()},
@@ -225,11 +281,35 @@ def resource(plan, address):
 
 def set_prior_phase7(plan, addresses):
     """Set the prior state to the fixture's baseline plus selected Phase 7 addresses."""
-    allowed = set(BASE) | set(addresses)
+    allowed = set(BASE) | set(addresses) | set(PHASE8)
     plan["prior_state"]["values"]["root_module"]["resources"] = [
         copy.deepcopy(item) for item in plan["planned_values"]["root_module"]["resources"]
         if item["address"] in allowed
     ]
+
+
+def support_images_create_plan():
+    """Model the exact Phase 8 create batch after the deployed Phase 7 baseline."""
+    plan = fixture()
+    set_prior_phase7(plan, PHASE7)
+    plan["prior_state"]["values"]["root_module"]["resources"] = [
+        item for item in plan["prior_state"]["values"]["root_module"]["resources"]
+        if item["address"] not in PHASE8
+    ]
+    for change in plan["resource_changes"]:
+        if change["address"] in PHASE7:
+            change["change"]["actions"] = ["no-op"]
+        elif change["address"] in PHASE8:
+            change["change"]["actions"] = ["create"]
+    for address, field in (
+        ("google_service_account.dev_app_support_image_publisher[0]", "email"),
+        ("google_service_account.dev_app_support_image_publisher[0]", "member"),
+        ("google_service_account.dev_app_support_image_publisher[0]", "name"),
+        ("google_service_account_iam_member.dev_app_support_images_wif[0]", "service_account_id"),
+        ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]", "member"),
+    ):
+        mark_unknown(plan, address, (field,))
+    return plan
 
 
 def apply12_recovery_plan():
@@ -514,7 +594,9 @@ def evidence():
           "peering": "servicenetworking-googleapis-com"}],
         {"name": "projects/helpdeskcloud-capstone-511905/locations/us-east1/repositories/helpdeskcloud-dev-images",
          "format": "DOCKER", "dockerConfig": {"immutableTags": True}},
-        {"bindings": [{"role": "roles/artifactregistry.reader", "members": [node_member]}]},
+        {"bindings": [{"role": "roles/artifactregistry.reader", "members": [node_member]},
+                       {"role": "roles/artifactregistry.writer",
+                        "members": [f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}"]}]},
         {"bindings": [{"role": "roles/container.defaultNodeServiceAccount", "members": [node_member]},
                       {"role": "roles/cloudsql.client", "members": [app_member, migration_member]}]}, sql,
         [{"name": "helpdesk", "instance": "helpdeskcloud-dev-postgres"}], outputs,
@@ -527,6 +609,13 @@ def evidence():
         {"bindings": [{"role": "roles/secretmanager.secretAccessor", "members": [principal + "helpdesk-dev-app"]}]},
         {"bindings": [{"role": "roles/secretmanager.secretAccessor", "members": [principal + "helpdesk-dev-migrate"]}]},
         state,
+        {"email": SUPPORT_PUBLISHER_EMAIL, "disabled": False},
+        {"bindings": [{"role": "roles/iam.workloadIdentityUser",
+                        "members": [SUPPORT_PUBLISHER_MEMBER]}]},
+        {"name": f"projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/{SUPPORT_PUBLISHER_PROVIDER_ID}",
+         "state": "ACTIVE", "attributeMapping": SUPPORT_PUBLISHER_MAPPING,
+         "attributeCondition": SUPPORT_PUBLISHER_CONDITION,
+         "oidc": {"issuerUri": "https://token.actions.githubusercontent.com"}},
     ]
 
 
@@ -775,6 +864,10 @@ class GuardTests(unittest.TestCase):
             "google_service_account.dev_app[0].member": "google_service_account.dev_migration[0].member",
             "google_service_account.dev_migration[0].name": "google_service_account.dev_app[0].name",
             "google_service_account.dev_migration[0].member": "google_service_account.dev_app[0].member",
+            "google_service_account.dev_app_support_image_publisher[0].name": "google_service_account.dev_migration[0].name",
+            "google_service_account.dev_app_support_image_publisher[0].member": "google_service_account.dev_migration[0].member",
+            "google_artifact_registry_repository.dev_images[0].location": "google_artifact_registry_repository.other[0].location",
+            "google_artifact_registry_repository.dev_images[0].repository_id": "google_artifact_registry_repository.other[0].repository_id",
             "google_secret_manager_secret.dev_app_connection[0].id": "google_secret_manager_secret.dev_admin_password[0].id",
             "google_secret_manager_secret.dev_admin_password[0].id": "google_secret_manager_secret.dev_app_connection[0].id",
             "var.project_id": "var.other_project",
@@ -872,6 +965,52 @@ class GuardTests(unittest.TestCase):
             next(c for c in plan["resource_changes"] if c["address"] in PHASE7)["change"]["actions"] = actions
             with self.subTest(actions=actions), self.assertRaisesRegex(ValueError, "Phase 7"):
                 check_plan(plan)
+
+    def test_supporting_image_identity_requires_the_exact_phase8_create_batch(self):
+        self.assertEqual(check_plan(support_images_create_plan()), "apply")
+
+    def test_partial_supporting_image_identity_creation_is_rejected(self):
+        plan = support_images_create_plan()
+        address = sorted(PHASE8)[0]
+        next(c for c in plan["resource_changes"] if c["address"] == address)["change"]["actions"] = ["no-op"]
+        with self.assertRaisesRegex(ValueError, "Phase 8"):
+            check_plan(plan)
+
+    def test_supporting_image_identity_updates_deletes_and_replacements_are_rejected(self):
+        for actions in (["update"], ["delete"], ["delete", "create"]):
+            plan = fixture()
+            next(c for c in plan["resource_changes"] if c["address"] in PHASE8)["change"]["actions"] = actions
+            with self.subTest(actions=actions), self.assertRaisesRegex(ValueError, "Phase 8"):
+                check_plan(plan)
+
+    def test_supporting_image_wif_subject_and_repo_scope_are_exact(self):
+        mutations = (
+            ("google_iam_workload_identity_pool_provider.dev_app_support_images[0]",
+             lambda values: values.update(attribute_condition=values["attribute_condition"].replace(
+                 "1423008128", "other-repository")), "trust condition"),
+            ("google_service_account_iam_member.dev_app_support_images_wif[0]",
+             lambda values: values.update(member="principalSet://iam.googleapis.com/projects/260283083469/"
+                 "locations/global/workloadIdentityPools/helpdesk-github/*"), "verified subject"),
+            ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]",
+             lambda values: values.update(repository="another-repository"), "existing Dev repository"),
+            ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]",
+             lambda values: values.update(role="roles/artifactregistry.admin"), "existing Dev repository"),
+        )
+        for address, mutate, message in mutations:
+            plan = fixture()
+            mutate(resource(plan, address)["values"])
+            with self.subTest(address=address), self.assertRaisesRegex(ValueError, message):
+                check_plan(plan)
+
+    def test_supporting_image_identity_cannot_be_created_before_phase7_is_complete(self):
+        plan = support_images_create_plan()
+        set_prior_phase7(plan, set(PHASE7) - {sorted(PHASE7)[0]})
+        plan["prior_state"]["values"]["root_module"]["resources"] = [
+            item for item in plan["prior_state"]["values"]["root_module"]["resources"]
+            if item["address"] not in PHASE8
+        ]
+        with self.assertRaisesRegex(ValueError, "Phase 7"):
+            check_plan(plan)
 
     def test_wrong_gke_network_ranges_or_project_are_rejected(self):
         cluster = self.values("google_container_cluster")
@@ -1431,7 +1570,8 @@ class GuardTests(unittest.TestCase):
              "deletion protection"),
         )
         with tempfile.TemporaryDirectory() as temporary:
-            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(21)]
+            values = evidence()
+            paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
             state_addresses = Path(temporary) / "state-addresses.txt"
             state_addresses.write_text("\n".join(EXPECTED), encoding="utf-8")
             filenames = [str(path) for path in paths] + [str(state_addresses)]
