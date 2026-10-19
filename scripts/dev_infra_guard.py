@@ -45,6 +45,48 @@ PHASE7 = {
     "google_secret_manager_secret_iam_member.dev_app_secret_access[0]": "google_secret_manager_secret_iam_member",
     "google_secret_manager_secret_iam_member.dev_admin_secret_access[0]": "google_secret_manager_secret_iam_member",
 }
+# Phase 8 adds one exact, separately scoped GitHub publisher identity. The plan
+# guard accepts this as one complete create batch after Phase 7 is already present.
+PHASE8 = {
+    "google_service_account.dev_app_support_image_publisher[0]": "google_service_account",
+    "google_iam_workload_identity_pool_provider.dev_app_support_images[0]": "google_iam_workload_identity_pool_provider",
+    "google_service_account_iam_member.dev_app_support_images_wif[0]": "google_service_account_iam_member",
+    "google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]": "google_artifact_registry_repository_iam_member",
+}
+SUPPORT_PUBLISHER_ACCOUNT_ID = "helpdesk-app-support-pub-dev"
+SUPPORT_PUBLISHER_DISPLAY_NAME = "helpdesk-app-support-image-publisher-dev"
+SUPPORT_PUBLISHER_EMAIL = f"{SUPPORT_PUBLISHER_ACCOUNT_ID}@{PROJECT}.iam.gserviceaccount.com"
+SUPPORT_PUBLISHER_PROVIDER_ID = "github-app-support-images-dev"
+SUPPORT_PUBLISHER_SUBJECT = (
+    "repo:mhachem110@150286776/HelpDeskCloud-App@1423008128:"
+    "environment:dev-supporting-images-publish"
+)
+SUPPORT_PUBLISHER_WORKFLOW_REF = (
+    "mhachem110/HelpDeskCloud-App/.github/workflows/"
+    "supporting-images-ci.yml@refs/heads/dev"
+)
+SUPPORT_PUBLISHER_CONDITION = (
+    'attribute.repository == "mhachem110/HelpDeskCloud-App" && '
+    'attribute.repository_id == "1423008128" && '
+    'attribute.repository_owner_id == "150286776" && '
+    'attribute.ref == "refs/heads/dev" && '
+    'attribute.environment == "dev-supporting-images-publish" && '
+    'attribute.workflow_ref == "mhachem110/HelpDeskCloud-App/.github/workflows/'
+    'supporting-images-ci.yml@refs/heads/dev"'
+)
+SUPPORT_PUBLISHER_MAPPING = {
+    "google.subject": "assertion.sub",
+    "attribute.repository": "assertion.repository",
+    "attribute.repository_id": "assertion.repository_id",
+    "attribute.repository_owner_id": "assertion.repository_owner_id",
+    "attribute.ref": "assertion.ref",
+    "attribute.environment": "assertion.environment",
+    "attribute.workflow_ref": "assertion.workflow_ref",
+}
+SUPPORT_PUBLISHER_MEMBER = (
+    f"principal://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/"
+    f"workloadIdentityPools/helpdesk-github/subject/{SUPPORT_PUBLISHER_SUBJECT}"
+)
 # Apply #12 logs confirm that these six Phase 7 resources completed before the
 # remaining operations failed. Recovery is allowed only if the fresh plan's
 # prior state and refresh show precisely this inventory.
@@ -58,7 +100,7 @@ APPLY12_COMPLETED = frozenset({
 })
 APPLY12_REMAINING = frozenset(PHASE7) - APPLY12_COMPLETED
 BASE = NETWORK | PHASE6
-EXPECTED = BASE | PHASE7
+EXPECTED = BASE | PHASE7 | PHASE8
 VPC_LINK = f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/{VPC}"
 VPC_SELF_LINKS = tuple(
     f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{VPC}"
@@ -115,6 +157,8 @@ STRICT_REFERENCE_PARENTS = {
     "google_service_account.dev_gke_nodes[0]": "google_service_account.dev_gke_nodes",
     "google_service_account.dev_app[0]": "google_service_account.dev_app",
     "google_service_account.dev_migration[0]": "google_service_account.dev_migration",
+    "google_service_account.dev_app_support_image_publisher[0]": "google_service_account.dev_app_support_image_publisher",
+    "google_artifact_registry_repository.dev_images[0]": "google_artifact_registry_repository.dev_images",
     "google_secret_manager_secret.dev_app_connection[0]": "google_secret_manager_secret.dev_app_connection",
     "google_secret_manager_secret.dev_admin_password[0]": "google_secret_manager_secret.dev_admin_password",
 }
@@ -212,6 +256,60 @@ def check_phase6(values):
     require(database.get("instance") == "helpdeskcloud-dev-postgres", "SQL database must use the intended instance")
 
 
+def normalize_cel(expression):
+    """Ignore only insignificant CEL whitespace when comparing reviewed conditions."""
+    return " ".join(expression.split()) if isinstance(expression, str) else None
+
+
+def check_phase8(values, plan, creates):
+    changes = {c.get("address"): c for c in plan.get("resource_changes", [])}
+    account_address = "google_service_account.dev_app_support_image_publisher[0]"
+    account = values[account_address]
+    require(account.get("project") == PROJECT
+            and account.get("account_id") == SUPPORT_PUBLISHER_ACCOUNT_ID
+            and account.get("display_name") == SUPPORT_PUBLISHER_DISPLAY_NAME,
+            "Unexpected supporting-image publisher service account")
+    for field, expected in (
+        ("email", SUPPORT_PUBLISHER_EMAIL),
+        ("member", f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}"),
+        ("name", f"projects/{PROJECT}/serviceAccounts/{SUPPORT_PUBLISHER_EMAIL}"),
+    ):
+        expected_or_unknown(account, account_address, (field,), expected, changes, creates,
+                            f"supporting-image service-account {field}")
+
+    provider = values["google_iam_workload_identity_pool_provider.dev_app_support_images[0]"]
+    require(provider.get("project") == PROJECT
+            and provider.get("workload_identity_pool_id") == "helpdesk-github"
+            and provider.get("workload_identity_pool_provider_id") == SUPPORT_PUBLISHER_PROVIDER_ID
+            and provider.get("disabled") is False,
+            "Unexpected supporting-image Workload Identity provider")
+    require(provider.get("attribute_mapping") == SUPPORT_PUBLISHER_MAPPING,
+            "Unexpected supporting-image provider attribute mapping")
+    require(normalize_cel(provider.get("attribute_condition")) == SUPPORT_PUBLISHER_CONDITION,
+            "Supporting-image provider trust condition is not exact")
+    oidc = only_item(provider.get("oidc"), "Expected one supporting-image OIDC issuer")
+    require(oidc.get("issuer_uri") == "https://token.actions.githubusercontent.com",
+            "Unexpected supporting-image OIDC issuer")
+
+    binding = values["google_service_account_iam_member.dev_app_support_images_wif[0]"]
+    require(binding.get("role") == "roles/iam.workloadIdentityUser"
+            and binding.get("member") == SUPPORT_PUBLISHER_MEMBER,
+            "Supporting-image impersonation binding must use the exact verified subject")
+    expected_or_unknown(binding, "google_service_account_iam_member.dev_app_support_images_wif[0]",
+                        ("service_account_id",),
+                        f"projects/{PROJECT}/serviceAccounts/{SUPPORT_PUBLISHER_EMAIL}",
+                        changes, creates, "supporting-image Workload Identity target")
+
+    writer = values["google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]"]
+    require(writer.get("project") == PROJECT and writer.get("location") == "us-east1"
+            and writer.get("repository") == REGISTRY_REPOSITORY_ID
+            and writer.get("role") == "roles/artifactregistry.writer",
+            "Supporting-image Writer must target only the existing Dev repository")
+    expected_or_unknown(writer, "google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]",
+                        ("member",), f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}",
+                        changes, creates, "supporting-image repository writer")
+
+
 def check_references(plan):
     root = plan.get("configuration", {}).get("root_module", {})
     module = root.get("module_calls", {}).get("dev_network", {}).get("module", {})
@@ -278,6 +376,7 @@ def check_references(plan):
         ("google_artifact_registry_repository_iam_member.dev_gke_image_pull", "member", "google_service_account.dev_gke_nodes[0].member"),
         ("google_service_account_iam_member.dev_app_workload_identity", "service_account_id", "google_service_account.dev_app[0].name"),
         ("google_service_account_iam_member.dev_migration_workload_identity", "service_account_id", "google_service_account.dev_migration[0].name"),
+        ("google_service_account_iam_member.dev_app_support_images_wif", "service_account_id", "google_service_account.dev_app_support_image_publisher[0].name"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
     ):
@@ -289,6 +388,7 @@ def check_references(plan):
         ("google_service_account.dev_gke_nodes", "helpdesk-gke-node-dev"),
         ("google_service_account.dev_app", "helpdesk-app-dev"),
         ("google_service_account.dev_migration", "helpdesk-migrate-dev"),
+        ("google_service_account.dev_app_support_image_publisher", SUPPORT_PUBLISHER_ACCOUNT_ID),
     ):
         expressions = resources.get(address, {}).get("expressions", {})
         require(expressions.get("account_id", {}).get("constant_value") == account_id,
@@ -309,6 +409,8 @@ def check_references(plan):
          "service_account_id", "google_service_account.dev_app[0].name"),
         ("google_service_account_iam_member.dev_migration_workload_identity", "roles/iam.workloadIdentityUser",
          "service_account_id", "google_service_account.dev_migration[0].name"),
+        ("google_service_account_iam_member.dev_app_support_images_wif", "roles/iam.workloadIdentityUser",
+         "service_account_id", "google_service_account.dev_app_support_image_publisher[0].name"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "roles/secretmanager.secretAccessor",
          "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "roles/secretmanager.secretAccessor",
@@ -320,6 +422,46 @@ def check_references(plan):
                 f"Unexpected IAM role expression: {address}")
         references(expressions.get(identity_field, {}), identity_reference,
                    f"{address}.{identity_field}", exact=True)
+
+    provider = resources.get("google_iam_workload_identity_pool_provider.dev_app_support_images", {})
+    provider_expressions = provider.get("expressions", {})
+    require(provider_expressions.get("workload_identity_pool_id", {}).get("constant_value") == "helpdesk-github"
+            and provider_expressions.get("workload_identity_pool_provider_id", {}).get("constant_value")
+            == SUPPORT_PUBLISHER_PROVIDER_ID,
+            "Unexpected supporting-image provider identity expression")
+    require(normalize_cel(provider_expressions.get("attribute_condition", {}).get("constant_value"))
+            == SUPPORT_PUBLISHER_CONDITION,
+            "Supporting-image provider trust expression is not exact")
+    require(provider_expressions.get("attribute_mapping", {}).get("constant_value")
+            == SUPPORT_PUBLISHER_MAPPING,
+            "Supporting-image provider mapping expression is not exact")
+
+    support_binding = resources.get("google_service_account_iam_member.dev_app_support_images_wif", {})
+    support_binding_expressions = support_binding.get("expressions", {})
+    require(support_binding_expressions.get("role", {}).get("constant_value")
+            == "roles/iam.workloadIdentityUser"
+            and support_binding_expressions.get("member", {}).get("constant_value") == SUPPORT_PUBLISHER_MEMBER,
+            "Supporting-image impersonation role or subject expression is not exact")
+    references(support_binding_expressions.get("service_account_id", {}),
+               "google_service_account.dev_app_support_image_publisher[0].name",
+               "supporting-image Workload Identity target", exact=True)
+
+    support_writer = resources.get("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", {})
+    support_writer_expressions = support_writer.get("expressions", {})
+    require(support_writer_expressions.get("role", {}).get("constant_value")
+            == "roles/artifactregistry.writer",
+            "Supporting-image repository role is not exact")
+    references(support_writer_expressions.get("project", {}), "var.project_id",
+               "supporting-image repository project", exact=True)
+    references(support_writer_expressions.get("location", {}),
+               "google_artifact_registry_repository.dev_images[0].location",
+               "supporting-image repository location", exact=True)
+    references(support_writer_expressions.get("repository", {}),
+               "google_artifact_registry_repository.dev_images[0].repository_id",
+               "supporting-image repository ID", exact=True)
+    references(support_writer_expressions.get("member", {}),
+               "google_service_account.dev_app_support_image_publisher[0].member",
+               "supporting-image repository writer", exact=True)
 
     # These policies contain static pool names, so Terraform cannot infer that
     # GKE must finish creating the pool before it writes the bindings.
@@ -703,6 +845,9 @@ def check_plan(plan):
     creates = {address for address in PHASE7 if actions.get(address) == ["create"]}
     require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"]) for address in PHASE7),
             "Phase 7 update, replacement, or deletion requires review")
+    support_creates = {address for address in PHASE8 if actions.get(address) == ["create"]}
+    require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"]) for address in PHASE8),
+            "Phase 8 update, replacement, or deletion requires review")
     prior_state = plan.get("prior_state")
     require(isinstance(prior_state, dict), "Terraform prior state is required to classify the Dev plan")
     prior = prior_state.get("values", {}).get("root_module")
@@ -719,19 +864,30 @@ def check_plan(plan):
     require(set(BASE) <= prior_addresses,
             "Terraform prior state is missing an existing Phase 5-6 resource")
     prior_phase7 = prior_addresses & set(PHASE7)
+    prior_phase8 = prior_addresses & set(PHASE8)
     full_initial_create = creates == set(PHASE7) and not prior_phase7
     exact_apply12_recovery = creates == APPLY12_REMAINING and prior_phase7 == APPLY12_COMPLETED
     complete_no_changes = not creates and prior_phase7 == set(PHASE7)
+    require(not prior_phase8 or prior_phase8 == set(PHASE8),
+            "Partial Phase 8 state requires review")
+    support_images_initial_create = (
+        not creates and prior_phase7 == set(PHASE7)
+        and not prior_phase8 and support_creates == set(PHASE8)
+    )
+    support_images_complete = not support_creates and prior_phase8 == set(PHASE8)
     require(full_initial_create or exact_apply12_recovery or complete_no_changes,
             "Partial or inconsistent Phase 7 state/creation batch requires review")
+    require(support_images_initial_create or support_images_complete,
+            "Phase 8 must be created as one exact batch after Phase 7, or already be complete")
     # Check the complete planned values, including no-op resources omitted from resource_changes.
     by_address = {r["address"]: r.get("values", {}) for r in managed}
     by_type = {r["type"]: r.get("values", {}) for r in managed if r["address"] in BASE}
     check_network(by_type)
     check_phase6(by_type)
     check_phase7(by_address, plan, creates)
+    check_phase8(by_address, plan, support_creates)
     check_references(plan)
-    return "apply" if creates else "no_changes"
+    return "apply" if creates or support_creates else "no_changes"
 
 
 SENSITIVE_PARTS = {"id", "name", "project", "region", "self_link", "network", "subnetwork", "ip_cidr_range",
@@ -995,7 +1151,7 @@ def diagnose_drift(plan):
 
 
 def verify_deployment(paths):
-    require(len(paths) == 22, "Expected read-only Phase 7 evidence, Terraform state, and addresses")
+    require(len(paths) == 25, "Expected read-only Phase 7-8 evidence, Terraform state, and addresses")
     network, subnet, address, connections, registry, registry_iam, project_iam, sql, databases, outputs = [read_json(p) for p in paths[:10]]
     state_addresses = set(Path(paths[-1]).read_text(encoding="utf-8").splitlines())
     require(state_addresses == set(EXPECTED), "Dev state does not contain exactly the approved resources")
@@ -1092,6 +1248,8 @@ def verify_deployment(paths):
 
     verify_phase7(*[read_json(path) for path in paths[10:20]], registry_iam, project_iam, outputs)
     state = read_json(paths[20])
+    verify_phase8(read_json(paths[21]), read_json(paths[22]), read_json(paths[23]),
+                  registry_iam, project_iam)
     resources = state.get("values", {}).get("root_module", {}).get("resources", [])
     protected = {
         "google_container_cluster.dev[0]": "GKE",
@@ -1107,6 +1265,41 @@ def verify_deployment(paths):
 def has_binding(policy, role, member):
     return any(binding.get("role") == role and member in binding.get("members", [])
                for binding in policy.get("bindings", []))
+
+
+def verify_phase8(publisher_sa, publisher_sa_iam, provider, registry_iam, project_iam):
+    """Check the dedicated App publisher identity without broadening project access."""
+    require(publisher_sa.get("email") == SUPPORT_PUBLISHER_EMAIL
+            and publisher_sa.get("disabled") is not True,
+            "Supporting-image publisher service account identity or status mismatch")
+    check_iam(publisher_sa_iam, "supporting-image publisher service account")
+    wif_bindings = [set(binding.get("members", [])) for binding in publisher_sa_iam.get("bindings", [])
+                    if binding.get("role") == "roles/iam.workloadIdentityUser"]
+    require(wif_bindings == [{SUPPORT_PUBLISHER_MEMBER}]
+            and len(publisher_sa_iam.get("bindings", [])) == 1,
+            "Supporting-image impersonation binding differs from the exact verified subject")
+
+    expected_provider_names = {
+        f"projects/{PROJECT}/locations/global/workloadIdentityPools/helpdesk-github/providers/"
+        f"{SUPPORT_PUBLISHER_PROVIDER_ID}",
+        f"projects/{PROJECT_NUMBER}/locations/global/workloadIdentityPools/helpdesk-github/providers/"
+        f"{SUPPORT_PUBLISHER_PROVIDER_ID}",
+    }
+    require(provider.get("name") in expected_provider_names and provider.get("state") == "ACTIVE",
+            "Supporting-image Workload Identity provider identity or status mismatch")
+    require(provider.get("attributeMapping") == SUPPORT_PUBLISHER_MAPPING
+            and normalize_cel(provider.get("attributeCondition")) == SUPPORT_PUBLISHER_CONDITION
+            and provider.get("oidc", {}).get("issuerUri") == "https://token.actions.githubusercontent.com",
+            "Supporting-image provider trust configuration mismatch")
+
+    publisher_member = f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}"
+    writer_bindings = [set(binding.get("members", [])) for binding in registry_iam.get("bindings", [])
+                       if binding.get("role") == "roles/artifactregistry.writer"]
+    require(writer_bindings == [{publisher_member}],
+            "Artifact Registry Writer is not limited to the supporting-image publisher on the Dev repository")
+    require(not has_binding(project_iam, "roles/artifactregistry.writer", publisher_member)
+            and not has_binding(project_iam, "roles/artifactregistry.admin", publisher_member),
+            "Supporting-image publisher has a project-wide Artifact Registry grant")
 
 
 def verify_phase7(cluster, node_sa, app_sa, migration_sa, app_secret, admin_secret,

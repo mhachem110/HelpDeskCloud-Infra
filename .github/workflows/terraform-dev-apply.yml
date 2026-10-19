@@ -216,6 +216,9 @@ jobs:
           gcloud iam service-accounts get-iam-policy helpdesk-migrate-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/migration-sa-iam.json"
           gcloud secrets get-iam-policy helpdesk-dev-db-connection --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-secret-iam.json"
           gcloud secrets get-iam-policy helpdesk-dev-db-admin-password --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/admin-secret-iam.json"
+          gcloud iam service-accounts describe helpdesk-app-support-pub-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/support-image-publisher-sa.json"
+          gcloud iam service-accounts get-iam-policy helpdesk-app-support-pub-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/support-image-publisher-sa-iam.json"
+          gcloud iam workload-identity-pools providers describe github-app-support-images-dev --workload-identity-pool=helpdesk-github --location=global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/support-image-provider.json"
           terraform state list > "$RUNNER_TEMP/state-addresses.txt"
           terraform output -json > "$RUNNER_TEMP/outputs.json"
           terraform show -json > "$RUNNER_TEMP/state.json"
@@ -228,4 +231,6 @@ jobs:
             "$RUNNER_TEMP/app-secret.json" "$RUNNER_TEMP/admin-secret.json" \
             "$RUNNER_TEMP/app-sa-iam.json" "$RUNNER_TEMP/migration-sa-iam.json" \
             "$RUNNER_TEMP/app-secret-iam.json" "$RUNNER_TEMP/admin-secret-iam.json" \
-            "$RUNNER_TEMP/state.json" "$RUNNER_TEMP/state-addresses.txt"
+            "$RUNNER_TEMP/state.json" "$RUNNER_TEMP/support-image-publisher-sa.json" \
+            "$RUNNER_TEMP/support-image-publisher-sa-iam.json" "$RUNNER_TEMP/support-image-provider.json" \
+            "$RUNNER_TEMP/state-addresses.txt"
