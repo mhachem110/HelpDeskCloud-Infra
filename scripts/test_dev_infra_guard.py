@@ -262,7 +262,8 @@ def metadata_drift(after_fields=None, omit_after=False):
 
 def registry_drift():
     before = {"project": "helpdeskcloud-capstone-511905", "location": "us-east1",
-              "repository_id": "helpdeskcloud-dev-images", "labels": None,
+              "repository_id": "helpdeskcloud-dev-images", "format": "DOCKER",
+              "docker_config": [{"immutable_tags": True}], "labels": None,
               "terraform_labels": ATTRIBUTION_LABEL, "effective_labels": ATTRIBUTION_LABEL}
     after = copy.deepcopy(before)
     after["labels"] = {}
@@ -273,11 +274,21 @@ def registry_drift():
 def sql_readback_drift():
     before = {"project": "helpdeskcloud-capstone-511905", "name": "helpdeskcloud-dev-postgres",
               "region": "us-east1", "database_version": "POSTGRES_17",
-              "settings": [{"version": 1, "ip_configuration": [{
-                  "server_ca_mode": "GOOGLE_MANAGED_INTERNAL_CA",
-                  "custom_subject_alternative_names": None}]}]}
+              "deletion_protection": True,
+              "settings": [{"version": 1, "edition": "ENTERPRISE", "tier": "db-f1-micro",
+                            "availability_type": "ZONAL", "disk_type": "PD_SSD", "disk_size": 10,
+                            "disk_autoresize": False, "deletion_protection_enabled": True,
+                            "backup_configuration": [{"enabled": True,
+                                                      "point_in_time_recovery_enabled": False,
+                                                      "backup_retention_settings": [{"retained_backups": 7,
+                                                                                     "retention_unit": "COUNT"}]}],
+                            "ip_configuration": [{"ipv4_enabled": False, "private_network": VPC_LINK,
+                                                  "allocated_ip_range": "helpdeskcloud-dev-psa",
+                                                  "ssl_mode": "ENCRYPTED_ONLY",
+                                                  "server_ca_mode": "GOOGLE_MANAGED_INTERNAL_CA",
+                                                  "custom_subject_alternative_names": None}]}]}
     after = copy.deepcopy(before)
-    after["settings"][0]["version"] = 2
+    after["settings"][0]["version"] = 3
     after["settings"][0]["ip_configuration"][0]["custom_subject_alternative_names"] = []
     return {"mode": "managed", "address": SQL_ADDRESS, "type": "google_sql_database_instance",
             "change": {"actions": ["update"], "before": before, "after": after}}
@@ -558,10 +569,63 @@ class GuardTests(unittest.TestCase):
         self.assertIn("labels: before=null; after=empty map", report)
         self.assertIn("exact attribution only=true; unchanged=true", report)
         self.assertIn("Cloud SQL identity and PostgreSQL 17: expected", report)
-        self.assertIn("settings[0].version: before=1; after=2", report)
+        self.assertIn("settings[0].version: before=1; after=3", report)
         self.assertIn("custom_subject_alternative_names: before=null; after=[]", report)
         self.assertIn("server_ca_mode: before=GOOGLE_MANAGED_INTERNAL_CA; "
                       "after=GOOGLE_MANAGED_INTERNAL_CA", report)
+        self.assertEqual(check_plan(self.plan), "apply")
+
+    def test_exact_phase6_registry_and_sql_normalizations_are_allowed(self):
+        self.plan["resource_drift"] = [registry_drift(), sql_readback_drift()]
+        self.assertEqual(check_plan(self.plan), "apply")
+
+    def test_registry_normalization_rejects_wrong_identity_labels_or_other_changes(self):
+        mutations = (
+            lambda d: d["change"]["after"].update(project="another-project"),
+            lambda d: d["change"]["after"].update(repository_id="another-repository"),
+            lambda d: d["change"]["after"].update(format="MAVEN"),
+            lambda d: d["change"]["after"].update(labels={"owner": "private-value"}),
+            lambda d: d["change"]["after"]["terraform_labels"].update({"owner": "private-value"}),
+            lambda d: d["change"]["after"]["effective_labels"].update({"owner": "private-value"}),
+            lambda d: d["change"]["after"]["docker_config"][0].update(immutable_tags=False),
+        )
+        for mutate in mutations:
+            drift = registry_drift()
+            mutate(drift)
+            self.plan["resource_drift"] = [drift]
+            with self.subTest(drift=drift), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(self.plan)
+
+        drift = registry_drift()
+        change = next(c for c in self.plan["resource_changes"] if c["address"] == REGISTRY_ADDRESS)
+        change["change"]["actions"] = ["update"]
+        self.plan["resource_drift"] = [drift]
+        with self.assertRaisesRegex(ValueError, "readback only"):
+            check_plan(self.plan)
+
+    def test_sql_readback_normalization_rejects_other_versions_and_configuration_changes(self):
+        mutations = (
+            lambda d: d["change"]["after"]["settings"][0].update(version=4),
+            lambda d: d["change"]["after"]["settings"][0]["ip_configuration"][0].update(
+                custom_subject_alternative_names=["unexpected.example"]),
+            lambda d: d["change"]["after"]["settings"][0]["ip_configuration"][0].update(
+                server_ca_mode="CUSTOMER_MANAGED_CAS_CA"),
+            lambda d: d["change"]["after"]["settings"][0].update(tier="db-custom-2-7680"),
+            lambda d: d["change"]["after"]["settings"][0]["ip_configuration"][0].update(
+                private_network="projects/other-project/global/networks/other-vpc"),
+            lambda d: d["change"]["after"].update(database_version="POSTGRES_16"),
+            lambda d: d["change"]["after"]["settings"][0].update(deletion_protection_enabled=False),
+        )
+        for mutate in mutations:
+            drift = sql_readback_drift()
+            mutate(drift)
+            self.plan["resource_drift"] = [drift]
+            with self.subTest(drift=drift), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(self.plan)
+
+        drift = sql_readback_drift()
+        drift["change"]["actions"] = ["delete", "create"]
+        self.plan["resource_drift"] = [drift]
         with self.assertRaisesRegex(ValueError, "drift"):
             check_plan(self.plan)
 
