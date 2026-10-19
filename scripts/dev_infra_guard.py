@@ -537,12 +537,17 @@ def permitted_drift(entry):
         before_labels = before.get("resource_labels", MISSING)
         after_labels = after.get("resource_labels", MISSING)
         empty_representations = (MISSING, None, {})
+        empty_map_normalization = (
+            before_labels in empty_representations
+            and after_labels in empty_representations
+            and before_labels != after_labels
+        )
         exact_normalization = (
             before_labels == ATTRIBUTION_LABEL and after_labels in empty_representations
         ) or (
             after_labels == ATTRIBUTION_LABEL and before_labels in empty_representations
         )
-        if not exact_normalization:
+        if not (exact_normalization or empty_map_normalization):
             return False
         return ({key: value for key, value in before.items() if key != "resource_labels"}
                 == {key: value for key, value in after.items() if key != "resource_labels"})
@@ -551,10 +556,17 @@ def permitted_drift(entry):
         expected_role, expected_member = PROJECT_IAM_READBACKS[address]
         if any(snapshot.get("project") != PROJECT or snapshot.get("role") != expected_role
                or snapshot.get("member") != expected_member
-               or not isinstance(snapshot.get("etag"), str) or not snapshot.get("etag")
                for snapshot in (before, after)):
             return False
-        if before["etag"] == after["etag"]:
+        before_etag, after_etag = before.get("etag", MISSING), after.get("etag", MISSING)
+        empty_etags = (MISSING, None, "")
+
+        def valid_etag(value):
+            return value in empty_etags or (isinstance(value, str) and bool(value))
+
+        if (not valid_etag(before_etag) or not valid_etag(after_etag)
+                or before_etag == after_etag
+                or (before_etag in empty_etags and after_etag in empty_etags)):
             return False
         # Project policy etags are concurrency metadata. Require every grant
         # field and all other provider values to remain identical.

@@ -9,7 +9,7 @@ from pathlib import Path
 from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_LABEL, BASE, EXPECTED,
                              NETWORK, PHASE6, PHASE7, PSA_ADDRESS, REGISTRY_ADDRESS, SQL_ADDRESS,
                              SUBNET_ADDRESS, VPC_LINK, VPC_PATH,
-                             check_plan, diagnose_drift, verify_deployment)
+                             check_plan, diagnose_drift, permitted_drift, verify_deployment)
 
 
 def terraform_references(attribute_reference):
@@ -407,7 +407,7 @@ def gke_resource_labels_drift():
             "change": {"actions": ["update"], "before": before, "after": after}}
 
 
-def project_iam_etag_drift(address):
+def project_iam_etag_drift(address, before_etag="etag-before", after_etag="etag-after"):
     project = "helpdeskcloud-capstone-511905"
     identities = {
         "google_project_iam_member.dev_gke_node_runtime[0]": (
@@ -420,9 +420,9 @@ def project_iam_etag_drift(address):
     role, account = identities[address]
     base = {"project": project, "role": role,
             "member": f"serviceAccount:{account}@{project}.iam.gserviceaccount.com",
-            "etag": "etag-before"}
+            "etag": before_etag}
     after = copy.deepcopy(base)
-    after["etag"] = "etag-after"
+    after["etag"] = after_etag
     return {"mode": "managed", "address": address, "type": "google_project_iam_member",
             "change": {"actions": ["update"], "before": base, "after": after}}
 
@@ -1055,6 +1055,28 @@ class GuardTests(unittest.TestCase):
                 check_plan(self.plan)
             change["change"]["actions"] = ["no-op"]
 
+    def test_gke_empty_resource_label_representations_are_permitted(self):
+        for before_labels, after_labels in ((None, {}), ({}, None)):
+            drift = gke_resource_labels_drift()
+            drift["change"]["before"]["resource_labels"] = before_labels
+            drift["change"]["after"]["resource_labels"] = after_labels
+            self.plan["resource_drift"] = [drift]
+            with self.subTest(before=before_labels, after=after_labels):
+                self.assertTrue(permitted_drift(drift))
+
+    def test_project_iam_missing_etag_readback_is_permitted(self):
+        address = "google_project_iam_member.dev_app_cloudsql[0]"
+        for before_etag, after_etag in ((None, "etag-after"), ("", "etag-after"),
+                                        ("etag-before", None), ("etag-before", "")):
+            drift = project_iam_etag_drift(address, before_etag, after_etag)
+            with self.subTest(before=before_etag, after=after_etag):
+                self.assertTrue(permitted_drift(drift))
+        for missing_side in ("before", "after"):
+            drift = project_iam_etag_drift(address)
+            drift["change"][missing_side].pop("etag")
+            with self.subTest(missing_side=missing_side):
+                self.assertTrue(permitted_drift(drift))
+
     def test_gke_label_drift_rejects_unexpected_labels_or_cluster_changes(self):
         for mutate in (
             lambda d: d["change"]["after"].update(resource_labels={"owner": "someone"}),
@@ -1083,7 +1105,7 @@ class GuardTests(unittest.TestCase):
             lambda d: d["change"]["after"].update(project="other-project"),
             lambda d: d["change"]["after"].update(role="roles/owner"),
             lambda d: d["change"]["after"].update(member="user:someone@example.com"),
-            lambda d: d["change"]["after"].update(etag=""),
+            lambda d: d["change"]["after"].update(etag={"unexpected": "shape"}),
             lambda d: d["change"]["after"].update(extra="unexpected"),
             lambda d: d["change"].update(actions=["delete"]),
         ):
@@ -1091,6 +1113,13 @@ class GuardTests(unittest.TestCase):
             mutate(drift)
             self.plan["resource_drift"] = [drift]
             with self.subTest(drift=drift), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(self.plan)
+
+        for before_etag, after_etag in ((None, ""), ("", None), (None, None)):
+            drift = project_iam_etag_drift(address, before_etag, after_etag)
+            self.plan["resource_drift"] = [drift]
+            with self.subTest(before=before_etag, after=after_etag), self.assertRaisesRegex(
+                    ValueError, "drift"):
                 check_plan(self.plan)
 
     def test_attribution_drift_rejects_other_labels_and_resource_changes(self):
