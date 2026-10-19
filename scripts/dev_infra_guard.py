@@ -149,8 +149,19 @@ def check_references(plan):
 
     def references(expression, expected, label, exact=False):
         actual = expression.get("references", [])
-        require(expected in actual and (not exact or actual == [expected]),
-                f"Missing or unexpected Terraform reference: {label}")
+        require(isinstance(actual, list) and all(isinstance(reference, str) for reference in actual),
+                f"Malformed Terraform references: {label}")
+        if exact:
+            allowed = {expected}
+            # Terraform records an indexed resource reference together with its
+            # instance and collection traversals in configuration metadata.
+            resource_address = expected.rsplit(".", 1)[0]
+            if "[" in resource_address:
+                allowed.update((resource_address, resource_address.split("[", 1)[0]))
+            require(len(actual) == len(allowed) and set(actual) == allowed,
+                    f"Missing or unexpected Terraform reference: {label}")
+        else:
+            require(expected in actual, f"Missing or unexpected Terraform reference: {label}")
 
     for address, field, expected in (
         ("google_compute_subnetwork.this", "network", "google_compute_network.this.id"),

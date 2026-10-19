@@ -11,6 +11,14 @@ from dev_infra_guard import (ATTRIBUTION_LABEL, BASE, EXPECTED, NETWORK, PHASE6,
                              check_plan, diagnose_drift, verify_deployment)
 
 
+def terraform_references(attribute_reference):
+    """Terraform JSON includes indexed attribute, instance, and collection traversals."""
+    resource_address = attribute_reference.rsplit(".", 1)[0]
+    if "[" in resource_address:
+        return [attribute_reference, resource_address, resource_address.split("[", 1)[0]]
+    return [attribute_reference]
+
+
 def fixture():
     network = {
         "google_compute_network": {"name": "helpdeskcloud-dev-vpc", "auto_create_subnetworks": False,
@@ -118,22 +126,22 @@ def fixture():
                          "cluster_secondary_range_name": {"references": ["module.dev_network[0].pods_range_name"]},
                          "services_secondary_range_name": {"references": ["module.dev_network[0].services_range_name"]}}],
                      "cluster_autoscaling": [{"auto_provisioning_defaults": [{
-                         "service_account": {"references": ["google_service_account.dev_gke_nodes[0].email"]}}]}]}},
+                         "service_account": {"references": terraform_references("google_service_account.dev_gke_nodes[0].email")}}]}]}},
                 {"address": "google_artifact_registry_repository_iam_member.dev_gke_image_pull",
                  "expressions": {"role": {"constant_value": "roles/artifactregistry.reader"},
-                                 "member": {"references": ["google_service_account.dev_gke_nodes[0].member"]}}},
+                                 "member": {"references": terraform_references("google_service_account.dev_gke_nodes[0].member")}}},
                 {"address": "google_service_account_iam_member.dev_app_workload_identity",
                  "expressions": {"role": {"constant_value": "roles/iam.workloadIdentityUser"},
-                                 "service_account_id": {"references": ["google_service_account.dev_app[0].name"]}}},
+                                 "service_account_id": {"references": terraform_references("google_service_account.dev_app[0].name")}}},
                 {"address": "google_service_account_iam_member.dev_migration_workload_identity",
                  "expressions": {"role": {"constant_value": "roles/iam.workloadIdentityUser"},
-                                 "service_account_id": {"references": ["google_service_account.dev_migration[0].name"]}}},
+                                 "service_account_id": {"references": terraform_references("google_service_account.dev_migration[0].name")}}},
                 {"address": "google_secret_manager_secret_iam_member.dev_app_secret_access",
                  "expressions": {"role": {"constant_value": "roles/secretmanager.secretAccessor"},
-                                 "secret_id": {"references": ["google_secret_manager_secret.dev_app_connection[0].id"]}}},
+                                 "secret_id": {"references": terraform_references("google_secret_manager_secret.dev_app_connection[0].id")}}},
                 {"address": "google_secret_manager_secret_iam_member.dev_admin_secret_access",
                  "expressions": {"role": {"constant_value": "roles/secretmanager.secretAccessor"},
-                                 "secret_id": {"references": ["google_secret_manager_secret.dev_admin_password[0].id"]}}},
+                                 "secret_id": {"references": terraform_references("google_secret_manager_secret.dev_admin_password[0].id")}}},
                 {"address": "google_service_account.dev_gke_nodes", "expressions": {
                     "account_id": {"constant_value": "helpdesk-gke-node-dev"},
                     "project": {"references": ["var.project_id"]}}},
@@ -145,13 +153,13 @@ def fixture():
                     "project": {"references": ["var.project_id"]}}},
                 {"address": "google_project_iam_member.dev_gke_node_runtime", "expressions": {
                     "role": {"constant_value": "roles/container.defaultNodeServiceAccount"},
-                    "member": {"references": ["google_service_account.dev_gke_nodes[0].member"]}}},
+                    "member": {"references": terraform_references("google_service_account.dev_gke_nodes[0].member")}}},
                 {"address": "google_project_iam_member.dev_app_cloudsql", "expressions": {
                     "role": {"constant_value": "roles/cloudsql.client"},
-                    "member": {"references": ["google_service_account.dev_app[0].member"]}}},
+                    "member": {"references": terraform_references("google_service_account.dev_app[0].member")}}},
                 {"address": "google_project_iam_member.dev_migration_cloudsql", "expressions": {
                     "role": {"constant_value": "roles/cloudsql.client"},
-                    "member": {"references": ["google_service_account.dev_migration[0].member"]}}},
+                    "member": {"references": terraform_references("google_service_account.dev_migration[0].member")}}},
             ],
             "module_calls": {"dev_network": {"module": {"resources": [
                 {"address": "google_compute_subnetwork.this", "expressions": {
@@ -470,6 +478,16 @@ class GuardTests(unittest.TestCase):
                        if r["address"] == "google_container_cluster.dev")
         cluster["expressions"]["cluster_autoscaling"][0]["auto_provisioning_defaults"][0]["service_account"][
             "references"] = ["google_service_account.dev_app[0].email"]
+        with self.assertRaisesRegex(ValueError, "GKE node identity"):
+            check_plan(plan)
+
+    def test_gke_node_identity_rejects_an_unapproved_additional_reference(self):
+        plan = fixture()
+        cluster = next(r for r in plan["configuration"]["root_module"]["resources"]
+                       if r["address"] == "google_container_cluster.dev")
+        reference = cluster["expressions"]["cluster_autoscaling"][0]["auto_provisioning_defaults"][0][
+            "service_account"]["references"]
+        reference.append("google_service_account.dev_migration[0].email")
         with self.assertRaisesRegex(ValueError, "GKE node identity"):
             check_plan(plan)
 
