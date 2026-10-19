@@ -128,8 +128,12 @@ def check_phase6(values):
     require(retention.get("retained_backups") == 7 and retention.get("retention_unit") == "COUNT", "Unexpected backup retention")
     ip = only_item(settings.get("ip_configuration"), "Expected one SQL IP configuration")
     require(ip.get("ipv4_enabled") is False, "SQL public IPv4 must be disabled")
-    require(ip.get("private_network") == VPC_LINK and ip.get("allocated_ip_range") == PSA,
-            "SQL must use the existing VPC and PSA range")
+    # Cloud SQL can read the same VPC back as a project path or Compute self-link.
+    # Both forms must identify this exact project and network.
+    require(ip.get("private_network") in (VPC_LINK, VPC_PATH),
+            "SQL must use only the intended private VPC")
+    require(ip.get("allocated_ip_range") == PSA,
+            "SQL must use the existing PSA range")
     require(ip.get("ssl_mode") == "ENCRYPTED_ONLY", "SQL encrypted-only mode must be enabled")
 
     database = values["google_sql_database"]
