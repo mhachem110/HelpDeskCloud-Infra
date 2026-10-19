@@ -56,6 +56,17 @@ SQL_ADDRESS = "google_sql_database_instance.dev_postgres[0]"
 ATTRIBUTION_LABEL = {"goog-terraform-provisioned": "true"}
 MISSING = object()
 
+# Terraform records these counted resource traversals alongside their selected
+# attribute. Keep this allowlist literal: another instance, attribute, or
+# resource must not become an approved identity reference by prefix matching.
+STRICT_REFERENCE_PARENTS = {
+    "google_service_account.dev_gke_nodes[0]": "google_service_account.dev_gke_nodes",
+    "google_service_account.dev_app[0]": "google_service_account.dev_app",
+    "google_service_account.dev_migration[0]": "google_service_account.dev_migration",
+    "google_secret_manager_secret.dev_app_connection[0]": "google_secret_manager_secret.dev_app_connection",
+    "google_secret_manager_secret.dev_admin_password[0]": "google_secret_manager_secret.dev_admin_password",
+}
+
 
 def require(condition, message):
     if not condition:
@@ -148,9 +159,22 @@ def check_references(plan):
     resources = {r.get("address"): r for r in root.get("resources", [])}
 
     def references(expression, expected, label, exact=False):
-        actual = expression.get("references", [])
-        require(expected in actual and (not exact or actual == [expected]),
-                f"Missing or unexpected Terraform reference: {label}")
+        require(isinstance(expression, dict), f"Malformed Terraform references: {label}")
+        actual = expression.get("references")
+        require(isinstance(actual, list) and all(isinstance(reference, str) and reference for reference in actual),
+                f"Malformed Terraform references: {label}")
+        if exact:
+            require(set(expression) == {"references"}, f"Malformed Terraform references: {label}")
+            allowed = {expected}
+            resource_address = expected.rsplit(".", 1)[0]
+            if resource_address in STRICT_REFERENCE_PARENTS:
+                allowed.update((resource_address, STRICT_REFERENCE_PARENTS[resource_address]))
+            # The full reference is mandatory; Terraform may also report either
+            # or both of its approved parent traversals in any order.
+            require(expected in actual and len(actual) == len(set(actual)) and set(actual) <= allowed,
+                    f"Missing or unexpected Terraform reference: {label}")
+        else:
+            require(expected in actual, f"Missing or unexpected Terraform reference: {label}")
 
     for address, field, expected in (
         ("google_compute_subnetwork.this", "network", "google_compute_network.this.id"),
