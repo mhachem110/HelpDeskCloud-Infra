@@ -65,6 +65,11 @@ PSA_ADDRESS = PREFIX + "google_compute_global_address.private_services"
 SUBNET_ADDRESS = PREFIX + "google_compute_subnetwork.this"
 REGISTRY_ADDRESS = "google_artifact_registry_repository.dev_images[0]"
 SQL_ADDRESS = "google_sql_database_instance.dev_postgres[0]"
+SECRET_READBACK_NAMES = {
+    "google_secret_manager_secret.dev_app_connection[0]": "helpdesk-dev-db-connection",
+    "google_secret_manager_secret.dev_admin_password[0]": "helpdesk-dev-db-admin-password",
+}
+SECRET_EMPTY_MAP_FIELDS = ("annotations", "labels", "version_aliases")
 ATTRIBUTION_LABEL = {"goog-terraform-provisioned": "true"}
 MISSING = object()
 
@@ -450,6 +455,7 @@ def permitted_drift(entry):
         SUBNET_ADDRESS: NETWORK[SUBNET_ADDRESS],
         REGISTRY_ADDRESS: PHASE6[REGISTRY_ADDRESS],
         SQL_ADDRESS: PHASE6[SQL_ADDRESS],
+        **{secret: PHASE7[secret] for secret in SECRET_READBACK_NAMES},
     }.get(address)
     if entry.get("mode") != "managed" or expected_type is None or entry.get("type") != expected_type:
         return False
@@ -457,6 +463,21 @@ def permitted_drift(entry):
     before, after = change.get("before"), change.get("after")
     if change.get("actions") != ["update"] or not isinstance(before, dict) or not isinstance(after, dict):
         return False
+
+    if address in SECRET_READBACK_NAMES:
+        secret_id = SECRET_READBACK_NAMES[address]
+        expected_id = f"projects/{PROJECT}/secrets/{secret_id}"
+        if any(snapshot.get("project") != PROJECT or snapshot.get("secret_id") != secret_id
+               or snapshot.get("id") != expected_id or snapshot.get("deletion_protection") is not True
+               for snapshot in (before, after)):
+            return False
+        if any(before.get(field, MISSING) is not None or after.get(field, MISSING) != {}
+               for field in SECRET_EMPTY_MAP_FIELDS):
+            return False
+        # Admit only null -> empty map for each unset optional field. The
+        # diagnostic classifies the live snapshots without exposing contents.
+        return ({key: value for key, value in before.items() if key not in SECRET_EMPTY_MAP_FIELDS}
+                == {key: value for key, value in after.items() if key not in SECRET_EMPTY_MAP_FIELDS})
 
     if address == PSA_ADDRESS:
         if (before.get("name") != PSA or after.get("name") != PSA
@@ -628,9 +649,17 @@ def changed_paths(before, after, prefix=""):
     return [prefix or "<unknown>"]
 
 
-def safe_drift_path(path):
-    """Do not expose user-defined label keys in workflow logs."""
-    for field in ("labels", "terraform_labels", "effective_labels"):
+def safe_drift_path(path, secret=False):
+    """Do not expose user-defined map keys or unknown secret paths in logs."""
+    if secret:
+        for field in SECRET_EMPTY_MAP_FIELDS:
+            if path == field:
+                return field
+            if path.startswith(field + "."):
+                return field + ".<key withheld>"
+        return "<other secret path withheld>"
+    for field in ("labels", "terraform_labels", "effective_labels", "annotations",
+                  "effective_annotations", "version_aliases"):
         if path.startswith(field + "."):
             return field + ".<key withheld>"
     return path
@@ -658,6 +687,17 @@ def classify_address_labels(value):
     if isinstance(value, dict):
         return "unexpected map (contents withheld)"
     return known_value(value, label=True)
+
+
+def empty_map_status(value):
+    """Classify optional Secret Manager maps without exposing keys or values."""
+    if value is MISSING:
+        return "missing"
+    if value is None:
+        return "null"
+    if value == {}:
+        return "empty map"
+    return "<unexpected value withheld>"
 
 
 def attribution_status(value):
@@ -716,7 +756,8 @@ def diagnose_drift(plan):
     lines = [f"Terraform reported drift for {len(drift)} resource(s). Only approved non-secret fields are classified."]
     for entry in drift:
         change = entry.get("change", {})
-        paths = list(dict.fromkeys(safe_drift_path(path)
+        secret = entry.get("address") in SECRET_READBACK_NAMES
+        paths = list(dict.fromkeys(safe_drift_path(path, secret=secret)
                                    for path in changed_paths(change.get("before"), change.get("after"))))
         paths = paths or ["<unknown>"]
         sensitive = any(any(part in SENSITIVE_PARTS for part in path.replace("[", ".").split("."))
@@ -772,6 +813,10 @@ def diagnose_drift(plan):
                 lines.append("  settings[0].ip_configuration[0]." + field + ": before="
                              + classify(first_ip.get(field, MISSING))
                              + "; after=" + classify(second_ip.get(field, MISSING)))
+        if entry.get("address") in SECRET_READBACK_NAMES and isinstance(before, dict) and isinstance(after, dict):
+            for field in SECRET_EMPTY_MAP_FIELDS:
+                lines.append("  " + field + ": before=" + empty_map_status(before.get(field, MISSING))
+                             + "; after=" + empty_map_status(after.get(field, MISSING)))
     lines.append("Only exact documented normalization patterns may pass; all other drift remains blocked.")
     return lines
 

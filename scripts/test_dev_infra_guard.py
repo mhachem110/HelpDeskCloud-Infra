@@ -366,6 +366,28 @@ def sql_readback_drift():
             "change": {"actions": ["update"], "before": before, "after": after}}
 
 
+def secret_empty_map_drift(address):
+    names = {
+        "google_secret_manager_secret.dev_app_connection[0]": "helpdesk-dev-db-connection",
+        "google_secret_manager_secret.dev_admin_password[0]": "helpdesk-dev-db-admin-password",
+    }
+    project = "helpdeskcloud-capstone-511905"
+    secret_id = names[address]
+    before = {
+        "project": project, "secret_id": secret_id,
+        "id": f"projects/{project}/secrets/{secret_id}",
+        "deletion_protection": True, "replication": [{"auto": [{}]}],
+        "annotations": None, "labels": None, "version_aliases": None,
+        "terraform_labels": ATTRIBUTION_LABEL, "effective_labels": ATTRIBUTION_LABEL,
+        "effective_annotations": {},
+    }
+    after = copy.deepcopy(before)
+    for field in ("annotations", "labels", "version_aliases"):
+        after[field] = {}
+    return {"mode": "managed", "address": address, "type": "google_secret_manager_secret",
+            "change": {"actions": ["update"], "before": before, "after": after}}
+
+
 def evidence():
     vpc = VPC_LINK
     subnet_link = "https://www.googleapis.com/compute/v1/projects/helpdeskcloud-capstone-511905/regions/us-east1/subnetworks/helpdeskcloud-dev-subnet"
@@ -488,6 +510,75 @@ class GuardTests(unittest.TestCase):
         creates = {change["address"] for change in plan["resource_changes"]
                    if change["change"]["actions"] == ["create"]}
         self.assertEqual(creates, APPLY12_REMAINING)
+
+    def test_apply12_recovery_allows_only_both_secret_empty_map_readbacks(self):
+        plan = apply12_recovery_plan()
+        secrets = ("google_secret_manager_secret.dev_app_connection[0]",
+                   "google_secret_manager_secret.dev_admin_password[0]")
+        plan["resource_drift"] = [secret_empty_map_drift(address) for address in secrets]
+        self.assertEqual(check_plan(plan), "apply")
+        report = "\n".join(diagnose_drift(plan))
+        for field in ("annotations", "labels", "version_aliases"):
+            self.assertEqual(report.count(f"{field}: before=null; after=empty map"), 2)
+
+    def test_secret_readback_rejects_other_maps_identities_and_security_changes(self):
+        address = "google_secret_manager_secret.dev_app_connection[0]"
+        mutations = (
+            lambda d: d["change"]["before"].update(annotations={}),
+            lambda d: d["change"]["before"].pop("labels"),
+            lambda d: d["change"]["after"].update(version_aliases={"live": "1"}),
+            lambda d: d["change"]["after"].update(labels={"owner": "private-value"}),
+            lambda d: d["change"]["after"].update(annotations={"owner": "private-value"}),
+            lambda d: d["change"]["after"].pop("version_aliases"),
+            lambda d: d["change"]["after"].update(project="wrong-project"),
+            lambda d: d["change"]["after"].update(secret_id="wrong-secret"),
+            lambda d: d["change"]["after"].update(id="projects/wrong/secrets/wrong"),
+            lambda d: d["change"]["after"].update(deletion_protection=False),
+            lambda d: d["change"]["after"].update(replication=[{"user_managed": []}]),
+            lambda d: d["change"]["after"].update(effective_annotations={"owner": "private-value"}),
+            lambda d: d["change"].update(actions=["delete", "create"]),
+            lambda d: d.update(type="google_secret_manager_secret_version"),
+            lambda d: d.update(address="google_secret_manager_secret.other[0]"),
+        )
+        for mutate in mutations:
+            plan = apply12_recovery_plan()
+            drift = secret_empty_map_drift(address)
+            mutate(drift)
+            plan["resource_drift"] = [drift]
+            with self.subTest(mutation=mutate), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(plan)
+
+    def test_secret_readback_never_authorizes_a_requested_update_or_new_inventory(self):
+        address = "google_secret_manager_secret.dev_admin_password[0]"
+        plan = apply12_recovery_plan()
+        plan["resource_drift"] = [secret_empty_map_drift(address)]
+        next(change for change in plan["resource_changes"] if change["address"] == address)[
+            "change"]["actions"] = ["update"]
+        with self.assertRaisesRegex(ValueError, "readback only"):
+            check_plan(plan)
+        plan = apply12_recovery_plan()
+        plan["resource_drift"] = [secret_empty_map_drift(address)]
+        set_prior_phase7(plan, APPLY12_COMPLETED - {address})
+        with self.assertRaisesRegex(ValueError, "Partial or inconsistent"):
+            check_plan(plan)
+
+    def test_secret_diagnostic_withholds_annotation_label_and_alias_contents(self):
+        plan = apply12_recovery_plan()
+        drift = secret_empty_map_drift("google_secret_manager_secret.dev_app_connection[0]")
+        for field in ("annotations", "labels", "version_aliases"):
+            drift["change"]["before"][field] = {"private-key": "private-before"}
+            drift["change"]["after"][field] = {"private-key": "private-after"}
+        drift["change"]["after"]["private-field"] = "private-after"
+        plan["resource_drift"] = [drift]
+        report = "\n".join(diagnose_drift(plan))
+        self.assertIn("annotations.<key withheld>", report)
+        self.assertIn("version_aliases.<key withheld>", report)
+        self.assertIn("<other secret path withheld>", report)
+        self.assertIn("<unexpected value withheld>", report)
+        for value in ("private-key", "private-before", "private-after", "private-field"):
+            self.assertNotIn(value, report)
+        with self.assertRaisesRegex(ValueError, "drift"):
+            check_plan(plan)
 
     def test_apply12_recovery_rejects_a_different_created_inventory(self):
         plan = apply12_recovery_plan()
