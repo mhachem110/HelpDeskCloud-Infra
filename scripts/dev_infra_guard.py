@@ -5,8 +5,10 @@ only a decision or a short error, never plan or state contents.
 """
 
 import json
+import re
 import sys
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 
 
@@ -188,6 +190,9 @@ PROJECT_IAM_READBACKS = {
 SECRET_EMPTY_MAP_FIELDS = ("annotations", "labels", "version_aliases")
 ATTRIBUTION_LABEL = {"goog-terraform-provisioned": "true"}
 MISSING = object()
+RFC3339_TIMESTAMP = re.compile(
+    r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z"
+)
 
 # Terraform records these counted resource traversals alongside their selected
 # attribute. Keep this allowlist literal: another instance, attribute, or
@@ -808,6 +813,17 @@ def check_phase7(values, plan, creates):
                             f"Secret Manager target: {address}")
 
 
+def valid_rfc3339_timestamp(value):
+    """Return whether a provider update_time is a valid timezone-aware RFC3339 value."""
+    if not isinstance(value, str) or not RFC3339_TIMESTAMP.fullmatch(value):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
 def permitted_drift(entry):
     """Accept only exact provider readbacks, with every other field identical."""
     address = entry.get("address")
@@ -998,12 +1014,9 @@ def permitted_drift(entry):
         after_time = after.get("update_time", MISSING)
         time_changed = before_time != after_time
 
-        if time_changed and not (
-            isinstance(before_time, str)
-            and bool(before_time)
-            and isinstance(after_time, str)
-            and bool(after_time)
-        ):
+        if ((before_time is not MISSING or after_time is not MISSING)
+                and not (valid_rfc3339_timestamp(before_time)
+                         and valid_rfc3339_timestamp(after_time))):
             return False
 
         if before_labels == after_labels and not time_changed:
