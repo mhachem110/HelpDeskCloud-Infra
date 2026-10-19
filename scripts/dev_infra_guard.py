@@ -6,6 +6,7 @@ only a decision or a short error, never plan or state contents.
 
 import json
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 
@@ -380,10 +381,15 @@ def check_phase7(values, plan, creates):
 
 
 def permitted_drift(entry):
-    """Accept only two known readback representations, with every other field identical."""
+    """Accept only exact provider readbacks, with every other field identical."""
     address = entry.get("address")
-    if (entry.get("mode") != "managed" or address not in (PSA_ADDRESS, SUBNET_ADDRESS)
-            or entry.get("type") != NETWORK[address]):
+    expected_type = {
+        PSA_ADDRESS: NETWORK[PSA_ADDRESS],
+        SUBNET_ADDRESS: NETWORK[SUBNET_ADDRESS],
+        REGISTRY_ADDRESS: PHASE6[REGISTRY_ADDRESS],
+        SQL_ADDRESS: PHASE6[SQL_ADDRESS],
+    }.get(address)
+    if entry.get("mode") != "managed" or expected_type is None or entry.get("type") != expected_type:
         return False
     change = entry.get("change", {})
     before, after = change.get("before"), change.get("after")
@@ -400,6 +406,50 @@ def permitted_drift(entry):
             return False
         return {k: v for k, v in before.items() if k != "labels"} == {
             k: v for k, v in after.items() if k != "labels"}
+
+    if address == REGISTRY_ADDRESS:
+        expected_identity = (PROJECT, "us-east1", "helpdeskcloud-dev-images")
+        if (tuple(before.get(key) for key in ("project", "location", "repository_id")) != expected_identity
+                or tuple(after.get(key) for key in ("project", "location", "repository_id")) != expected_identity
+                or before.get("labels", MISSING) is not None or after.get("labels", MISSING) != {}
+                or before.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL
+                or after.get("terraform_labels", MISSING) != ATTRIBUTION_LABEL
+                or before.get("effective_labels", MISSING) != ATTRIBUTION_LABEL
+                or after.get("effective_labels", MISSING) != ATTRIBUTION_LABEL):
+            return False
+        return {k: v for k, v in before.items() if k != "labels"} == {
+            k: v for k, v in after.items() if k != "labels"}
+
+    if address == SQL_ADDRESS:
+        identity = (PROJECT, "helpdeskcloud-dev-postgres", "us-east1", "POSTGRES_17")
+        if (tuple(before.get(key) for key in ("project", "name", "region", "database_version")) != identity
+                or tuple(after.get(key) for key in ("project", "name", "region", "database_version")) != identity):
+            return False
+        before_settings, after_settings = before.get("settings"), after.get("settings")
+        if (not isinstance(before_settings, list) or len(before_settings) != 1
+                or not isinstance(after_settings, list) or len(after_settings) != 1
+                or not isinstance(before_settings[0], dict) or not isinstance(after_settings[0], dict)):
+            return False
+        before_config = before_settings[0].get("ip_configuration")
+        after_config = after_settings[0].get("ip_configuration")
+        if (type(before_settings[0].get("version")) is not int or before_settings[0]["version"] != 1
+                or type(after_settings[0].get("version")) is not int or after_settings[0]["version"] != 3
+                or not isinstance(before_config, list) or len(before_config) != 1
+                or not isinstance(after_config, list) or len(after_config) != 1
+                or not isinstance(before_config[0], dict) or not isinstance(after_config[0], dict)
+                or before_config[0].get("server_ca_mode") != "GOOGLE_MANAGED_INTERNAL_CA"
+                or after_config[0].get("server_ca_mode") != "GOOGLE_MANAGED_INTERNAL_CA"
+                or before_config[0].get("custom_subject_alternative_names", MISSING) is not None
+                or after_config[0].get("custom_subject_alternative_names", MISSING) != []):
+            return False
+        # settings.version is Cloud SQL's concurrency generation. Remove only the two
+        # observed normalization fields before comparing the complete snapshots.
+        before_copy, after_copy = deepcopy(before), deepcopy(after)
+        before_copy["settings"][0].pop("version")
+        after_copy["settings"][0].pop("version")
+        before_copy["settings"][0]["ip_configuration"][0].pop("custom_subject_alternative_names")
+        after_copy["settings"][0]["ip_configuration"][0].pop("custom_subject_alternative_names")
+        return before_copy == after_copy
 
     before_logs, after_logs = before.get("log_config"), after.get("log_config")
     if (not isinstance(before_logs, list) or len(before_logs) != 1
@@ -432,17 +482,16 @@ def check_drift(plan):
             "Unexpected resource drift requires review; run the Dev Plan diagnostic")
     # A drift observation never authorizes a requested operation on that resource.
     for entry in drift:
-        if entry.get("address") == PSA_ADDRESS:
-            requested = [change for change in plan.get("resource_changes", [])
-                         if change.get("address") == PSA_ADDRESS]
-            require(all(change.get("change", {}).get("actions") == ["no-op"] for change in requested),
-                    "PSA drift is readback only; a proposed resource change requires review")
+        requested = [change for change in plan.get("resource_changes", [])
+                     if change.get("address") == entry.get("address")]
+        require(all(change.get("change", {}).get("actions") == ["no-op"] for change in requested),
+                "Provider drift is readback only; a proposed resource change requires review")
 
 
 def check_plan(plan):
     for name, expected in {"project_id": PROJECT, "region": "us-east1", "environment": "dev"}.items():
         require(plan.get("variables", {}).get(name, {}).get("value") == expected, f"Unexpected {name}")
-    # Drift is separate from requested actions; only two exact provider readbacks are allowed.
+    # Drift is separate from requested actions; only exact, tested readbacks are allowed.
     check_drift(plan)
     planned = planned_resources(plan.get("planned_values", {}).get("root_module", {}))
     managed = [r for r in planned if r.get("mode") == "managed"]
