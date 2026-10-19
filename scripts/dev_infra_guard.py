@@ -64,6 +64,10 @@ VPC_PEERING_PATH = f"projects/260283083469/global/networks/{VPC}"
 PSA_ADDRESS = PREFIX + "google_compute_global_address.private_services"
 SUBNET_ADDRESS = PREFIX + "google_compute_subnetwork.this"
 REGISTRY_ADDRESS = "google_artifact_registry_repository.dev_images[0]"
+REGISTRY_REPOSITORY_ID = "helpdeskcloud-dev-images"
+REGISTRY_REPOSITORY_PATH = (
+    f"projects/{PROJECT}/locations/us-east1/repositories/{REGISTRY_REPOSITORY_ID}"
+)
 SQL_ADDRESS = "google_sql_database_instance.dev_postgres[0]"
 SECRET_READBACK_NAMES = {
     "google_secret_manager_secret.dev_app_connection[0]": "helpdesk-dev-db-connection",
@@ -399,7 +403,7 @@ def check_phase7(values, plan, creates):
 
     reader = item("google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]")
     require(reader.get("project") == PROJECT and reader.get("location") == "us-east1"
-            and reader.get("repository") == "helpdeskcloud-dev-images"
+            and reader.get("repository") in (REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH)
             and reader.get("role") == "roles/artifactregistry.reader",
             "Node image access must be repository-scoped Reader")
     expected_or_unknown(reader, "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]",

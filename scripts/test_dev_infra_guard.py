@@ -521,6 +521,42 @@ class GuardTests(unittest.TestCase):
         for field in ("annotations", "labels", "version_aliases"):
             self.assertEqual(report.count(f"{field}: before=null; after=empty map"), 2)
 
+    def test_apply12_recovery_accepts_exact_provider_repository_path_readback(self):
+        plan = apply12_recovery_plan()
+        address = "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]"
+        repository_path = (
+            "projects/helpdeskcloud-capstone-511905/locations/us-east1/"
+            "repositories/helpdeskcloud-dev-images"
+        )
+        resource(plan, address)["values"]["repository"] = repository_path
+        prior = next(item for item in plan["prior_state"]["values"]["root_module"]["resources"]
+                     if item["address"] == address)
+        prior["values"]["repository"] = repository_path
+        secrets = ("google_secret_manager_secret.dev_app_connection[0]",
+                   "google_secret_manager_secret.dev_admin_password[0]")
+        plan["resource_drift"] = [secret_empty_map_drift(secret) for secret in secrets]
+        self.assertEqual(check_plan(plan), "apply")
+
+    def test_repository_path_readback_rejects_wrong_scope_role_or_member(self):
+        address = "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]"
+        mutations = (
+            ("repository", "projects/another-project/locations/us-east1/repositories/helpdeskcloud-dev-images"),
+            ("repository", "projects/helpdeskcloud-capstone-511905/locations/us-central1/repositories/helpdeskcloud-dev-images"),
+            ("repository", "projects/helpdeskcloud-capstone-511905/locations/us-east1/repositories/another-repository"),
+            ("role", "roles/artifactregistry.admin"),
+            ("member", "allUsers"),
+            ("project", "another-project"),
+            ("location", "us-central1"),
+        )
+        for field, value in mutations:
+            plan = apply12_recovery_plan()
+            resource(plan, address)["values"][field] = value
+            expected_error = ("Unexpected node repository IAM member" if field == "member"
+                              else "repository-scoped Reader")
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(
+                    ValueError, expected_error):
+                check_plan(plan)
+
     def test_secret_readback_rejects_other_maps_identities_and_security_changes(self):
         address = "google_secret_manager_secret.dev_app_connection[0]"
         mutations = (
