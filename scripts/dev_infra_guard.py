@@ -26,7 +26,25 @@ PHASE6 = {
     "google_sql_database_instance.dev_postgres[0]": "google_sql_database_instance",
     "google_sql_database.dev_helpdesk[0]": "google_sql_database",
 }
-EXPECTED = NETWORK | PHASE6
+# A phase adds exact addresses here; existing addresses remain protected as no-ops.
+PHASE7 = {
+    "google_container_cluster.dev[0]": "google_container_cluster",
+    "google_service_account.dev_gke_nodes[0]": "google_service_account",
+    "google_service_account.dev_app[0]": "google_service_account",
+    "google_service_account.dev_migration[0]": "google_service_account",
+    "google_project_iam_member.dev_gke_node_runtime[0]": "google_project_iam_member",
+    "google_project_iam_member.dev_app_cloudsql[0]": "google_project_iam_member",
+    "google_project_iam_member.dev_migration_cloudsql[0]": "google_project_iam_member",
+    "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]": "google_artifact_registry_repository_iam_member",
+    "google_service_account_iam_member.dev_app_workload_identity[0]": "google_service_account_iam_member",
+    "google_service_account_iam_member.dev_migration_workload_identity[0]": "google_service_account_iam_member",
+    "google_secret_manager_secret.dev_app_connection[0]": "google_secret_manager_secret",
+    "google_secret_manager_secret.dev_admin_password[0]": "google_secret_manager_secret",
+    "google_secret_manager_secret_iam_member.dev_app_secret_access[0]": "google_secret_manager_secret_iam_member",
+    "google_secret_manager_secret_iam_member.dev_admin_secret_access[0]": "google_secret_manager_secret_iam_member",
+}
+BASE = NETWORK | PHASE6
+EXPECTED = BASE | PHASE7
 VPC_LINK = f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/{VPC}"
 VPC_PATH = f"projects/{PROJECT}/global/networks/{VPC}"
 VPC_PEERING_PATH = f"projects/260283083469/global/networks/{VPC}"
@@ -122,8 +140,10 @@ def check_references(plan):
     network = {r.get("address"): r for r in module.get("resources", [])}
     resources = {r.get("address"): r for r in root.get("resources", [])}
 
-    def references(expression, expected, label):
-        require(expected in expression.get("references", []), f"Missing Terraform reference: {label}")
+    def references(expression, expected, label, exact=False):
+        actual = expression.get("references", [])
+        require(expected in actual and (not exact or actual == [expected]),
+                f"Missing or unexpected Terraform reference: {label}")
 
     for address, field, expected in (
         ("google_compute_subnetwork.this", "network", "google_compute_network.this.id"),
@@ -142,6 +162,219 @@ def check_references(plan):
     database = resources.get("google_sql_database.dev_helpdesk", {})
     references(database.get("expressions", {}).get("instance", {}),
                "google_sql_database_instance.dev_postgres[0].name", "database instance")
+
+    cluster = resources.get("google_container_cluster.dev", {})
+    expressions = cluster.get("expressions", {})
+    for field, expected in (
+        ("network", "module.dev_network[0].vpc_self_link"),
+        ("subnetwork", "module.dev_network[0].subnet_self_link"),
+    ):
+        references(expressions.get(field, {}), expected, f"GKE {field}")
+    ip_ranges = only_item(expressions.get("ip_allocation_policy"), "Missing GKE range references")
+    references(ip_ranges.get("cluster_secondary_range_name", {}),
+               "module.dev_network[0].pods_range_name", "GKE Pod range")
+    references(ip_ranges.get("services_secondary_range_name", {}),
+               "module.dev_network[0].services_range_name", "GKE Service range")
+    defaults = only_item(only_item(expressions.get("cluster_autoscaling"), "Missing GKE node identity")
+                         .get("auto_provisioning_defaults"), "Missing GKE node identity")
+    references(defaults.get("service_account", {}), "google_service_account.dev_gke_nodes[0].email",
+               "GKE node identity", exact=True)
+    require("google_project_iam_member.dev_gke_node_runtime" in cluster.get("depends_on", [])
+            and "google_artifact_registry_repository_iam_member.dev_gke_image_pull" in cluster.get("depends_on", []),
+            "GKE must wait for node permissions")
+
+    for address, field, expected in (
+        ("google_artifact_registry_repository_iam_member.dev_gke_image_pull", "member", "google_service_account.dev_gke_nodes[0].member"),
+        ("google_service_account_iam_member.dev_app_workload_identity", "service_account_id", "google_service_account.dev_app[0].name"),
+        ("google_service_account_iam_member.dev_migration_workload_identity", "service_account_id", "google_service_account.dev_migration[0].name"),
+        ("google_secret_manager_secret_iam_member.dev_app_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
+        ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
+    ):
+        references(resources.get(address, {}).get("expressions", {}).get(field, {}), expected, address,
+                   exact=True)
+
+    # These account identifiers are the source of computed service-account emails and names.
+    for address, account_id in (
+        ("google_service_account.dev_gke_nodes", "helpdesk-gke-node-dev"),
+        ("google_service_account.dev_app", "helpdesk-app-dev"),
+        ("google_service_account.dev_migration", "helpdesk-migrate-dev"),
+    ):
+        expressions = resources.get(address, {}).get("expressions", {})
+        require(expressions.get("account_id", {}).get("constant_value") == account_id,
+                f"Unexpected service-account account_id expression: {address}")
+        references(expressions.get("project", {}), "var.project_id", f"{address}.project", exact=True)
+
+    # Check the roles and identities in configuration as well as the evaluated plan.
+    role_specs = (
+        ("google_project_iam_member.dev_gke_node_runtime", "roles/container.defaultNodeServiceAccount",
+         "member", "google_service_account.dev_gke_nodes[0].member"),
+        ("google_project_iam_member.dev_app_cloudsql", "roles/cloudsql.client",
+         "member", "google_service_account.dev_app[0].member"),
+        ("google_project_iam_member.dev_migration_cloudsql", "roles/cloudsql.client",
+         "member", "google_service_account.dev_migration[0].member"),
+        ("google_artifact_registry_repository_iam_member.dev_gke_image_pull", "roles/artifactregistry.reader",
+         "member", "google_service_account.dev_gke_nodes[0].member"),
+        ("google_service_account_iam_member.dev_app_workload_identity", "roles/iam.workloadIdentityUser",
+         "service_account_id", "google_service_account.dev_app[0].name"),
+        ("google_service_account_iam_member.dev_migration_workload_identity", "roles/iam.workloadIdentityUser",
+         "service_account_id", "google_service_account.dev_migration[0].name"),
+        ("google_secret_manager_secret_iam_member.dev_app_secret_access", "roles/secretmanager.secretAccessor",
+         "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
+        ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "roles/secretmanager.secretAccessor",
+         "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
+    )
+    for address, role, identity_field, identity_reference in role_specs:
+        expressions = resources.get(address, {}).get("expressions", {})
+        require(expressions.get("role", {}).get("constant_value") == role,
+                f"Unexpected IAM role expression: {address}")
+        references(expressions.get(identity_field, {}), identity_reference,
+                   f"{address}.{identity_field}", exact=True)
+
+
+def after_unknown_at(change, path):
+    """Read one Terraform after_unknown leaf without treating missing metadata as unknown."""
+    value = change.get("after_unknown", {})
+    for part in path:
+        if isinstance(part, int):
+            if not isinstance(value, list) or part >= len(value):
+                return False
+            value = value[part]
+        else:
+            if not isinstance(value, dict) or part not in value:
+                return False
+            value = value[part]
+    return value is True
+
+
+def expected_or_unknown(values, address, path, expected, changes, creates, label):
+    """Accept a computed result only for a new approved resource and an exact unknown marker."""
+    value = values
+    for part in path:
+        if isinstance(part, int):
+            value = value[part] if isinstance(value, list) and part < len(value) else MISSING
+        else:
+            value = value.get(part, MISSING) if isinstance(value, dict) else MISSING
+    change = changes.get(address, {}).get("change", {})
+    if after_unknown_at(change, path):
+        require(address in creates and value is None,
+                f"Unexpected unknown value for {label}")
+        return
+    require(value == expected, f"Unexpected {label}")
+
+
+def check_phase7(values, plan, creates):
+    """Verify the new resources by address, since several share an IAM resource type."""
+    changes = {c.get("address"): c for c in plan.get("resource_changes", [])}
+
+    def item(address):
+        return values[address]
+
+    cluster = item("google_container_cluster.dev[0]")
+    require(cluster.get("project") == PROJECT and cluster.get("name") == "helpdeskcloud-dev-gke"
+            and cluster.get("location") == "us-east1", "Unexpected GKE identity")
+    require(cluster.get("enable_autopilot") is True and cluster.get("deletion_protection") is True,
+            "GKE Autopilot or deletion protection is missing")
+    require(cluster.get("network") == VPC_LINK and cluster.get("subnetwork") ==
+            f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/regions/us-east1/subnetworks/{SUBNET}",
+            "GKE must use the existing Dev VPC and subnet")
+    require(cluster.get("networking_mode") == "VPC_NATIVE", "GKE must use alias IP networking")
+    ranges = only_item(cluster.get("ip_allocation_policy"), "Missing GKE secondary ranges")
+    require(ranges.get("cluster_secondary_range_name") == "helpdeskcloud-dev-pods"
+            and ranges.get("services_secondary_range_name") == "helpdeskcloud-dev-services",
+            "GKE secondary ranges do not match the existing subnet")
+    require(only_item(cluster.get("private_cluster_config"), "Missing private node config")
+            .get("enable_private_nodes") is True, "GKE nodes must be private")
+    endpoints = only_item(cluster.get("control_plane_endpoints_config"), "Missing control plane endpoints")
+    require(only_item(endpoints.get("dns_endpoint_config"), "Missing DNS endpoint")
+            .get("allow_external_traffic") is True, "Cloud Shell DNS endpoint is missing")
+    require(only_item(endpoints.get("ip_endpoints_config"), "Missing IP endpoint config")
+            .get("enabled") is False, "Direct control plane IP access must be disabled")
+    require(only_item(cluster.get("workload_identity_config"), "Missing GKE workload pool")
+            .get("workload_pool") == f"{PROJECT}.svc.id.goog", "Unexpected GKE workload pool")
+    require(only_item(cluster.get("secret_manager_config"), "Missing managed Secret Manager add-on")
+            .get("enabled") is True, "Managed Secret Manager add-on must be enabled")
+    require(only_item(cluster.get("release_channel"), "Missing GKE release channel")
+            .get("channel") == "REGULAR", "Unexpected GKE release channel")
+    node = only_item(only_item(cluster.get("cluster_autoscaling"), "Missing node identity defaults")
+                     .get("auto_provisioning_defaults"), "Missing node identity defaults")
+    expected_or_unknown(cluster, "google_container_cluster.dev[0]",
+                        ("cluster_autoscaling", 0, "auto_provisioning_defaults", 0, "service_account"),
+                        f"helpdesk-gke-node-dev@{PROJECT}.iam.gserviceaccount.com", changes, creates,
+                        "GKE node identity")
+
+    for address, account_id in (
+        ("google_service_account.dev_gke_nodes[0]", "helpdesk-gke-node-dev"),
+        ("google_service_account.dev_app[0]", "helpdesk-app-dev"),
+        ("google_service_account.dev_migration[0]", "helpdesk-migrate-dev"),
+    ):
+        require(item(address).get("project") == PROJECT and item(address).get("account_id") == account_id,
+                f"Unexpected service account: {address}")
+        email = f"{account_id}@{PROJECT}.iam.gserviceaccount.com"
+        for field, expected in (("email", email), ("member", f"serviceAccount:{email}"),
+                                ("name", f"projects/{PROJECT}/serviceAccounts/{email}")):
+            expected_or_unknown(item(address), address, (field,), expected, changes, creates,
+                                f"service-account {field}: {address}")
+
+    for address, role, email in (
+        ("google_project_iam_member.dev_gke_node_runtime[0]", "roles/container.defaultNodeServiceAccount", "helpdesk-gke-node-dev"),
+        ("google_project_iam_member.dev_app_cloudsql[0]", "roles/cloudsql.client", "helpdesk-app-dev"),
+        ("google_project_iam_member.dev_migration_cloudsql[0]", "roles/cloudsql.client", "helpdesk-migrate-dev"),
+    ):
+        grant = item(address)
+        require(grant.get("project") == PROJECT and grant.get("role") == role,
+                f"Unexpected project IAM grant: {address}")
+        expected_or_unknown(grant, address, ("member",),
+                            f"serviceAccount:{email}@{PROJECT}.iam.gserviceaccount.com",
+                            changes, creates, f"project IAM member: {address}")
+
+    reader = item("google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]")
+    require(reader.get("project") == PROJECT and reader.get("location") == "us-east1"
+            and reader.get("repository") == "helpdeskcloud-dev-images"
+            and reader.get("role") == "roles/artifactregistry.reader",
+            "Node image access must be repository-scoped Reader")
+    expected_or_unknown(reader, "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]",
+                        ("member",), f"serviceAccount:helpdesk-gke-node-dev@{PROJECT}.iam.gserviceaccount.com",
+                        changes, creates, "node repository IAM member")
+
+    for address, name in (
+        ("google_service_account_iam_member.dev_app_workload_identity[0]", "helpdesk-dev-app"),
+        ("google_service_account_iam_member.dev_migration_workload_identity[0]", "helpdesk-dev-migrate"),
+    ):
+        grant = item(address)
+        require(grant.get("role") == "roles/iam.workloadIdentityUser"
+                and grant.get("member") == f"serviceAccount:{PROJECT}.svc.id.goog[helpdesk-dev/{name}]",
+                f"Unexpected workload identity binding: {address}")
+        account = "dev_app" if name == "helpdesk-dev-app" else "dev_migration"
+        expected_or_unknown(grant, address, ("service_account_id",),
+                            f"projects/{PROJECT}/serviceAccounts/"
+                            f"{'helpdesk-app-dev' if account == 'dev_app' else 'helpdesk-migrate-dev'}@{PROJECT}.iam.gserviceaccount.com",
+                            changes, creates, f"Workload Identity target: {address}")
+
+    for address, secret_name in (
+        ("google_secret_manager_secret.dev_app_connection[0]", "helpdesk-dev-db-connection"),
+        ("google_secret_manager_secret.dev_admin_password[0]", "helpdesk-dev-db-admin-password"),
+    ):
+        secret = item(address)
+        require(secret.get("project") == PROJECT and secret.get("secret_id") == secret_name
+                and secret.get("deletion_protection") is True,
+                f"Unexpected secret metadata: {address}")
+        require(bool(only_item(secret.get("replication"), "Missing secret replication").get("auto")),
+                "Secret must use Google-managed automatic replication")
+
+    for address, name in (
+        ("google_secret_manager_secret_iam_member.dev_app_secret_access[0]", "helpdesk-dev-app"),
+        ("google_secret_manager_secret_iam_member.dev_admin_secret_access[0]", "helpdesk-dev-migrate"),
+    ):
+        grant = item(address)
+        expected = (f"principal://iam.googleapis.com/projects/260283083469/locations/global/"
+                    f"workloadIdentityPools/{PROJECT}.svc.id.goog/subject/ns/helpdesk-dev/sa/{name}")
+        require(grant.get("role") == "roles/secretmanager.secretAccessor" and grant.get("member") == expected,
+                f"Unexpected Secret Manager principal: {address}")
+        secret_id = ("helpdesk-dev-db-connection" if name == "helpdesk-dev-app"
+                     else "helpdesk-dev-db-admin-password")
+        expected_or_unknown(grant, address, ("secret_id",),
+                            f"projects/{PROJECT}/secrets/{secret_id}", changes, creates,
+                            f"Secret Manager target: {address}")
 
 
 def permitted_drift(entry):
@@ -212,7 +445,7 @@ def check_plan(plan):
     planned = planned_resources(plan.get("planned_values", {}).get("root_module", {}))
     managed = [r for r in planned if r.get("mode") == "managed"]
     require(len(managed) == len(EXPECTED) and {r.get("address") for r in managed} == set(EXPECTED),
-            "Planned Dev infrastructure must contain exactly seven expected addresses")
+            "Planned Dev infrastructure must contain exactly the approved addresses")
     require(all(r.get("type") == EXPECTED[r["address"]] for r in managed),
             "Unexpected planned resource type")
     changes = [c for c in plan.get("resource_changes", []) if c.get("mode") == "managed"]
@@ -220,16 +453,18 @@ def check_plan(plan):
     require(all(c.get("address") in EXPECTED and c.get("type") == EXPECTED[c["address"]] for c in changes),
             "Unexpected resource address or type")
     actions = {c["address"]: c.get("change", {}).get("actions") for c in changes}
-    require(all(actions.get(address, ["no-op"]) == ["no-op"] for address in NETWORK),
-            "Existing network change, replacement, or deletion requires review")
-    creates = {address for address in PHASE6 if actions.get(address) == ["create"]}
-    require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"]) for address in PHASE6),
-            "Phase 6 update, replacement, or deletion requires review")
-    require(not creates or creates == set(PHASE6), "Partial Phase 6 deployment requires manual review")
+    require(all(actions.get(address, ["no-op"]) == ["no-op"] for address in BASE),
+            "Existing Phase 5-6 resource change, replacement, or deletion requires review")
+    creates = {address for address in PHASE7 if actions.get(address) == ["create"]}
+    require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"]) for address in PHASE7),
+            "Phase 7 update, replacement, or deletion requires review")
+    require(not creates or creates == set(PHASE7), "Partial Phase 7 deployment requires manual review")
     # Check the complete planned values, including no-op resources omitted from resource_changes.
-    values = {r["type"]: r.get("values", {}) for r in managed}
-    check_network(values)
-    check_phase6(values)
+    by_address = {r["address"]: r.get("values", {}) for r in managed}
+    by_type = {r["type"]: r.get("values", {}) for r in managed if r["address"] in BASE}
+    check_network(by_type)
+    check_phase6(by_type)
+    check_phase7(by_address, plan, creates)
     check_references(plan)
     return "apply" if creates else "no_changes"
 
@@ -330,9 +565,10 @@ def diagnose_drift(plan):
 
 
 def verify_deployment(paths):
+    require(len(paths) == 22, "Expected read-only Phase 7 evidence, Terraform state, and addresses")
     network, subnet, address, connections, registry, registry_iam, project_iam, sql, databases, outputs = [read_json(p) for p in paths[:10]]
-    state_addresses = set(Path(paths[10]).read_text(encoding="utf-8").splitlines())
-    require(state_addresses == set(EXPECTED), "Dev state does not contain exactly the seven expected resources")
+    state_addresses = set(Path(paths[-1]).read_text(encoding="utf-8").splitlines())
+    require(state_addresses == set(EXPECTED), "Dev state does not contain exactly the approved resources")
     require(network.get("name") == VPC and network.get("autoCreateSubnetworks") is False, "VPC verification failed")
     require(network.get("selfLink") == VPC_LINK, "VPC self-link verification failed")
     require(network.get("routingConfig", {}).get("routingMode") == "REGIONAL", "VPC routing verification failed")
@@ -424,6 +660,116 @@ def verify_deployment(paths):
     }.items():
         require(expected and outputs.get(key, {}).get("value") == expected, f"Terraform output {key} mismatch")
 
+    verify_phase7(*[read_json(path) for path in paths[10:20]], registry_iam, project_iam, outputs)
+    state = read_json(paths[20])
+    resources = state.get("values", {}).get("root_module", {}).get("resources", [])
+    protected = {
+        "google_container_cluster.dev[0]": "GKE",
+        "google_secret_manager_secret.dev_app_connection[0]": "application secret",
+        "google_secret_manager_secret.dev_admin_password[0]": "migration secret",
+    }
+    for resource_address, label in protected.items():
+        matching = [r for r in resources if r.get("address") == resource_address]
+        require(len(matching) == 1 and matching[0].get("values", {}).get("deletion_protection") is True,
+                f"Terraform {label} deletion protection is missing")
+
+
+def has_binding(policy, role, member):
+    return any(binding.get("role") == role and member in binding.get("members", [])
+               for binding in policy.get("bindings", []))
+
+
+def verify_phase7(cluster, node_sa, app_sa, migration_sa, app_secret, admin_secret,
+                  app_sa_iam, migration_sa_iam, app_secret_iam, admin_secret_iam,
+                  registry_iam, project_iam, outputs):
+    """Use documented GKE and Secret Manager API fields; do not read secret versions."""
+    require(cluster.get("name") == "helpdeskcloud-dev-gke" and cluster.get("location") == "us-east1"
+            and cluster.get("status") == "RUNNING", "GKE identity or status verification failed")
+    require(cluster.get("autopilot", {}).get("enabled") is True, "GKE Autopilot is not enabled")
+    require(cluster.get("network") in (VPC, VPC_PATH, VPC_LINK), "GKE is attached to a different VPC")
+    subnet_path = f"projects/{PROJECT}/regions/us-east1/subnetworks/{SUBNET}"
+    subnet_link = f"https://www.googleapis.com/compute/v1/{subnet_path}"
+    require(cluster.get("subnetwork") in (SUBNET, subnet_path, subnet_link), "GKE is attached to a different subnet")
+    # The API's networkConfig reports project-qualified paths even if the top-level name is short.
+    require(cluster.get("networkConfig", {}).get("network") == VPC_PATH
+            and cluster.get("networkConfig", {}).get("subnetwork") == subnet_path,
+            "GKE networkConfig does not identify the intended project and subnet")
+    ranges = cluster.get("ipAllocationPolicy", {})
+    require(ranges.get("useIpAliases") is True
+            and ranges.get("clusterSecondaryRangeName") == "helpdeskcloud-dev-pods"
+            and ranges.get("servicesSecondaryRangeName") == "helpdeskcloud-dev-services",
+            "GKE alias IP mode or secondary ranges do not match the existing subnet")
+    require(cluster.get("privateClusterConfig", {}).get("enablePrivateNodes") is True
+            or cluster.get("networkConfig", {}).get("defaultEnablePrivateNodes") is True,
+            "GKE nodes are not confirmed private")
+    endpoints = cluster.get("controlPlaneEndpointsConfig", {})
+    require(endpoints.get("ipEndpointsConfig", {}).get("enabled") is False
+            and endpoints.get("dnsEndpointConfig", {}).get("allowExternalTraffic") is True,
+            "GKE control plane endpoints are not the reviewed DNS-only design")
+    require(cluster.get("workloadIdentityConfig", {}).get("workloadPool") == f"{PROJECT}.svc.id.goog",
+            "GKE Workload Identity pool mismatch")
+    require(cluster.get("secretManagerConfig", {}).get("enabled") is True,
+            "Managed Secret Manager add-on is missing")
+    require(cluster.get("releaseChannel", {}).get("channel") == "REGULAR", "GKE release channel mismatch")
+    node_email = f"helpdesk-gke-node-dev@{PROJECT}.iam.gserviceaccount.com"
+    app_email = f"helpdesk-app-dev@{PROJECT}.iam.gserviceaccount.com"
+    migration_email = f"helpdesk-migrate-dev@{PROJECT}.iam.gserviceaccount.com"
+    node_config = cluster.get("autoscaling", {}).get("autoprovisioningNodePoolDefaults", {})
+    require(node_config.get("serviceAccount") == node_email, "GKE node identity mismatch")
+
+    for account, email in ((node_sa, node_email), (app_sa, app_email), (migration_sa, migration_email)):
+        require(account.get("email") == email and account.get("disabled") is not True,
+                "GKE service account identity or status mismatch")
+
+    require(has_binding(project_iam, "roles/container.defaultNodeServiceAccount", f"serviceAccount:{node_email}"),
+            "GKE node runtime role is missing")
+    require(has_binding(registry_iam, "roles/artifactregistry.reader", f"serviceAccount:{node_email}"),
+            "GKE node repository Reader grant is missing")
+    for email in (app_email, migration_email):
+        require(has_binding(project_iam, "roles/cloudsql.client", f"serviceAccount:{email}"),
+                "Cloud SQL Client grant is missing")
+    for policy, members in ((project_iam, {f"serviceAccount:{node_email}",
+                                           f"serviceAccount:{app_email}", f"serviceAccount:{migration_email}"}),
+                            (registry_iam, {f"serviceAccount:{node_email}"})):
+        forbidden = {"roles/owner", "roles/editor", "roles/compute.admin", "roles/container.admin",
+                     "roles/cloudsql.admin", "roles/artifactregistry.admin", "roles/secretmanager.admin"}
+        require(not any(binding.get("role") in forbidden and members.intersection(binding.get("members", []))
+                        for binding in policy.get("bindings", [])),
+                "A Phase 7 runtime identity has an unapproved administrative role")
+
+    for policy, email, ksa in ((app_sa_iam, app_email, "helpdesk-dev-app"),
+                               (migration_sa_iam, migration_email, "helpdesk-dev-migrate")):
+        check_iam(policy, email)
+        member = f"serviceAccount:{PROJECT}.svc.id.goog[helpdesk-dev/{ksa}]"
+        bindings = [set(b.get("members", [])) for b in policy.get("bindings", [])
+                    if b.get("role") == "roles/iam.workloadIdentityUser"]
+        require(bindings == [{member}], "Workload Identity binding differs from the intended KSA")
+        require(len(policy.get("bindings", [])) == 1, "Unexpected service account IAM binding")
+
+    for secret, policy, name, ksa in (
+        (app_secret, app_secret_iam, "helpdesk-dev-db-connection", "helpdesk-dev-app"),
+        (admin_secret, admin_secret_iam, "helpdesk-dev-db-admin-password", "helpdesk-dev-migrate"),
+    ):
+        require(secret.get("name") == f"projects/{PROJECT}/secrets/{name}"
+                and isinstance(secret.get("replication", {}).get("automatic"), dict),
+                "Secret Manager metadata or replication mismatch")
+        check_iam(policy, name)
+        member = (f"principal://iam.googleapis.com/projects/260283083469/locations/global/"
+                  f"workloadIdentityPools/{PROJECT}.svc.id.goog/subject/ns/helpdesk-dev/sa/{ksa}")
+        bindings = [set(b.get("members", [])) for b in policy.get("bindings", [])
+                    if b.get("role") == "roles/secretmanager.secretAccessor"]
+        require(bindings == [{member}], "Secret access is not limited to the intended KSA")
+        require(len(policy.get("bindings", [])) == 1, "Unexpected direct secret IAM binding")
+
+    for key, expected in {
+        "gke_cluster_name": "helpdeskcloud-dev-gke", "gke_cluster_location": "us-east1",
+        "gke_mode": "AUTOPILOT", "gke_workload_pool": f"{PROJECT}.svc.id.goog",
+        "gke_node_service_account": node_email, "app_service_account": app_email,
+        "migration_service_account": migration_email,
+        "app_connection_secret": app_secret["name"], "migration_admin_secret": admin_secret["name"],
+    }.items():
+        require(outputs.get(key, {}).get("value") == expected, f"Terraform output {key} mismatch")
+
 
 def check_iam(policy, label):
     require(isinstance(policy, dict) and isinstance(policy.get("bindings", []), list), f"Invalid {label} IAM evidence")
@@ -440,13 +786,15 @@ def main():
         elif len(sys.argv) == 3 and sys.argv[1] == "check-project-iam":
             check_iam(read_json(sys.argv[2]), "project")
             print("No direct public project IAM binding found")
-        elif len(sys.argv) == 13 and sys.argv[1] == "verify-deployment":
+        elif len(sys.argv) == 24 and sys.argv[1] == "verify-deployment":
             verify_deployment(sys.argv[2:])
-            print("Seven Dev resources, remote state addresses, IAM exposure, and outputs verified")
+            print("Approved Dev resources, IAM, outputs, and deletion protection verified")
         else:
             raise ValueError("Usage: dev_infra_guard.py check-plan PLAN_JSON | diagnose-drift PLAN_JSON | "
                              "check-project-iam PROJECT_IAM_JSON | "
-                             "verify-deployment VPC SUBNET ADDRESS CONNECTIONS REGISTRY REGISTRY_IAM PROJECT_IAM SQL DATABASES OUTPUTS STATE_LIST")
+                             "verify-deployment VPC SUBNET ADDRESS CONNECTIONS REGISTRY REGISTRY_IAM PROJECT_IAM SQL DATABASES OUTPUTS "
+                             "CLUSTER NODE_SA APP_SA MIGRATION_SA APP_SECRET ADMIN_SECRET APP_SA_IAM MIGRATION_SA_IAM "
+                             "APP_SECRET_IAM ADMIN_SECRET_IAM STATE_JSON STATE_LIST")
     except (ValueError, KeyError, IndexError, TypeError, OSError, json.JSONDecodeError) as error:
         print(f"Dev infrastructure guard stopped: {error}", file=sys.stderr)
         sys.exit(1)

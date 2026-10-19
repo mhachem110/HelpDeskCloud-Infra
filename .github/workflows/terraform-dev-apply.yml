@@ -64,13 +64,13 @@ jobs:
         run: |
           set -euo pipefail
           enabled=$(gcloud services list --enabled --project=helpdeskcloud-capstone-511905 --format='value(config.name)')
-          for service in compute.googleapis.com servicenetworking.googleapis.com artifactregistry.googleapis.com sqladmin.googleapis.com; do
+          for service in compute.googleapis.com servicenetworking.googleapis.com artifactregistry.googleapis.com sqladmin.googleapis.com container.googleapis.com iam.googleapis.com secretmanager.googleapis.com; do
             if ! grep -Fxq "$service" <<< "$enabled"; then
               echo "::error::Required API $service is not enabled. No API was changed."
               exit 1
             fi
           done
-          echo 'All four required APIs are enabled.'
+          echo 'All seven required APIs are enabled.'
 
       - name: Check project IAM for direct public access
         run: |
@@ -206,10 +206,26 @@ jobs:
           gcloud projects get-iam-policy helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/project-iam.json"
           gcloud sql instances describe helpdeskcloud-dev-postgres --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/sql.json"
           gcloud sql databases list --instance=helpdeskcloud-dev-postgres --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/databases.json"
+          gcloud container clusters describe helpdeskcloud-dev-gke --region=us-east1 --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/cluster.json"
+          gcloud iam service-accounts describe helpdesk-gke-node-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/node-sa.json"
+          gcloud iam service-accounts describe helpdesk-app-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-sa.json"
+          gcloud iam service-accounts describe helpdesk-migrate-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/migration-sa.json"
+          gcloud secrets describe helpdesk-dev-db-connection --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-secret.json"
+          gcloud secrets describe helpdesk-dev-db-admin-password --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/admin-secret.json"
+          gcloud iam service-accounts get-iam-policy helpdesk-app-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-sa-iam.json"
+          gcloud iam service-accounts get-iam-policy helpdesk-migrate-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/migration-sa-iam.json"
+          gcloud secrets get-iam-policy helpdesk-dev-db-connection --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-secret-iam.json"
+          gcloud secrets get-iam-policy helpdesk-dev-db-admin-password --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/admin-secret-iam.json"
           terraform state list > "$RUNNER_TEMP/state-addresses.txt"
           terraform output -json > "$RUNNER_TEMP/outputs.json"
+          terraform show -json > "$RUNNER_TEMP/state.json"
           python ../scripts/dev_infra_guard.py verify-deployment \
             "$RUNNER_TEMP/vpc.json" "$RUNNER_TEMP/subnet.json" "$RUNNER_TEMP/psa.json" \
             "$RUNNER_TEMP/connections.json" "$RUNNER_TEMP/registry.json" "$RUNNER_TEMP/registry-iam.json" \
             "$RUNNER_TEMP/project-iam.json" "$RUNNER_TEMP/sql.json" "$RUNNER_TEMP/databases.json" \
-            "$RUNNER_TEMP/outputs.json" "$RUNNER_TEMP/state-addresses.txt"
+            "$RUNNER_TEMP/outputs.json" "$RUNNER_TEMP/cluster.json" \
+            "$RUNNER_TEMP/node-sa.json" "$RUNNER_TEMP/app-sa.json" "$RUNNER_TEMP/migration-sa.json" \
+            "$RUNNER_TEMP/app-secret.json" "$RUNNER_TEMP/admin-secret.json" \
+            "$RUNNER_TEMP/app-sa-iam.json" "$RUNNER_TEMP/migration-sa-iam.json" \
+            "$RUNNER_TEMP/app-secret-iam.json" "$RUNNER_TEMP/admin-secret-iam.json" \
+            "$RUNNER_TEMP/state.json" "$RUNNER_TEMP/state-addresses.txt"
