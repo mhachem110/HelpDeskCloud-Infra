@@ -31,6 +31,8 @@ resource "google_container_cluster" "dev" {
   }
 
   workload_identity_config {
+    # Bindings for this pool explicitly wait on cluster creation in gke-iam.tf
+    # and secret-manager.tf; this pool does not exist before GKE provisions it.
     workload_pool = "${var.project_id}.svc.id.goog"
   }
 

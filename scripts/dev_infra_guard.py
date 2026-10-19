@@ -44,6 +44,18 @@ PHASE7 = {
     "google_secret_manager_secret_iam_member.dev_app_secret_access[0]": "google_secret_manager_secret_iam_member",
     "google_secret_manager_secret_iam_member.dev_admin_secret_access[0]": "google_secret_manager_secret_iam_member",
 }
+# Apply #12 logs confirm that these six Phase 7 resources completed before the
+# remaining operations failed. Recovery is allowed only if the fresh plan's
+# prior state and refresh show precisely this inventory.
+APPLY12_COMPLETED = frozenset({
+    "google_service_account.dev_gke_nodes[0]",
+    "google_service_account.dev_app[0]",
+    "google_service_account.dev_migration[0]",
+    "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]",
+    "google_secret_manager_secret.dev_app_connection[0]",
+    "google_secret_manager_secret.dev_admin_password[0]",
+})
+APPLY12_REMAINING = frozenset(PHASE7) - APPLY12_COMPLETED
 BASE = NETWORK | PHASE6
 EXPECTED = BASE | PHASE7
 VPC_LINK = f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/{VPC}"
@@ -82,6 +94,14 @@ def planned_resources(module):
     resources = list(module.get("resources", []))
     for child in module.get("child_modules", []):
         resources.extend(planned_resources(child))
+    return resources
+
+
+def state_resources(module):
+    """Return all resources from Terraform's complete prior-state representation."""
+    resources = list(module.get("resources", []))
+    for child in module.get("child_modules", []):
+        resources.extend(state_resources(child))
     return resources
 
 
@@ -260,6 +280,17 @@ def check_references(plan):
                 f"Unexpected IAM role expression: {address}")
         references(expressions.get(identity_field, {}), identity_reference,
                    f"{address}.{identity_field}", exact=True)
+
+    # These policies contain static pool names, so Terraform cannot infer that
+    # GKE must finish creating the pool before it writes the bindings.
+    for address in (
+        "google_service_account_iam_member.dev_app_workload_identity",
+        "google_service_account_iam_member.dev_migration_workload_identity",
+        "google_secret_manager_secret_iam_member.dev_app_secret_access",
+        "google_secret_manager_secret_iam_member.dev_admin_secret_access",
+    ):
+        require("google_container_cluster.dev" in resources.get(address, {}).get("depends_on", []),
+                f"{address} must wait for the GKE Workload Identity pool")
 
 
 def after_unknown_at(change, path):
@@ -540,7 +571,27 @@ def check_plan(plan):
     creates = {address for address in PHASE7 if actions.get(address) == ["create"]}
     require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"]) for address in PHASE7),
             "Phase 7 update, replacement, or deletion requires review")
-    require(not creates or creates == set(PHASE7), "Partial Phase 7 deployment requires manual review")
+    prior_state = plan.get("prior_state")
+    require(isinstance(prior_state, dict), "Terraform prior state is required to classify the Dev plan")
+    prior = prior_state.get("values", {}).get("root_module")
+    require(isinstance(prior, dict), "Terraform prior state is required to classify the Dev plan")
+    prior_managed = [r for r in state_resources(prior) if r.get("mode") == "managed"]
+    prior_addresses = [r.get("address") for r in prior_managed]
+    require(len(set(prior_addresses)) == len(prior_addresses), "Duplicate Terraform prior-state resource")
+    require(all(address in EXPECTED for address in prior_addresses),
+            "Terraform prior state contains an unexpected managed resource")
+    prior_types = {r["address"]: r.get("type") for r in prior_managed}
+    require(all(prior_types.get(address) == kind for address, kind in EXPECTED.items()
+                if address in prior_types), "Terraform prior state has an unexpected resource type")
+    prior_addresses = set(prior_addresses)
+    require(set(BASE) <= prior_addresses,
+            "Terraform prior state is missing an existing Phase 5-6 resource")
+    prior_phase7 = prior_addresses & set(PHASE7)
+    full_initial_create = creates == set(PHASE7) and not prior_phase7
+    exact_apply12_recovery = creates == APPLY12_REMAINING and prior_phase7 == APPLY12_COMPLETED
+    complete_no_changes = not creates and prior_phase7 == set(PHASE7)
+    require(full_initial_create or exact_apply12_recovery or complete_no_changes,
+            "Partial or inconsistent Phase 7 state/creation batch requires review")
     # Check the complete planned values, including no-op resources omitted from resource_changes.
     by_address = {r["address"]: r.get("values", {}) for r in managed}
     by_type = {r["type"]: r.get("values", {}) for r in managed if r["address"] in BASE}

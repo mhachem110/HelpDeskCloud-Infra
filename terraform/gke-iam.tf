@@ -42,6 +42,9 @@ resource "google_service_account_iam_member" "dev_app_workload_identity" {
   service_account_id = google_service_account.dev_app[0].name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[helpdesk-dev/helpdesk-dev-app]"
+
+  # The pool is created by GKE, while the member string is otherwise static.
+  depends_on = [google_container_cluster.dev]
 }
 
 # One-time schema migration has a separate identity from the running application.
@@ -64,4 +67,6 @@ resource "google_service_account_iam_member" "dev_migration_workload_identity" {
   service_account_id = google_service_account.dev_migration[0].name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[helpdesk-dev/helpdesk-dev-migrate]"
+
+  depends_on = [google_container_cluster.dev]
 }
