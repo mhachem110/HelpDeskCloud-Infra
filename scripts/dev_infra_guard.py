@@ -53,6 +53,9 @@ PHASE8 = {
     "google_service_account_iam_member.dev_app_support_images_wif[0]": "google_service_account_iam_member",
     "google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]": "google_artifact_registry_repository_iam_member",
 }
+PHASE8_PROVIDER_ADDRESS = "google_iam_workload_identity_pool_provider.dev_app_support_images[0]"
+PHASE8_COMPLETED = frozenset(PHASE8) - {PHASE8_PROVIDER_ADDRESS}
+ARTIFACT_READER_IAM_ADDRESS = "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]"
 SUPPORT_PUBLISHER_ACCOUNT_ID = "helpdesk-app-support-pub-dev"
 SUPPORT_PUBLISHER_DISPLAY_NAME = "helpdesk-app-support-image-publisher-dev"
 SUPPORT_PUBLISHER_EMAIL = f"{SUPPORT_PUBLISHER_ACCOUNT_ID}@{PROJECT}.iam.gserviceaccount.com"
@@ -261,53 +264,60 @@ def normalize_cel(expression):
     return " ".join(expression.split()) if isinstance(expression, str) else None
 
 
-def check_phase8(values, plan, creates):
+def check_phase8(values, plan, creates, addresses=None):
+    addresses = set(PHASE8) if addresses is None else set(addresses)
+    require(addresses <= set(PHASE8), "Unexpected Phase 8 resource validation scope")
     changes = {c.get("address"): c for c in plan.get("resource_changes", [])}
     account_address = "google_service_account.dev_app_support_image_publisher[0]"
-    account = values[account_address]
-    require(account.get("project") == PROJECT
-            and account.get("account_id") == SUPPORT_PUBLISHER_ACCOUNT_ID
-            and account.get("display_name") == SUPPORT_PUBLISHER_DISPLAY_NAME,
-            "Unexpected supporting-image publisher service account")
-    for field, expected in (
-        ("email", SUPPORT_PUBLISHER_EMAIL),
-        ("member", f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}"),
-        ("name", f"projects/{PROJECT}/serviceAccounts/{SUPPORT_PUBLISHER_EMAIL}"),
-    ):
-        expected_or_unknown(account, account_address, (field,), expected, changes, creates,
-                            f"supporting-image service-account {field}")
+    if account_address in addresses:
+        account = values[account_address]
+        require(account.get("project") == PROJECT
+                and account.get("account_id") == SUPPORT_PUBLISHER_ACCOUNT_ID
+                and account.get("display_name") == SUPPORT_PUBLISHER_DISPLAY_NAME,
+                "Unexpected supporting-image publisher service account")
+        for field, expected in (
+            ("email", SUPPORT_PUBLISHER_EMAIL),
+            ("member", f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}"),
+            ("name", f"projects/{PROJECT}/serviceAccounts/{SUPPORT_PUBLISHER_EMAIL}"),
+        ):
+            expected_or_unknown(account, account_address, (field,), expected, changes, creates,
+                                f"supporting-image service-account {field}")
 
-    provider = values["google_iam_workload_identity_pool_provider.dev_app_support_images[0]"]
-    require(provider.get("project") == PROJECT
-            and provider.get("workload_identity_pool_id") == "helpdesk-github"
-            and provider.get("workload_identity_pool_provider_id") == SUPPORT_PUBLISHER_PROVIDER_ID
-            and provider.get("disabled") is False,
-            "Unexpected supporting-image Workload Identity provider")
-    require(provider.get("attribute_mapping") == SUPPORT_PUBLISHER_MAPPING,
-            "Unexpected supporting-image provider attribute mapping")
-    require(normalize_cel(provider.get("attribute_condition")) == SUPPORT_PUBLISHER_CONDITION,
-            "Supporting-image provider trust condition is not exact")
-    oidc = only_item(provider.get("oidc"), "Expected one supporting-image OIDC issuer")
-    require(oidc.get("issuer_uri") == "https://token.actions.githubusercontent.com",
-            "Unexpected supporting-image OIDC issuer")
+    if PHASE8_PROVIDER_ADDRESS in addresses:
+        provider = values[PHASE8_PROVIDER_ADDRESS]
+        require(provider.get("project") == PROJECT
+                and provider.get("workload_identity_pool_id") == "helpdesk-github"
+                and provider.get("workload_identity_pool_provider_id") == SUPPORT_PUBLISHER_PROVIDER_ID
+                and provider.get("disabled") is False,
+                "Unexpected supporting-image Workload Identity provider")
+        require(provider.get("attribute_mapping") == SUPPORT_PUBLISHER_MAPPING,
+                "Unexpected supporting-image provider attribute mapping")
+        require(normalize_cel(provider.get("attribute_condition")) == SUPPORT_PUBLISHER_CONDITION,
+                "Supporting-image provider trust condition is not exact")
+        oidc = only_item(provider.get("oidc"), "Expected one supporting-image OIDC issuer")
+        require(oidc.get("issuer_uri") == "https://token.actions.githubusercontent.com",
+                "Unexpected supporting-image OIDC issuer")
 
-    binding = values["google_service_account_iam_member.dev_app_support_images_wif[0]"]
-    require(binding.get("role") == "roles/iam.workloadIdentityUser"
-            and binding.get("member") == SUPPORT_PUBLISHER_MEMBER,
-            "Supporting-image impersonation binding must use the exact verified subject")
-    expected_or_unknown(binding, "google_service_account_iam_member.dev_app_support_images_wif[0]",
-                        ("service_account_id",),
-                        f"projects/{PROJECT}/serviceAccounts/{SUPPORT_PUBLISHER_EMAIL}",
-                        changes, creates, "supporting-image Workload Identity target")
+    binding_address = "google_service_account_iam_member.dev_app_support_images_wif[0]"
+    if binding_address in addresses:
+        binding = values[binding_address]
+        require(binding.get("role") == "roles/iam.workloadIdentityUser"
+                and binding.get("member") == SUPPORT_PUBLISHER_MEMBER,
+                "Supporting-image impersonation binding must use the exact verified subject")
+        expected_or_unknown(binding, binding_address, ("service_account_id",),
+                            f"projects/{PROJECT}/serviceAccounts/{SUPPORT_PUBLISHER_EMAIL}",
+                            changes, creates, "supporting-image Workload Identity target")
 
-    writer = values["google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]"]
-    require(writer.get("project") == PROJECT and writer.get("location") == "us-east1"
-            and writer.get("repository") == REGISTRY_REPOSITORY_ID
-            and writer.get("role") == "roles/artifactregistry.writer",
-            "Supporting-image Writer must target only the existing Dev repository")
-    expected_or_unknown(writer, "google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]",
-                        ("member",), f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}",
-                        changes, creates, "supporting-image repository writer")
+    writer_address = "google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]"
+    if writer_address in addresses:
+        writer = values[writer_address]
+        require(writer.get("project") == PROJECT and writer.get("location") == "us-east1"
+                and writer.get("repository") == REGISTRY_REPOSITORY_ID
+                and writer.get("role") == "roles/artifactregistry.writer",
+                "Supporting-image Writer must target only the existing Dev repository")
+        expected_or_unknown(writer, writer_address, ("member",),
+                            f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}",
+                            changes, creates, "supporting-image repository writer")
 
 
 def check_references(plan):
@@ -635,6 +645,7 @@ def permitted_drift(entry):
         REGISTRY_ADDRESS: PHASE6[REGISTRY_ADDRESS],
         SQL_ADDRESS: PHASE6[SQL_ADDRESS],
         CLUSTER_ADDRESS: PHASE7[CLUSTER_ADDRESS],
+        ARTIFACT_READER_IAM_ADDRESS: "google_artifact_registry_repository_iam_member",
         **{address: "google_project_iam_member" for address in PROJECT_IAM_READBACKS},
         **{secret: PHASE7[secret] for secret in SECRET_READBACK_NAMES},
     }.get(address)
@@ -729,6 +740,27 @@ def permitted_drift(entry):
             return False
         # Project policy etags are concurrency metadata. Require every grant
         # field and all other provider values to remain identical.
+        return ({key: value for key, value in before.items() if key != "etag"}
+                == {key: value for key, value in after.items() if key != "etag"})
+
+    if address == ARTIFACT_READER_IAM_ADDRESS:
+        expected_member = f"serviceAccount:helpdesk-gke-node-dev@{PROJECT}.iam.gserviceaccount.com"
+        expected_repositories = (REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH)
+        if any(snapshot.get("project") not in (PROJECT, PROJECT_NUMBER)
+               or snapshot.get("location") != "us-east1"
+               or snapshot.get("repository") not in expected_repositories
+               or snapshot.get("role") != "roles/artifactregistry.reader"
+               or snapshot.get("member") != expected_member
+               for snapshot in (before, after)):
+            return False
+        before_etag, after_etag = before.get("etag"), after.get("etag")
+        if (not isinstance(before_etag, str) or not before_etag
+                or not isinstance(after_etag, str) or not after_etag
+                or before_etag == after_etag):
+            return False
+        # Adding a repository-scoped member changes the repository policy etag.
+        # Permit only that metadata change when the existing reader grant and all
+        # other provider values remain identical.
         return ({key: value for key, value in before.items() if key != "etag"}
                 == {key: value for key, value in after.items() if key != "etag"})
 
@@ -868,17 +900,30 @@ def check_plan(plan):
     full_initial_create = creates == set(PHASE7) and not prior_phase7
     exact_apply12_recovery = creates == APPLY12_REMAINING and prior_phase7 == APPLY12_COMPLETED
     complete_no_changes = not creates and prior_phase7 == set(PHASE7)
-    require(not prior_phase8 or prior_phase8 == set(PHASE8),
+    exact_phase8_provider_recovery = (
+        not creates
+        and prior_phase7 == set(PHASE7)
+        and prior_phase8 == PHASE8_COMPLETED
+        and support_creates == {PHASE8_PROVIDER_ADDRESS}
+    )
+    require(not prior_phase8 or prior_phase8 == set(PHASE8) or exact_phase8_provider_recovery,
             "Partial Phase 8 state requires review")
     support_images_initial_create = (
         not creates and prior_phase7 == set(PHASE7)
         and not prior_phase8 and support_creates == set(PHASE8)
     )
     support_images_complete = not support_creates and prior_phase8 == set(PHASE8)
-    require(full_initial_create or exact_apply12_recovery or complete_no_changes,
+    require(full_initial_create or exact_apply12_recovery or complete_no_changes
+            or exact_phase8_provider_recovery,
             "Partial or inconsistent Phase 7 state/creation batch requires review")
-    require(support_images_initial_create or support_images_complete,
+    require(support_images_initial_create or support_images_complete or exact_phase8_provider_recovery,
             "Phase 8 must be created as one exact batch after Phase 7, or already be complete")
+    if exact_phase8_provider_recovery:
+        prior_phase8_values = {
+            resource["address"]: resource.get("values", {})
+            for resource in prior_managed if resource.get("address") in PHASE8_COMPLETED
+        }
+        check_phase8(prior_phase8_values, plan, set(), addresses=PHASE8_COMPLETED)
     # Check the complete planned values, including no-op resources omitted from resource_changes.
     by_address = {r["address"]: r.get("values", {}) for r in managed}
     by_type = {r["type"]: r.get("values", {}) for r in managed if r["address"] in BASE}
@@ -1092,6 +1137,22 @@ def diagnose_drift(plan):
                 identity_matches = (snapshot.get("role") == expected_role
                                     and snapshot.get("member") == expected_member)
                 lines.append("  " + snapshot_name + " IAM role and member: "
+                             + ("expected" if identity_matches else "unexpected (values withheld)"))
+            lines.append("  etag representation: before="
+                         + etag_readback_status(before.get("etag", MISSING))
+                         + "; after=" + etag_readback_status(after.get("etag", MISSING)))
+        if entry.get("address") == ARTIFACT_READER_IAM_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
+            expected_member = f"serviceAccount:helpdesk-gke-node-dev@{PROJECT}.iam.gserviceaccount.com"
+            expected_repositories = (REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH)
+            for snapshot_name, snapshot in (("before", before), ("after", after)):
+                identity_matches = (
+                    snapshot.get("project") in (PROJECT, PROJECT_NUMBER)
+                    and snapshot.get("location") == "us-east1"
+                    and snapshot.get("repository") in expected_repositories
+                    and snapshot.get("role") == "roles/artifactregistry.reader"
+                    and snapshot.get("member") == expected_member
+                )
+                lines.append("  " + snapshot_name + " repository reader identity: "
                              + ("expected" if identity_matches else "unexpected (values withheld)"))
             lines.append("  etag representation: before="
                          + etag_readback_status(before.get("etag", MISSING))

@@ -12,6 +12,8 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              SUPPORT_PUBLISHER_CONDITION, SUPPORT_PUBLISHER_DISPLAY_NAME,
                              SUPPORT_PUBLISHER_EMAIL, SUPPORT_PUBLISHER_MAPPING,
                              SUPPORT_PUBLISHER_MEMBER, SUPPORT_PUBLISHER_PROVIDER_ID,
+                             ARTIFACT_READER_IAM_ADDRESS, PHASE8_COMPLETED,
+                             PHASE8_PROVIDER_ADDRESS,
                              VPC_LINK, VPC_PATH, VPC_PATHS,
                              check_plan, diagnose_drift, permitted_drift, verify_deployment)
 
@@ -312,6 +314,26 @@ def support_images_create_plan():
     return plan
 
 
+def support_images_provider_recovery_plan():
+    """Model Apply #21's exact three-resource Phase 8 partial state."""
+    plan = fixture()
+    set_prior_phase7(plan, PHASE7)
+    plan["prior_state"]["values"]["root_module"]["resources"] = [
+        item for item in plan["prior_state"]["values"]["root_module"]["resources"]
+        if item["address"] != PHASE8_PROVIDER_ADDRESS
+    ]
+    for change in plan["resource_changes"]:
+        address = change["address"]
+        if address in PHASE7:
+            change["change"]["actions"] = ["no-op"]
+        elif address == PHASE8_PROVIDER_ADDRESS:
+            change["change"]["actions"] = ["create"]
+        elif address in PHASE8:
+            change["change"]["actions"] = ["no-op"]
+    plan["resource_drift"] = [artifact_reader_etag_drift()]
+    return plan
+
+
 def apply12_recovery_plan():
     """Model a refreshed plan after Apply #12 created exactly its six successful resources."""
     plan = fixture()
@@ -504,6 +526,21 @@ def project_iam_etag_drift(address, before_etag="etag-before", after_etag="etag-
     after = copy.deepcopy(base)
     after["etag"] = after_etag
     return {"mode": "managed", "address": address, "type": "google_project_iam_member",
+            "change": {"actions": ["update"], "before": base, "after": after}}
+
+
+def artifact_reader_etag_drift(before_etag="etag-before", after_etag="etag-after"):
+    project = "helpdeskcloud-capstone-511905"
+    base = {
+        "project": project, "location": "us-east1", "repository": "helpdeskcloud-dev-images",
+        "role": "roles/artifactregistry.reader",
+        "member": f"serviceAccount:helpdesk-gke-node-dev@{project}.iam.gserviceaccount.com",
+        "etag": before_etag,
+    }
+    after = copy.deepcopy(base)
+    after["etag"] = after_etag
+    return {"mode": "managed", "address": ARTIFACT_READER_IAM_ADDRESS,
+            "type": "google_artifact_registry_repository_iam_member",
             "change": {"actions": ["update"], "before": base, "after": after}}
 
 
@@ -969,6 +1006,61 @@ class GuardTests(unittest.TestCase):
     def test_supporting_image_identity_requires_the_exact_phase8_create_batch(self):
         self.assertEqual(check_plan(support_images_create_plan()), "apply")
 
+    def test_apply21_phase8_recovery_allows_only_the_missing_provider_create(self):
+        plan = support_images_provider_recovery_plan()
+        self.assertEqual(check_plan(plan), "apply")
+        creates = {change["address"] for change in plan["resource_changes"]
+                   if change["change"]["actions"] == ["create"]}
+        self.assertEqual(creates, {PHASE8_PROVIDER_ADDRESS})
+
+    def test_apply21_recovery_requires_all_three_matching_existing_resources(self):
+        for missing in PHASE8_COMPLETED:
+            plan = support_images_provider_recovery_plan()
+            plan["prior_state"]["values"]["root_module"]["resources"] = [
+                item for item in plan["prior_state"]["values"]["root_module"]["resources"]
+                if item["address"] != missing
+            ]
+            with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, "Partial Phase 8"):
+                check_plan(plan)
+
+        prior_mutations = (
+            ("google_service_account.dev_app_support_image_publisher[0]",
+             lambda values: values.update(account_id="unexpected-account"), "publisher service account"),
+            ("google_service_account_iam_member.dev_app_support_images_wif[0]",
+             lambda values: values.update(member="principalSet://unexpected"), "verified subject"),
+            ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]",
+             lambda values: values.update(repository="another-repository"), "existing Dev repository"),
+            ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]",
+             lambda values: values.update(role="roles/artifactregistry.admin"), "existing Dev repository"),
+        )
+        for address, mutate, message in prior_mutations:
+            plan = support_images_provider_recovery_plan()
+            prior = next(item for item in plan["prior_state"]["values"]["root_module"]["resources"]
+                         if item["address"] == address)
+            mutate(prior["values"])
+            with self.subTest(address=address), self.assertRaisesRegex(ValueError, message):
+                check_plan(plan)
+
+    def test_apply21_recovery_rejects_other_phase8_actions_or_existing_provider(self):
+        for address, actions in (
+            ("google_service_account.dev_app_support_image_publisher[0]", ["create"]),
+            ("google_service_account_iam_member.dev_app_support_images_wif[0]", ["update"]),
+            ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]", ["delete"]),
+            (PHASE8_PROVIDER_ADDRESS, ["no-op"]),
+        ):
+            plan = support_images_provider_recovery_plan()
+            next(change for change in plan["resource_changes"] if change["address"] == address)[
+                "change"]["actions"] = actions
+            with self.subTest(address=address, actions=actions), self.assertRaises(ValueError):
+                check_plan(plan)
+
+        plan = support_images_provider_recovery_plan()
+        provider = next(item for item in plan["planned_values"]["root_module"]["resources"]
+                        if item["address"] == PHASE8_PROVIDER_ADDRESS)
+        plan["prior_state"]["values"]["root_module"]["resources"].append(copy.deepcopy(provider))
+        with self.assertRaisesRegex(ValueError, "Phase 8"):
+            check_plan(plan)
+
     def test_partial_supporting_image_identity_creation_is_rejected(self):
         plan = support_images_create_plan()
         address = sorted(PHASE8)[0]
@@ -1172,6 +1264,37 @@ class GuardTests(unittest.TestCase):
         set_prior_phase7(self.plan, PHASE7)
         self.plan["resource_drift"] = [label_drift(), metadata_drift()]
         self.assertEqual(check_plan(self.plan), "no_changes")
+
+    def test_artifact_reader_etag_readback_is_permitted_only_for_the_exact_grant(self):
+        drift = artifact_reader_etag_drift()
+        self.assertTrue(permitted_drift(drift))
+        report = "\n".join(diagnose_drift({"resource_drift": [drift]}))
+        self.assertIn("before repository reader identity: expected", report)
+        self.assertIn("after repository reader identity: expected", report)
+        self.assertIn("etag representation: before=non-empty token; after=non-empty token", report)
+        self.assertNotIn("etag-before", report)
+        self.assertNotIn("etag-after", report)
+
+        for mutate in (
+            lambda d: d["change"]["after"].update(project="other-project"),
+            lambda d: d["change"]["after"].update(location="us-west1"),
+            lambda d: d["change"]["after"].update(repository="other-repository"),
+            lambda d: d["change"]["after"].update(role="roles/artifactregistry.admin"),
+            lambda d: d["change"]["after"].update(member="user:someone@example.com"),
+            lambda d: d["change"]["after"].update(etag={"unexpected": "shape"}),
+            lambda d: d["change"]["after"].update(extra="unexpected"),
+            lambda d: d["change"].update(actions=["delete"]),
+        ):
+            changed = artifact_reader_etag_drift()
+            mutate(changed)
+            with self.subTest(drift=changed):
+                self.assertFalse(permitted_drift(changed))
+
+        for before_etag, after_etag in ((None, "etag-after"), ("etag-before", None),
+                                        ("etag-before", "etag-before"), ("", "etag-after")):
+            changed = artifact_reader_etag_drift(before_etag, after_etag)
+            with self.subTest(before=before_etag, after=after_etag):
+                self.assertFalse(permitted_drift(changed))
 
     def test_gke_and_project_iam_project_number_readbacks_are_permitted(self):
         set_prior_phase7(self.plan, PHASE7)
