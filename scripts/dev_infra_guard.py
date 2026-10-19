@@ -263,7 +263,10 @@ def expected_or_unknown(values, address, path, expected, changes, creates, label
             value = value.get(part, MISSING) if isinstance(value, dict) else MISSING
     change = changes.get(address, {}).get("change", {})
     if after_unknown_at(change, path):
-        require(address in creates and value is None,
+        # Terraform's JSON plan may omit an unknown leaf from planned_values or
+        # represent it as null. The exact marker and configuration references
+        # establish whether the field is a computed value for this resource.
+        require(address in creates and (value is None or value is MISSING),
                 f"Unexpected unknown value for {label}")
         return
     require(value == expected, f"Unexpected {label}")

@@ -203,10 +203,24 @@ def set_nested(document, path, value):
         current[last] = value
 
 
-def mark_unknown(plan, address, field_path):
-    """Model Terraform plan JSON: null after-value plus matching after_unknown leaf."""
+def remove_nested(document, path):
+    current = document
+    for part in path[:-1]:
+        current = current[part]
+    last = path[-1]
+    if isinstance(current, dict):
+        current.pop(last, None)
+    else:
+        del current[last]
+
+
+def mark_unknown(plan, address, field_path, omit_value=False):
+    """Model Terraform plan JSON's null or omitted unknown value and marker."""
     planned = resource(plan, address)["values"]
-    set_nested(planned, field_path, None)
+    if omit_value:
+        remove_nested(planned, field_path)
+    else:
+        set_nested(planned, field_path, None)
     change = next(c for c in plan["resource_changes"] if c["address"] == address)["change"]
     set_nested(change.setdefault("after_unknown", {}), field_path, True)
 
@@ -412,6 +426,27 @@ class GuardTests(unittest.TestCase):
 
     def test_exact_after_unknown_computed_identity_values_allow_initial_creation(self):
         self.assertEqual(check_plan(unknown_identity_plan()), "apply")
+
+    def test_omitted_computed_service_account_name_with_unknown_marker_is_allowed(self):
+        plan = unknown_identity_plan()
+        mark_unknown(plan, "google_service_account.dev_gke_nodes[0]", ("name",), omit_value=True)
+        self.assertEqual(check_plan(plan), "apply")
+
+    def test_omitted_computed_service_account_name_without_unknown_marker_is_rejected(self):
+        plan = unknown_identity_plan()
+        address = "google_service_account.dev_gke_nodes[0]"
+        remove_nested(resource(plan, address)["values"], ("name",))
+        change = next(c for c in plan["resource_changes"] if c["address"] == address)["change"]
+        change["after_unknown"].pop("name")
+        with self.assertRaisesRegex(ValueError, "service-account name"):
+            check_plan(plan)
+
+    def test_unknown_marker_does_not_allow_an_unexpected_known_value(self):
+        plan = unknown_identity_plan()
+        address = "google_service_account.dev_gke_nodes[0]"
+        resource(plan, address)["values"]["name"] = "projects/wrong-project/serviceAccounts/wrong"
+        with self.assertRaisesRegex(ValueError, "Unexpected unknown value for service-account name"):
+            check_plan(plan)
 
     def test_null_computed_identity_without_after_unknown_marker_is_rejected(self):
         plan = unknown_identity_plan()
