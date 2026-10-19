@@ -73,7 +73,7 @@ The guard accepts the original seven as **no-op** and the exact 14 Phase 7 addre
 
 ### Current drift investigation
 
-The [latest trusted Dev Plan on the merged diagnostic workflow](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39219461836) authenticated with the existing Dev OIDC identity, initialized the existing locked GCS backend, and generated a read-only plan. It reported **14 additions, zero requested changes and zero destroys**. The stricter Plan guard then rejected two existing resource drift observations:
+The [latest trusted Dev Plan before the first drift correction](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39219461836) authenticated with the existing Dev OIDC identity, initialized the existing locked GCS backend, and generated a read-only plan. It reported **14 additions, zero requested changes and zero destroys**. That run rejected two existing resource drift observations, which are narrowly classified by the merged guard in [PR #14](https://github.com/mhachem110/HelpDeskCloud-Infra/pull/14):
 
 | Resource | Read-only before/after evidence | Classification |
 | --- | --- | --- |
@@ -82,7 +82,9 @@ The [latest trusted Dev Plan on the merged diagnostic workflow](https://github.c
 
 The diagnostic intentionally reported only these known, non-secret classifications. Its Terraform `resource_drift` snapshots are distinct from `resource_changes`: both existing resources had no requested Terraform update, while drift records the provider's refreshed readback. The guard now allows only these exact observed patterns at these exact resource addresses. It checks the expected project, repository/instance identity, attribution maps, CA mode, and exact values, then compares the complete before/after snapshots after removing only the specific normalized fields. It also requires each requested action to remain `no-op`. Extra labels, another project or resource, a different SQL settings generation, changed database/network/security settings, any resource update, and all other drift remain blocked. No `ignore_changes`, state edit, provider change, Apply, or cloud modification was used.
 
-The remaining proof point is the next trusted Dev Plan after this correction is reviewed and merged. The last run's strict guard failed by design; no GKE resources were created. Only dispatch the protected Apply after the corrected strict Plan accepts exactly the approved 14 creations and all API/IAM/quota/cost prerequisites have been reviewed. A successful Plan still does not authorize Apply.
+The Terraform Plan guard also checks the existing Cloud SQL private-network value. Cloud SQL may return the exact existing VPC as either `projects/helpdeskcloud-capstone-511905/global/networks/helpdeskcloud-dev-vpc` or its equivalent Compute self-link. The guard accepts only those two full, exact references; its configuration-reference check still requires `module.dev_network[0].vpc_self_link`, and it independently requires the exact `helpdeskcloud-dev-psa` allocation. A wrong project, network, or PSA name remains blocked.
+
+The first post-merge strict Plan [run #9](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39222463558) authenticated and initialized the existing Dev backend, then reported **14 additions, zero requested changes and zero destroys**. The guard stopped at SQL private-network/PSA validation before any Apply. The Cloud SQL API's project-qualified VPC path was already confirmed by the owner; this correction aligns the Plan guard with the exact API/self-link representations and separates its VPC and PSA checks. No GKE resources were created. Only dispatch the protected Apply after the corrected strict Plan accepts exactly the approved 14 creations and all API/IAM/quota/cost prerequisites have been reviewed. A successful Plan still does not authorize Apply.
 
 ## Cost estimate before activation
 

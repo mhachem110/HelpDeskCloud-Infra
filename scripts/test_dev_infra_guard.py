@@ -773,6 +773,24 @@ class GuardTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 check_plan(plan)
 
+    def test_sql_plan_accepts_exact_project_path_or_compute_self_link(self):
+        for network_ref in (VPC_LINK, VPC_PATH):
+            plan = fixture()
+            next(r["values"] for r in plan["planned_values"]["root_module"]["resources"]
+                 if r["type"] == "google_sql_database_instance")["settings"][0]["ip_configuration"][0]["private_network"] = network_ref
+            with self.subTest(network_ref=network_ref):
+                self.assertEqual(check_plan(plan), "apply")
+
+        for network_ref in (
+            "projects/wrong-project/global/networks/helpdeskcloud-dev-vpc",
+            "projects/helpdeskcloud-capstone-511905/global/networks/wrong-vpc",
+        ):
+            plan = fixture()
+            next(r["values"] for r in plan["planned_values"]["root_module"]["resources"]
+                 if r["type"] == "google_sql_database_instance")["settings"][0]["ip_configuration"][0]["private_network"] = network_ref
+            with self.subTest(network_ref=network_ref), self.assertRaisesRegex(ValueError, "intended private VPC"):
+                check_plan(plan)
+
     def test_wrong_sql_tier_or_engine_is_rejected(self):
         for field, value in (("tier", "db-custom-2-7680"), ("database_version", "POSTGRES_16")):
             plan = fixture()
