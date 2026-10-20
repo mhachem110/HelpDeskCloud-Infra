@@ -20,13 +20,24 @@ def get_states(run=subprocess.run):
     states = {}
     for service in SERVICES:
         result = run(
-            ["gcloud", "services", "describe", service, f"--project={PROJECT}", "--format=value(state)"],
+            [
+                "gcloud", "services", "list", "--enabled", f"--project={PROJECT}",
+                f"--filter=config.name={service}", "--format=value(config.name)",
+            ],
             capture_output=True,
             text=True,
             check=False,
         )
-        state = result.stdout.strip().upper() if result.returncode == 0 else "UNKNOWN"
-        states[service] = state if state in {"ENABLED", "DISABLED"} else "UNKNOWN"
+        if result.returncode != 0:
+            states[service] = "UNKNOWN"
+            continue
+        enabled_services = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if not enabled_services:
+            states[service] = "DISABLED"
+        elif enabled_services == [service]:
+            states[service] = "ENABLED"
+        else:
+            states[service] = "UNKNOWN"
     return states
 
 

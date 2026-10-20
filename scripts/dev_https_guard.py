@@ -1,6 +1,7 @@
 """Narrow plan and live-policy guard for the two opt-in HTTPS Terraform roots."""
 
 import argparse
+import ipaddress
 import json
 import re
 import sys
@@ -18,6 +19,10 @@ FOUNDATION = {
 }
 ACCESS = {
     "google_iap_web_backend_service_iam_member.helpdesk_user": "google_iap_web_backend_service_iam_member",
+}
+PROVIDER_READBACK_DRIFT = {
+    "google_compute_global_address.https": ("google_compute_global_address", "labels", None, {}),
+    "google_compute_ssl_policy.https": ("google_compute_ssl_policy", "custom_features", None, []),
 }
 
 
@@ -53,26 +58,51 @@ def check_actions(plan, expected):
         actions = change.get("change", {}).get("actions", [])
         require(actions in (["create"], ["no-op"]),
                 "only an exact create or no-op is allowed; updates, deletes and replacements require review")
-    drift = plan.get("resource_drift", [])
-    require(not drift, "unexpected prior-state drift exists in the HTTPS root")
+    check_provider_readback_drift(plan.get("resource_drift", []), expected)
     prior = plan.get("prior_state", {}).get("values", {}).get("root_module", {}).get("resources", [])
     require(all(item.get("address") in expected for item in prior),
             "prior state contains an unexpected address")
     return by_address
 
 
+def check_provider_readback_drift(drift, expected):
+    """Allow only the two confirmed provider null-to-empty refresh differences.
+
+    Terraform 1.16.2 with google provider 7.8.0 reports labels/custom_features as
+    null in the saved state and empty collection values after refresh. The normal
+    resource-change guard still requires these retained resources to be no-ops.
+    """
+    seen = set()
+    missing = object()
+    for item in drift:
+        address = item.get("address")
+        allowed = PROVIDER_READBACK_DRIFT.get(address)
+        require(address in expected and allowed is not None,
+                "unexpected prior-state drift exists in the HTTPS root")
+        resource_type, field, before_value, after_value = allowed
+        require(item.get("mode", "managed") == "managed" and item.get("type") == resource_type,
+                "provider readback drift is on an unexpected resource type")
+        change = item.get("change", {})
+        require(change.get("actions") == ["update"],
+                "provider readback drift must be a refresh-only update")
+        before = change.get("before")
+        after = change.get("after")
+        require(isinstance(before, dict) and isinstance(after, dict),
+                "provider readback drift is missing its before/after values")
+        changed_fields = {
+            key for key in set(before) | set(after)
+            if before.get(key, missing) != after.get(key, missing)
+        }
+        require(changed_fields == {field} and before.get(field, missing) == before_value and
+                after.get(field, missing) == after_value,
+                "provider readback drift differs from the exact confirmed null-to-empty field")
+        require(address not in seen, "duplicate provider readback drift resource")
+        seen.add(address)
+
+
 def configuration_references(plan, address, expression_path):
-    module = plan.get("configuration", {}).get("root_module", {})
-    resources = {}
-
-    def collect(current):
-        for resource in current.get("resources", []):
-            resources[resource.get("address")] = resource.get("expressions", {})
-        for child in current.get("module_calls", {}).values():
-            collect(child.get("module", {}))
-
-    collect(module)
-    expression = resources.get(address, {})
+    expressions = configuration_expressions(plan, address)
+    expression = expressions
     for path_part in expression_path:
         if isinstance(path_part, int):
             if not isinstance(expression, list) or path_part >= len(expression):
@@ -87,16 +117,45 @@ def configuration_references(plan, address, expression_path):
     return []
 
 
+def configuration_expressions(plan, address):
+    module = plan.get("configuration", {}).get("root_module", {})
+    resources = {}
+
+    def collect(current):
+        for resource in current.get("resources", []):
+            resources[resource.get("address")] = resource.get("expressions", {})
+        for child in current.get("module_calls", {}).values():
+            collect(child.get("module", {}))
+
+    collect(module)
+    return resources.get(address, {})
+
+
 def check_foundation(plan, hostname):
     values = resource_values(plan, FOUNDATION)
     changes = check_actions(plan, FOUNDATION)
     address = changes["google_compute_global_address.https"].get("change", {}).get("after") or values[
         "google_compute_global_address.https"]["values"]
-    # The provider omits these two configured defaults from plan JSON in v7.8.0;
-    # live apply verification checks the resolved values before reporting success.
+    # The provider returns an empty ip_version for a global IPv4 reservation.
+    # Check the configuration source as well as the provider readback so that
+    # accepting this omission cannot permit an IPv6 or internal address.
+    address_expression = configuration_expressions(plan, "google_compute_global_address.https")
+    address_type_expression = address_expression.get("address_type")
+    ip_version_expression = address_expression.get("ip_version")
+    require(isinstance(address_type_expression, dict) and
+            address_type_expression.get("constant_value") == "EXTERNAL" and
+            isinstance(ip_version_expression, dict) and ip_version_expression.get("constant_value") == "IPV4",
+            "global address configuration must explicitly request external IPv4")
+    live_address = address.get("address")
+    if live_address:
+        try:
+            is_ipv4 = ipaddress.ip_address(live_address).version == 4
+        except ValueError:
+            is_ipv4 = False
+        require(is_ipv4, "existing global reservation must remain IPv4")
     require(address.get("project") == PROJECT and address.get("name") == "helpdesk-dev-https-ip" and
-            address.get("address_type") in (None, "EXTERNAL") and
-            address.get("ip_version") in (None, "IPV4"),
+            address.get("address_type") in (None, "", "EXTERNAL") and
+            address.get("ip_version") in (None, "", "IPV4"),
             "global address must use the exact external IPv4 reservation or its documented provider defaults")
     require("network_tier" not in address, "global address must use Google's global external tier")
 

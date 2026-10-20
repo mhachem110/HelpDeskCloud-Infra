@@ -13,8 +13,15 @@ spec.loader.exec_module(preflight)
 
 
 def results(*states):
-    return [subprocess.CompletedProcess([], 0, f"{state}\n", "") if state is not None else
-            subprocess.CompletedProcess([], 1, "", "permission denied") for state in states]
+    completed = []
+    for service, state in zip(preflight.SERVICES, states):
+        if state == "ENABLED":
+            completed.append(subprocess.CompletedProcess([], 0, f"{service}\n", ""))
+        elif state == "DISABLED":
+            completed.append(subprocess.CompletedProcess([], 0, "", ""))
+        else:
+            completed.append(subprocess.CompletedProcess([], 1, "", "permission denied"))
+    return completed
 
 
 class DevHttpsApiPreflightTests(unittest.TestCase):
@@ -27,9 +34,19 @@ class DevHttpsApiPreflightTests(unittest.TestCase):
         self.assertEqual(runner.call_count, 2)
         for call, service in zip(runner.call_args_list, preflight.SERVICES):
             self.assertEqual(call.args[0], [
-                "gcloud", "services", "describe", service,
-                "--project=helpdeskcloud-capstone-511905", "--format=value(state)",
+                "gcloud", "services", "list", "--enabled", "--project=helpdeskcloud-capstone-511905",
+                f"--filter=config.name={service}", "--format=value(config.name)",
             ])
+
+    def test_api_probe_treats_multiple_or_unexpected_results_as_unknown(self):
+        runner = Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, "certificatemanager.googleapis.com\niap.googleapis.com\n", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ])
+        self.assertEqual(preflight.get_states(runner), {
+            "certificatemanager.googleapis.com": "UNKNOWN",
+            "iap.googleapis.com": "DISABLED",
+        })
 
     def test_plan_reports_disabled_apis_without_stopping_read_only_diagnostics(self):
         out, err = io.StringIO(), io.StringIO()
