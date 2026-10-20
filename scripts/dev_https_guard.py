@@ -1,6 +1,7 @@
 """Narrow plan and live-policy guard for the two opt-in HTTPS Terraform roots."""
 
 import argparse
+import ipaddress
 import json
 import re
 import sys
@@ -100,17 +101,8 @@ def check_provider_readback_drift(drift, expected):
 
 
 def configuration_references(plan, address, expression_path):
-    module = plan.get("configuration", {}).get("root_module", {})
-    resources = {}
-
-    def collect(current):
-        for resource in current.get("resources", []):
-            resources[resource.get("address")] = resource.get("expressions", {})
-        for child in current.get("module_calls", {}).values():
-            collect(child.get("module", {}))
-
-    collect(module)
-    expression = resources.get(address, {})
+    expressions = configuration_expressions(plan, address)
+    expression = expressions
     for path_part in expression_path:
         if isinstance(path_part, int):
             if not isinstance(expression, list) or path_part >= len(expression):
@@ -125,16 +117,45 @@ def configuration_references(plan, address, expression_path):
     return []
 
 
+def configuration_expressions(plan, address):
+    module = plan.get("configuration", {}).get("root_module", {})
+    resources = {}
+
+    def collect(current):
+        for resource in current.get("resources", []):
+            resources[resource.get("address")] = resource.get("expressions", {})
+        for child in current.get("module_calls", {}).values():
+            collect(child.get("module", {}))
+
+    collect(module)
+    return resources.get(address, {})
+
+
 def check_foundation(plan, hostname):
     values = resource_values(plan, FOUNDATION)
     changes = check_actions(plan, FOUNDATION)
     address = changes["google_compute_global_address.https"].get("change", {}).get("after") or values[
         "google_compute_global_address.https"]["values"]
-    # The provider omits these two configured defaults from plan JSON in v7.8.0;
-    # live apply verification checks the resolved values before reporting success.
+    # The provider returns an empty ip_version for a global IPv4 reservation.
+    # Check the configuration source as well as the provider readback so that
+    # accepting this omission cannot permit an IPv6 or internal address.
+    address_expression = configuration_expressions(plan, "google_compute_global_address.https")
+    address_type_expression = address_expression.get("address_type")
+    ip_version_expression = address_expression.get("ip_version")
+    require(isinstance(address_type_expression, dict) and
+            address_type_expression.get("constant_value") == "EXTERNAL" and
+            isinstance(ip_version_expression, dict) and ip_version_expression.get("constant_value") == "IPV4",
+            "global address configuration must explicitly request external IPv4")
+    live_address = address.get("address")
+    if live_address:
+        try:
+            is_ipv4 = ipaddress.ip_address(live_address).version == 4
+        except ValueError:
+            is_ipv4 = False
+        require(is_ipv4, "existing global reservation must remain IPv4")
     require(address.get("project") == PROJECT and address.get("name") == "helpdesk-dev-https-ip" and
-            address.get("address_type") in (None, "EXTERNAL") and
-            address.get("ip_version") in (None, "IPV4"),
+            address.get("address_type") in (None, "", "EXTERNAL") and
+            address.get("ip_version") in (None, "", "IPV4"),
             "global address must use the exact external IPv4 reservation or its documented provider defaults")
     require("network_tier" not in address, "global address must use Google's global external tier")
 

@@ -42,6 +42,9 @@ def foundation_plan(action=("create",)):
     configuration = {
         "root_module": {
             "resources": [
+                {"address": "google_compute_global_address.https", "expressions": {
+                    "address_type": {"constant_value": "EXTERNAL"},
+                    "ip_version": {"constant_value": "IPV4"}}},
                 {"address": "google_certificate_manager_certificate.https", "expressions": {
                     "managed": [{"dns_authorizations": {"references": [
                         "google_certificate_manager_dns_authorization.https.id"]}}]}},
@@ -111,12 +114,23 @@ class DevHttpsGuardTests(unittest.TestCase):
     def test_provider_omitted_global_address_defaults_are_checked_live_after_apply(self):
         plan = foundation_plan()
         address = plan["resource_changes"][0]["change"]["after"]
-        address["address_type"] = None
-        address["ip_version"] = None
-        plan["planned_values"]["root_module"]["resources"][2]["values"].update(
-            address_type=None, ip_version=None)
+        address.update(address_type="", ip_version="", address="34.8.56.208")
+        plan["planned_values"]["root_module"]["resources"][0]["values"].update(
+            address_type="", ip_version="", address="34.8.56.208")
         guard.check_foundation(plan, HOST)
-        address["address_type"] = "INTERNAL"
+        address["ip_version"] = "IPV6"
+        with self.assertRaises(ValueError):
+            guard.check_foundation(plan, HOST)
+
+    def test_foundation_rejects_ipv4_provider_default_without_explicit_configuration(self):
+        plan = foundation_plan()
+        del plan["configuration"]["root_module"]["resources"][0]["expressions"]["ip_version"]
+        with self.assertRaises(ValueError):
+            guard.check_foundation(plan, HOST)
+
+    def test_foundation_rejects_non_ipv4_existing_reservation(self):
+        plan = foundation_plan()
+        plan["resource_changes"][0]["change"]["after"].update(address="2001:db8::1", ip_version="")
         with self.assertRaises(ValueError):
             guard.check_foundation(plan, HOST)
 
