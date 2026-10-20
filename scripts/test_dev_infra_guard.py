@@ -13,7 +13,7 @@ from unittest.mock import patch
 from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_LABEL, BASE, EXPECTED,
                              DEPLOYMENT_EVIDENCE_PATH_COUNT, MIGRATION_GSA_SECRET_ACCESS_ADDRESS,
                              PLANNED_EXPECTED,
-                             NETWORK, PHASE6, PHASE7, PHASE8, PHASE9, LEGACY_PHASE9,
+                             NETWORK, PHASE6, PHASE7, PHASE8, PHASE9, PHASE10, LEGACY_PHASE9,
                              PSA_ADDRESS, REGISTRY_ADDRESS, SQL_ADDRESS,
                              SUBNET_ADDRESS, SUBNET_PATHS, SUPPORT_PUBLISHER_ACCOUNT_ID,
                              SUPPORT_PUBLISHER_CONDITION, SUPPORT_PUBLISHER_DISPLAY_NAME,
@@ -31,6 +31,11 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              MIGRATION_RUNNER_EMAIL, MIGRATION_RUNNER_MEMBER,
                              MIGRATION_RUNNER_PROVIDER_ADDRESS,
                              MIGRATION_RUNNER_PROVIDER_ID, MIGRATION_RUNNER_PROVIDER_RESOURCE_ID,
+                             APP_DELIVERY_MAPPING, APP_PUBLISHER_ACCOUNT_ID, APP_PUBLISHER_CONDITION,
+                             APP_PUBLISHER_DISPLAY_NAME, APP_PUBLISHER_EMAIL, APP_PUBLISHER_MEMBER,
+                             APP_PUBLISHER_PROVIDER_ID, APP_DEPLOYER_ACCOUNT_ID, APP_DEPLOYER_CONDITION,
+                             APP_DEPLOYER_DISPLAY_NAME, APP_DEPLOYER_EMAIL, APP_DEPLOYER_MEMBER,
+                             APP_DEPLOYER_PROVIDER_ID,
                              MISSING,
                              REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH,
                              VPC_LINK, VPC_PATH, VPC_PATHS,
@@ -69,10 +74,13 @@ def strict_reference_cases(plan):
         ("google_service_account_iam_member.dev_app_support_images_wif", "service_account_id", "google_service_account.dev_app_support_image_publisher[0].name"),
         ("google_service_account_iam_member.dev_app_migration_runner_wif", "service_account_id", "google_service_account.dev_app_migration_runner[0].name"),
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "member", "google_service_account.dev_app_migration_runner[0].member"),
+        ("google_project_iam_member.dev_app_deployer_cluster_viewer", "member", "google_service_account.dev_app_deployer[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
         ("google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
         ("google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access", "member", "google_service_account.dev_migration[0].member"),
+        ("google_secret_manager_secret_iam_member.dev_app_gsa_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
+        ("google_secret_manager_secret_iam_member.dev_app_gsa_secret_access", "member", "google_service_account.dev_app[0].member"),
         ("google_project_iam_member.dev_gke_node_runtime", "member", "google_service_account.dev_gke_nodes[0].member"),
         ("google_project_iam_member.dev_app_cloudsql", "member", "google_service_account.dev_app[0].member"),
         ("google_project_iam_member.dev_migration_cloudsql", "member", "google_service_account.dev_migration[0].member"),
@@ -80,12 +88,19 @@ def strict_reference_cases(plan):
         ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "member", "google_service_account.dev_app_support_image_publisher[0].member"),
         ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "location", "google_artifact_registry_repository.dev_images[0].location"),
         ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "repository", "google_artifact_registry_repository.dev_images[0].repository_id"),
+        ("google_service_account_iam_member.dev_app_publisher_wif", "service_account_id", "google_service_account.dev_app_publisher[0].name"),
+        ("google_service_account_iam_member.dev_app_deployer_wif", "service_account_id", "google_service_account.dev_app_deployer[0].name"),
+        ("google_artifact_registry_repository_iam_member.dev_app_publisher_writer", "member", "google_service_account.dev_app_publisher[0].member"),
+        ("google_artifact_registry_repository_iam_member.dev_app_publisher_writer", "location", "google_artifact_registry_repository.dev_images[0].location"),
+        ("google_artifact_registry_repository_iam_member.dev_app_publisher_writer", "repository", "google_artifact_registry_repository.dev_images[0].repository_id"),
     ):
         cases.append((f"{address}.{field}", resources[address][field], expected))
     for address in ("google_service_account.dev_gke_nodes", "google_service_account.dev_app",
                     "google_service_account.dev_migration",
                      "google_service_account.dev_app_support_image_publisher",
-                     "google_service_account.dev_app_migration_runner"):
+                     "google_service_account.dev_app_migration_runner",
+                     "google_service_account.dev_app_publisher",
+                     "google_service_account.dev_app_deployer"):
         cases.append((f"{address}.project", resources[address]["project"], "var.project_id"))
     return cases
 
@@ -127,6 +142,8 @@ def fixture():
     migration = f"helpdesk-migrate-dev@{project}.iam.gserviceaccount.com"
     support_publisher = SUPPORT_PUBLISHER_EMAIL
     migration_runner = MIGRATION_RUNNER_EMAIL
+    app_publisher = APP_PUBLISHER_EMAIL
+    app_deployer = APP_DEPLOYER_EMAIL
     principal = f"principal://iam.googleapis.com/projects/260283083469/locations/global/workloadIdentityPools/{project}.svc.id.goog/subject/ns/helpdesk-dev/sa/"
     phase7 = {
         "google_container_cluster.dev[0]": {
@@ -225,6 +242,50 @@ def fixture():
         "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]": {
             "project": project, "role": "roles/container.clusterViewer",
             "member": f"serviceAccount:{migration_runner}"},
+    }
+    phase10 = {
+        "google_service_account.dev_app_publisher[0]": {
+            "project": project, "account_id": APP_PUBLISHER_ACCOUNT_ID,
+            "display_name": APP_PUBLISHER_DISPLAY_NAME, "email": app_publisher,
+            "member": f"serviceAccount:{app_publisher}",
+            "name": f"projects/{project}/serviceAccounts/{app_publisher}"},
+        "google_iam_workload_identity_pool_provider.dev_app_publish[0]": {
+            "project": project, "workload_identity_pool_id": "helpdesk-github",
+            "workload_identity_pool_provider_id": APP_PUBLISHER_PROVIDER_ID,
+            "display_name": "App image publication Dev", "disabled": False,
+            "attribute_mapping": APP_DELIVERY_MAPPING,
+            "attribute_condition": APP_PUBLISHER_CONDITION,
+            "oidc": [{"issuer_uri": "https://token.actions.githubusercontent.com"}]},
+        "google_service_account_iam_member.dev_app_publisher_wif[0]": {
+            "role": "roles/iam.workloadIdentityUser",
+            "service_account_id": f"projects/{project}/serviceAccounts/{app_publisher}",
+            "member": APP_PUBLISHER_MEMBER},
+        "google_artifact_registry_repository_iam_member.dev_app_publisher_writer[0]": {
+            "project": project, "location": "us-east1", "repository": REGISTRY_REPOSITORY_PATH,
+            "role": "roles/artifactregistry.writer", "member": f"serviceAccount:{app_publisher}"},
+        "google_service_account.dev_app_deployer[0]": {
+            "project": project, "account_id": APP_DEPLOYER_ACCOUNT_ID,
+            "display_name": APP_DEPLOYER_DISPLAY_NAME, "email": app_deployer,
+            "member": f"serviceAccount:{app_deployer}",
+            "name": f"projects/{project}/serviceAccounts/{app_deployer}"},
+        "google_iam_workload_identity_pool_provider.dev_app_deploy[0]": {
+            "project": project, "workload_identity_pool_id": "helpdesk-github",
+            "workload_identity_pool_provider_id": APP_DEPLOYER_PROVIDER_ID,
+            "display_name": "App deployment Dev", "disabled": False,
+            "attribute_mapping": APP_DELIVERY_MAPPING,
+            "attribute_condition": APP_DEPLOYER_CONDITION,
+            "oidc": [{"issuer_uri": "https://token.actions.githubusercontent.com"}]},
+        "google_service_account_iam_member.dev_app_deployer_wif[0]": {
+            "role": "roles/iam.workloadIdentityUser",
+            "service_account_id": f"projects/{project}/serviceAccounts/{app_deployer}",
+            "member": APP_DEPLOYER_MEMBER},
+        "google_project_iam_member.dev_app_deployer_cluster_viewer[0]": {
+            "project": project, "role": "roles/container.clusterViewer",
+            "member": f"serviceAccount:{app_deployer}"},
+        "google_secret_manager_secret_iam_member.dev_app_gsa_secret_access[0]": {
+            "role": "roles/secretmanager.secretAccessor",
+            "secret_id": f"projects/{project}/secrets/helpdesk-dev-db-connection",
+            "member": f"serviceAccount:{app}"},
     }
     config = {
         "root_module": {
@@ -342,18 +403,71 @@ def fixture():
             ]}}},
         }
     }
+    config["root_module"]["resources"].extend([
+        {"address": "google_service_account.dev_app_publisher", "expressions": {
+            "account_id": {"constant_value": APP_PUBLISHER_ACCOUNT_ID},
+            "display_name": {"constant_value": APP_PUBLISHER_DISPLAY_NAME},
+            "project": {"references": ["var.project_id"]}}},
+        {"address": "google_iam_workload_identity_pool_provider.dev_app_publish", "expressions": {
+            "project": {"references": ["var.project_id"]},
+            "workload_identity_pool_id": {"constant_value": "helpdesk-github"},
+            "workload_identity_pool_provider_id": {"constant_value": APP_PUBLISHER_PROVIDER_ID},
+            "attribute_mapping": {"constant_value": APP_DELIVERY_MAPPING},
+            "attribute_condition": {"constant_value": APP_PUBLISHER_CONDITION}}},
+        {"address": "google_service_account_iam_member.dev_app_publisher_wif", "expressions": {
+            "role": {"constant_value": "roles/iam.workloadIdentityUser"},
+            "member": {"constant_value": APP_PUBLISHER_MEMBER},
+            "service_account_id": {"references": terraform_references(
+                "google_service_account.dev_app_publisher[0].name")}}},
+        {"address": "google_artifact_registry_repository_iam_member.dev_app_publisher_writer", "expressions": {
+            "role": {"constant_value": "roles/artifactregistry.writer"},
+            "project": {"references": ["var.project_id"]},
+            "location": {"references": terraform_references(
+                "google_artifact_registry_repository.dev_images[0].location")},
+            "repository": {"references": terraform_references(
+                "google_artifact_registry_repository.dev_images[0].repository_id")},
+            "member": {"references": terraform_references(
+                "google_service_account.dev_app_publisher[0].member")}}},
+        {"address": "google_service_account.dev_app_deployer", "expressions": {
+            "account_id": {"constant_value": APP_DEPLOYER_ACCOUNT_ID},
+            "display_name": {"constant_value": APP_DEPLOYER_DISPLAY_NAME},
+            "project": {"references": ["var.project_id"]}}},
+        {"address": "google_iam_workload_identity_pool_provider.dev_app_deploy", "expressions": {
+            "project": {"references": ["var.project_id"]},
+            "workload_identity_pool_id": {"constant_value": "helpdesk-github"},
+            "workload_identity_pool_provider_id": {"constant_value": APP_DEPLOYER_PROVIDER_ID},
+            "attribute_mapping": {"constant_value": APP_DELIVERY_MAPPING},
+            "attribute_condition": {"constant_value": APP_DEPLOYER_CONDITION}}},
+        {"address": "google_service_account_iam_member.dev_app_deployer_wif", "expressions": {
+            "role": {"constant_value": "roles/iam.workloadIdentityUser"},
+            "member": {"constant_value": APP_DEPLOYER_MEMBER},
+            "service_account_id": {"references": terraform_references(
+                "google_service_account.dev_app_deployer[0].name")}}},
+        {"address": "google_project_iam_member.dev_app_deployer_cluster_viewer", "expressions": {
+            "role": {"constant_value": "roles/container.clusterViewer"},
+            "project": {"references": ["var.project_id"]},
+            "member": {"references": terraform_references(
+                "google_service_account.dev_app_deployer[0].member")}}},
+        {"address": "google_secret_manager_secret_iam_member.dev_app_gsa_secret_access", "expressions": {
+            "role": {"constant_value": "roles/secretmanager.secretAccessor"},
+            "secret_id": {"references": terraform_references(
+                "google_secret_manager_secret.dev_app_connection[0].id")},
+            "member": {"references": terraform_references(
+                "google_service_account.dev_app[0].member")}}},
+    ])
     current_expected = PLANNED_EXPECTED
     planned = [{"mode": "managed", "address": address, "type": kind,
                 "values": (phase9[address] if address in PHASE9
+                           else phase10[address] if address in PHASE10
                            else phase8[address] if address in PHASE8
                            else phase7[address] if address in PHASE7
                            else (network | phase6)[kind])}
                for address, kind in PLANNED_EXPECTED.items() if address in current_expected]
     changes = [{"mode": "managed", "address": address, "type": kind,
-                "change": {"actions": ["no-op"] if address in (BASE | PHASE8 | PHASE9) else ["create"]}}
+                "change": {"actions": ["no-op"] if address in (BASE | PHASE8 | PHASE9 | PHASE10) else ["create"]}}
                for address, kind in PLANNED_EXPECTED.items() if address in current_expected]
     prior_state = [copy.deepcopy(resource) for resource in planned
-                   if resource["address"] in (BASE | PHASE8 | PHASE9)]
+                   if resource["address"] in (BASE | PHASE8 | PHASE9 | PHASE10)]
     return {
         "variables": {key: {"value": value} for key, value in {
             "project_id": "helpdeskcloud-capstone-511905", "region": "us-east1", "environment": "dev"}.items()},
@@ -371,7 +485,7 @@ def resource(plan, address):
 
 def set_prior_phase7(plan, addresses):
     """Set the prior state to the fixture's baseline plus selected Phase 7 addresses."""
-    allowed = set(BASE) | set(addresses) | set(PHASE8) | set(PHASE9)
+    allowed = set(BASE) | set(addresses) | set(PHASE8) | set(PHASE9) | set(PHASE10)
     plan["prior_state"]["values"]["root_module"]["resources"] = [
         copy.deepcopy(item) for item in plan["planned_values"]["root_module"]["resources"]
         if item["address"] in allowed
@@ -500,6 +614,21 @@ def migration_runner_iam_remediation_plan():
     return plan
 
 
+def app_delivery_create_plan():
+    """Model Phase 10 as one exact create batch after the approved Dev phases."""
+    plan = fixture()
+    set_prior_phase7(plan, PHASE7)
+    prior = plan["prior_state"]["values"]["root_module"]["resources"]
+    plan["prior_state"]["values"]["root_module"]["resources"] = [
+        item for item in prior if item["address"] not in PHASE10
+    ]
+    for change in plan["resource_changes"]:
+        change["change"]["actions"] = (
+            ["create"] if change["address"] in PHASE10 else ["no-op"]
+        )
+    return plan
+
+
 def support_provider_audience_drift(before_value, after_value):
     """Model a provider readback where only the unset audience representation differs."""
     plan = fixture()
@@ -538,6 +667,24 @@ def migration_provider_audience_drift(before_value, after_value):
         "type": "google_iam_workload_identity_pool_provider",
         "change": {"actions": ["update"], "before": before, "after": after},
     }
+
+
+def app_delivery_provider_audience_drift(address, before_value, after_value):
+    """Model an app delivery provider readback with only unset audiences different."""
+    plan = fixture()
+    values = resource(plan, address)["values"]
+    before, after = copy.deepcopy(values), copy.deepcopy(values)
+    for snapshot, audience_value in ((before, before_value), (after, after_value)):
+        audiences = snapshot["oidc"][0]
+        if audience_value is MISSING:
+            audiences.pop("allowed_audiences", None)
+        else:
+            audiences["allowed_audiences"] = copy.deepcopy(audience_value)
+    plan["resource_drift"] = [{
+        "mode": "managed", "address": address, "type": PHASE10[address],
+        "change": {"actions": ["update"], "before": before, "after": after},
+    }]
+    return plan
 
 
 def apply12_recovery_plan():
@@ -904,10 +1051,12 @@ def evidence():
          "format": "DOCKER", "dockerConfig": {"immutableTags": True}},
         {"bindings": [{"role": "roles/artifactregistry.reader", "members": [node_member]},
                        {"role": "roles/artifactregistry.writer",
-                        "members": [f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}"]}]},
+                        "members": [f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}",
+                                    f"serviceAccount:{APP_PUBLISHER_EMAIL}"]}]},
         {"bindings": [{"role": "roles/container.defaultNodeServiceAccount", "members": [node_member]},
                       {"role": "roles/cloudsql.client", "members": [app_member, migration_member]},
-                      {"role": "roles/container.clusterViewer", "members": [migration_runner_member]}]}, sql,
+                      {"role": "roles/container.clusterViewer", "members": [migration_runner_member,
+                          f"serviceAccount:{APP_DEPLOYER_EMAIL}"]}]}, sql,
         [{"name": "helpdesk", "instance": "helpdeskcloud-dev-postgres"}], outputs,
         cluster,
         {"email": node_email}, {"email": app_email}, {"email": migration_email},
@@ -915,7 +1064,8 @@ def evidence():
         {"name": f"projects/{project}/secrets/helpdesk-dev-db-admin-password", "replication": {"automatic": {}}},
         {"bindings": [{"role": "roles/iam.workloadIdentityUser", "members": [app_ksa]}]},
         {"bindings": [{"role": "roles/iam.workloadIdentityUser", "members": [migration_ksa]}]},
-        {"bindings": [{"role": "roles/secretmanager.secretAccessor", "members": [principal + "helpdesk-dev-app"]}]},
+        {"bindings": [{"role": "roles/secretmanager.secretAccessor", "members": [
+            principal + "helpdesk-dev-app", app_member]}]},
         {"bindings": [{"role": "roles/secretmanager.secretAccessor", "members": [
             principal + "helpdesk-dev-migrate", f"serviceAccount:{migration_email}"]}]},
         state,
@@ -932,6 +1082,18 @@ def evidence():
         {"name": f"projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/{MIGRATION_RUNNER_PROVIDER_ID}",
          "state": "ACTIVE", "attributeMapping": SUPPORT_PUBLISHER_MAPPING,
          "attributeCondition": MIGRATION_RUNNER_CONDITION,
+         "oidc": {"issuerUri": "https://token.actions.githubusercontent.com"}},
+        {"email": APP_PUBLISHER_EMAIL, "displayName": APP_PUBLISHER_DISPLAY_NAME, "disabled": False},
+        {"bindings": [{"role": "roles/iam.workloadIdentityUser", "members": [APP_PUBLISHER_MEMBER]}]},
+        {"name": f"projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/{APP_PUBLISHER_PROVIDER_ID}",
+         "state": "ACTIVE", "disabled": False, "attributeMapping": APP_DELIVERY_MAPPING,
+         "attributeCondition": APP_PUBLISHER_CONDITION,
+         "oidc": {"issuerUri": "https://token.actions.githubusercontent.com"}},
+        {"email": APP_DEPLOYER_EMAIL, "displayName": APP_DEPLOYER_DISPLAY_NAME, "disabled": False},
+        {"bindings": [{"role": "roles/iam.workloadIdentityUser", "members": [APP_DEPLOYER_MEMBER]}]},
+        {"name": f"projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/{APP_DEPLOYER_PROVIDER_ID}",
+         "state": "ACTIVE", "disabled": False, "attributeMapping": APP_DELIVERY_MAPPING,
+         "attributeCondition": APP_DEPLOYER_CONDITION,
          "oidc": {"issuerUri": "https://token.actions.githubusercontent.com"}},
     ]
 
@@ -1226,6 +1388,10 @@ class GuardTests(unittest.TestCase):
             "google_service_account.dev_app_support_image_publisher[0].member": "google_service_account.dev_migration[0].member",
             "google_service_account.dev_app_migration_runner[0].name": "google_service_account.dev_migration[0].name",
             "google_service_account.dev_app_migration_runner[0].member": "google_service_account.dev_migration[0].member",
+            "google_service_account.dev_app_publisher[0].name": "google_service_account.dev_app_deployer[0].name",
+            "google_service_account.dev_app_publisher[0].member": "google_service_account.dev_app[0].member",
+            "google_service_account.dev_app_deployer[0].name": "google_service_account.dev_app_publisher[0].name",
+            "google_service_account.dev_app_deployer[0].member": "google_service_account.dev_app[0].member",
             "google_artifact_registry_repository.dev_images[0].location": "google_artifact_registry_repository.other[0].location",
             "google_artifact_registry_repository.dev_images[0].repository_id": "google_artifact_registry_repository.other[0].repository_id",
             "google_secret_manager_secret.dev_app_connection[0].id": "google_secret_manager_secret.dev_admin_password[0].id",
@@ -1596,6 +1762,93 @@ class GuardTests(unittest.TestCase):
                      if change["address"] == address)["change"]["actions"] = actions
                 with self.subTest(address=address, actions=actions), self.assertRaisesRegex(ValueError, "Phase 9"):
                     check_plan(plan)
+
+    def test_app_delivery_identities_are_created_as_one_exact_phase10_batch(self):
+        plan = app_delivery_create_plan()
+        self.assertEqual(check_plan(plan), "apply")
+        created = {change["address"] for change in plan["resource_changes"]
+                   if change["change"]["actions"] == ["create"]}
+        self.assertEqual(created, set(PHASE10))
+
+    def test_app_delivery_rejects_partial_state_or_unsafe_iam(self):
+        plan = app_delivery_create_plan()
+        plan["prior_state"]["values"]["root_module"]["resources"].append(
+            copy.deepcopy(resource(plan, next(iter(PHASE10)))))
+        with self.assertRaisesRegex(ValueError, "Phase 10"):
+            check_plan(plan)
+
+        mutations = (
+            ("google_iam_workload_identity_pool_provider.dev_app_publish[0]",
+             lambda value: value.update(attribute_condition=value["attribute_condition"].replace(
+                 "1423008128", "1423008129"))),
+            ("google_iam_workload_identity_pool_provider.dev_app_deploy[0]",
+             lambda value: value.update(attribute_condition=value["attribute_condition"].replace(
+                 "dev-app-deploy", "unprotected"))),
+            ("google_service_account_iam_member.dev_app_publisher_wif[0]",
+             lambda value: value.update(member="principalSet://iam.googleapis.com/*")),
+            ("google_artifact_registry_repository_iam_member.dev_app_publisher_writer[0]",
+             lambda value: value.update(role="roles/artifactregistry.admin")),
+            ("google_artifact_registry_repository_iam_member.dev_app_publisher_writer[0]",
+             lambda value: value.update(repository="another-repository")),
+            ("google_project_iam_member.dev_app_deployer_cluster_viewer[0]",
+             lambda value: value.update(role="roles/container.admin")),
+            ("google_project_iam_member.dev_app_deployer_cluster_viewer[0]",
+             lambda value: value.update(condition=[{"title": "unrestricted"}])),
+            ("google_secret_manager_secret_iam_member.dev_app_gsa_secret_access[0]",
+             lambda value: value.update(secret_id="projects/other/secrets/another-secret")),
+            ("google_secret_manager_secret_iam_member.dev_app_gsa_secret_access[0]",
+             lambda value: value.update(member="allUsers")),
+        )
+        for address, mutate in mutations:
+            plan = app_delivery_create_plan()
+            mutate(resource(plan, address)["values"])
+            with self.subTest(address=address), self.assertRaises(ValueError):
+                check_plan(plan)
+
+    def test_app_delivery_rejects_partial_create_replacement_update_and_deletion(self):
+        for address in PHASE10:
+            for actions in (["update"], ["delete"], ["delete", "create"]):
+                plan = app_delivery_create_plan()
+                next(change for change in plan["resource_changes"] if change["address"] == address)[
+                    "change"]["actions"] = actions
+                with self.subTest(address=address, actions=actions), self.assertRaisesRegex(
+                    ValueError, "Phase 10"
+                ):
+                    check_plan(plan)
+
+    def test_app_delivery_providers_allow_only_unset_audience_readback(self):
+        addresses = (
+            "google_iam_workload_identity_pool_provider.dev_app_publish[0]",
+            "google_iam_workload_identity_pool_provider.dev_app_deploy[0]",
+        )
+        for address in addresses:
+            drift = app_delivery_provider_audience_drift(address, MISSING, [])
+            self.assertTrue(permitted_drift(drift["resource_drift"][0]))
+            for mutate in (
+                lambda snapshot: snapshot.update(attribute_condition="true"),
+                lambda snapshot: snapshot.update(attribute_mapping={"google.subject": "assertion.sub"}),
+                lambda snapshot: snapshot.update(workload_identity_pool_id="other-pool"),
+                lambda snapshot: snapshot["oidc"][0].update(allowed_audiences=["*"]),
+            ):
+                drift = app_delivery_provider_audience_drift(address, MISSING, [])
+                mutate(drift["resource_drift"][0]["change"]["after"])
+                with self.subTest(address=address, drift=drift):
+                    self.assertFalse(permitted_drift(drift["resource_drift"][0]))
+
+    def test_app_delivery_provider_drift_diagnostic_classifies_exact_identity(self):
+        for address in (
+            "google_iam_workload_identity_pool_provider.dev_app_publish[0]",
+            "google_iam_workload_identity_pool_provider.dev_app_deploy[0]",
+        ):
+            plan = app_delivery_provider_audience_drift(address, MISSING, [])
+            report = "\n".join(diagnose_drift(plan))
+            self.assertIn("after app-delivery provider identity: expected", report)
+            self.assertIn("oidc[0].allowed_audiences: missing", report)
+
+            plan["resource_drift"][0]["change"]["after"]["attribute_condition"] = "true"
+            report = "\n".join(diagnose_drift(plan))
+            self.assertIn("after app-delivery provider identity: unexpected", report)
+            self.assertNotIn("attribute_condition=true", report)
 
     def test_apply21_recovery_rejects_other_phase8_actions_or_existing_provider(self):
         for address, actions in (
@@ -2548,7 +2801,7 @@ class GuardTests(unittest.TestCase):
                 redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
             main()
         self.assertEqual(error.exception.code, 1)
-        self.assertIn("MIGRATION_RUNNER_PROVIDER STATE_LIST", stderr.getvalue())
+        self.assertIn("APP_DEPLOYER_PROVIDER STATE_LIST", stderr.getvalue())
         verify.assert_not_called()
 
     def test_apply_workflow_evidence_arguments_match_guard_contract(self):
@@ -2571,7 +2824,10 @@ class GuardTests(unittest.TestCase):
             "admin-secret-iam.json", "state.json", "support-image-publisher-sa.json",
             "support-image-publisher-sa-iam.json", "support-image-provider.json",
             "migration-runner-sa.json", "migration-runner-sa-iam.json",
-            "migration-runner-provider.json", "state-addresses.txt",
+            "migration-runner-provider.json", "app-publisher-sa.json",
+            "app-publisher-sa-iam.json", "app-publisher-provider.json",
+            "app-deployer-sa.json", "app-deployer-sa-iam.json", "app-deployer-provider.json",
+            "state-addresses.txt",
         )
         self.assertEqual(DEPLOYMENT_EVIDENCE_PATH_COUNT, len(expected_names))
         self.assertEqual(tuple(argument_names), expected_names)
@@ -2611,6 +2867,39 @@ class GuardTests(unittest.TestCase):
                     path.write_text(json.dumps(value), encoding="utf-8")
                 with self.subTest(index=index, message=message), self.assertRaisesRegex(ValueError, message):
                     verify_deployment(filenames)
+
+    def test_phase10_read_only_verification_rejects_identity_and_scope_drift(self):
+        mutations = (
+            (27, lambda value: value.update(email="other@example.com"), "application publisher service account"),
+            (27, lambda value: value.update(displayName="unexpected"), "application publisher service account"),
+            (28, lambda value: value["bindings"].append({"role": "roles/owner", "members": ["user:other@example.com"]}),
+             "application publisher impersonation"),
+            (29, lambda value: value.update(attributeCondition="true"), "application publisher provider trust"),
+            (30, lambda value: value.update(email="other@example.com"), "application deployer service account"),
+            (31, lambda value: value["bindings"][0].update(members=["principalSet://iam.googleapis.com/*"]),
+             "application deployer impersonation"),
+            (32, lambda value: value.update(disabled=True), "application deployer provider trust"),
+            (5, lambda value: value["bindings"].append({"role": "roles/artifactregistry.writer",
+                                                          "members": ["serviceAccount:unexpected@example.com"]}),
+             "Artifact Registry Writer contains an unexpected principal"),
+            (6, lambda value: value["bindings"].append({"role": "roles/editor",
+                                                          "members": [f"serviceAccount:{APP_DEPLOYER_EMAIL}"]}),
+             "Application deployer must have only"),
+            (18, lambda value: value["bindings"][0]["members"].append("allUsers"), "Public"),
+            (19, lambda value: value["bindings"][0]["members"].append(
+                f"serviceAccount:{APP_DEPLOYER_EMAIL}"), "Secret access is not limited"),
+        )
+        for index, mutate, message in mutations:
+            with self.subTest(index=index, message=message), tempfile.TemporaryDirectory() as temporary:
+                values = evidence()
+                mutate(values[index])
+                paths = [Path(temporary) / f"evidence-{position}.json" for position in range(len(values))]
+                for path, value in zip(paths, values):
+                    path.write_text(json.dumps(value), encoding="utf-8")
+                state = Path(temporary) / "state-addresses.txt"
+                state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, message):
+                    verify_deployment([str(path) for path in paths] + [str(state)])
 
     def test_secret_manager_accepts_canonical_project_number_resource_names(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -67,7 +67,18 @@ PHASE9 = {
     "google_service_account_iam_member.dev_app_migration_runner_wif[0]": "google_service_account_iam_member",
     "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]": "google_project_iam_member",
 }
-DEPLOYMENT_EVIDENCE_PATH_COUNT = 28
+PHASE10 = {
+    "google_service_account.dev_app_publisher[0]": "google_service_account",
+    "google_iam_workload_identity_pool_provider.dev_app_publish[0]": "google_iam_workload_identity_pool_provider",
+    "google_service_account_iam_member.dev_app_publisher_wif[0]": "google_service_account_iam_member",
+    "google_artifact_registry_repository_iam_member.dev_app_publisher_writer[0]": "google_artifact_registry_repository_iam_member",
+    "google_service_account.dev_app_deployer[0]": "google_service_account",
+    "google_iam_workload_identity_pool_provider.dev_app_deploy[0]": "google_iam_workload_identity_pool_provider",
+    "google_service_account_iam_member.dev_app_deployer_wif[0]": "google_service_account_iam_member",
+    "google_project_iam_member.dev_app_deployer_cluster_viewer[0]": "google_project_iam_member",
+    "google_secret_manager_secret_iam_member.dev_app_gsa_secret_access[0]": "google_secret_manager_secret_iam_member",
+}
+DEPLOYMENT_EVIDENCE_PATH_COUNT = 34
 ARTIFACT_READER_IAM_ADDRESS = "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]"
 SUPPORT_PUBLISHER_ACCOUNT_ID = "helpdesk-app-support-pub-dev"
 SUPPORT_PUBLISHER_DISPLAY_NAME = "helpdesk-app-support-image-publisher-dev"
@@ -103,6 +114,57 @@ SUPPORT_PUBLISHER_MEMBER = (
     f"principal://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/"
     f"workloadIdentityPools/helpdesk-github/subject/{SUPPORT_PUBLISHER_SUBJECT}"
 )
+APP_DELIVERY_MAPPING = SUPPORT_PUBLISHER_MAPPING
+APP_PUBLISHER_ACCOUNT_ID = "helpdesk-app-publisher-dev"
+APP_PUBLISHER_DISPLAY_NAME = "HelpDesk Dev application image publisher"
+APP_PUBLISHER_EMAIL = f"{APP_PUBLISHER_ACCOUNT_ID}@{PROJECT}.iam.gserviceaccount.com"
+APP_PUBLISHER_PROVIDER_ID = "github-app-publish-dev"
+APP_PUBLISHER_SUBJECT = (
+    "repo:mhachem110@150286776/HelpDeskCloud-App@1423008128:"
+    "environment:dev-app-publish"
+)
+APP_PUBLISHER_CONDITION = (
+    'attribute.repository == "mhachem110/HelpDeskCloud-App" && '
+    'attribute.repository_id == "1423008128" && '
+    'attribute.repository_owner_id == "150286776" && '
+    'attribute.ref == "refs/heads/dev" && '
+    'attribute.environment == "dev-app-publish" && '
+    'attribute.workflow_ref == "mhachem110/HelpDeskCloud-App/.github/workflows/'
+    'app-dev-delivery.yml@refs/heads/dev"'
+)
+APP_PUBLISHER_MEMBER = (
+    f"principal://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/"
+    f"workloadIdentityPools/helpdesk-github/subject/{APP_PUBLISHER_SUBJECT}"
+)
+APP_DEPLOYER_ACCOUNT_ID = "helpdesk-app-deployer-dev"
+APP_DEPLOYER_DISPLAY_NAME = "HelpDesk Dev application deployer"
+APP_DEPLOYER_EMAIL = f"{APP_DEPLOYER_ACCOUNT_ID}@{PROJECT}.iam.gserviceaccount.com"
+APP_DEPLOYER_PROVIDER_ID = "github-app-deploy-dev"
+APP_DEPLOYER_SUBJECT = (
+    "repo:mhachem110@150286776/HelpDeskCloud-App@1423008128:"
+    "environment:dev-app-deploy"
+)
+APP_DEPLOYER_CONDITION = (
+    'attribute.repository == "mhachem110/HelpDeskCloud-App" && '
+    'attribute.repository_id == "1423008128" && '
+    'attribute.repository_owner_id == "150286776" && '
+    'attribute.ref == "refs/heads/dev" && '
+    'attribute.environment == "dev-app-deploy" && '
+    'attribute.workflow_ref == "mhachem110/HelpDeskCloud-App/.github/workflows/'
+    'app-dev-delivery.yml@refs/heads/dev"'
+)
+APP_DEPLOYER_MEMBER = (
+    f"principal://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/"
+    f"workloadIdentityPools/helpdesk-github/subject/{APP_DEPLOYER_SUBJECT}"
+)
+APP_DELIVERY_PROVIDER_READBACKS = {
+    "google_iam_workload_identity_pool_provider.dev_app_publish[0]": (
+        APP_PUBLISHER_PROVIDER_ID, APP_PUBLISHER_CONDITION,
+    ),
+    "google_iam_workload_identity_pool_provider.dev_app_deploy[0]": (
+        APP_DEPLOYER_PROVIDER_ID, APP_DEPLOYER_CONDITION,
+    ),
+}
 MIGRATION_RUNNER_ACCOUNT_ID = "helpdesk-app-migr-runner-dev"
 MIGRATION_RUNNER_DISPLAY_NAME = "helpdesk-app-migration-runner-dev"
 MIGRATION_RUNNER_EMAIL = f"{MIGRATION_RUNNER_ACCOUNT_ID}@{PROJECT}.iam.gserviceaccount.com"
@@ -172,7 +234,7 @@ APPLY12_COMPLETED = frozenset({
 })
 APPLY12_REMAINING = frozenset(PHASE7) - APPLY12_COMPLETED
 BASE = NETWORK | PHASE6
-EXPECTED = BASE | PHASE7 | PHASE8 | PHASE9 | LEGACY_PHASE9
+EXPECTED = BASE | PHASE7 | PHASE8 | PHASE9 | PHASE10 | LEGACY_PHASE9
 # Legacy addresses may exist in prior state and in the exact IAM remediation
 # delete, but never in the final planned configuration.
 PLANNED_EXPECTED = {address: resource_type for address, resource_type in EXPECTED.items()
@@ -230,6 +292,10 @@ PROJECT_IAM_READBACKS = {
         "roles/cloudsql.client",
         f"serviceAccount:helpdesk-migrate-dev@{PROJECT}.iam.gserviceaccount.com",
     ),
+    "google_project_iam_member.dev_app_deployer_cluster_viewer[0]": (
+        "roles/container.clusterViewer",
+        f"serviceAccount:{APP_DEPLOYER_EMAIL}",
+    ),
 }
 SECRET_EMPTY_MAP_FIELDS = ("annotations", "labels", "version_aliases")
 ATTRIBUTION_LABEL = {"goog-terraform-provisioned": "true"}
@@ -247,6 +313,8 @@ STRICT_REFERENCE_PARENTS = {
     "google_service_account.dev_migration[0]": "google_service_account.dev_migration",
     "google_service_account.dev_app_support_image_publisher[0]": "google_service_account.dev_app_support_image_publisher",
     "google_service_account.dev_app_migration_runner[0]": "google_service_account.dev_app_migration_runner",
+    "google_service_account.dev_app_publisher[0]": "google_service_account.dev_app_publisher",
+    "google_service_account.dev_app_deployer[0]": "google_service_account.dev_app_deployer",
     "google_artifact_registry_repository.dev_images[0]": "google_artifact_registry_repository.dev_images",
     "google_secret_manager_secret.dev_app_connection[0]": "google_secret_manager_secret.dev_app_connection",
     "google_secret_manager_secret.dev_admin_password[0]": "google_secret_manager_secret.dev_admin_password",
@@ -487,6 +555,95 @@ def check_phase9(values, plan, creates):
             "GKE DNS endpoint connect grant must be project-level and unconditional")
 
 
+def check_phase10(values, plan, creates):
+    """Validate the dedicated application publisher/deployer identities and runtime secret grant."""
+    changes = {c.get("address"): c for c in plan.get("resource_changes", [])}
+    account_specs = (
+        ("google_service_account.dev_app_publisher[0]", APP_PUBLISHER_ACCOUNT_ID,
+         APP_PUBLISHER_DISPLAY_NAME, APP_PUBLISHER_EMAIL, "application publisher"),
+        ("google_service_account.dev_app_deployer[0]", APP_DEPLOYER_ACCOUNT_ID,
+         APP_DEPLOYER_DISPLAY_NAME, APP_DEPLOYER_EMAIL, "application deployer"),
+    )
+    for address, account_id, display_name, email, label in account_specs:
+        account = values[address]
+        require(account.get("project") == PROJECT and account.get("account_id") == account_id
+                and account.get("display_name") == display_name,
+                f"Unexpected Dev {label} service account")
+        for field, expected in (
+            ("email", email),
+            ("member", f"serviceAccount:{email}"),
+            ("name", f"projects/{PROJECT}/serviceAccounts/{email}"),
+        ):
+            expected_or_unknown(account, address, (field,), expected, changes, creates,
+                                f"{label} service-account {field}")
+
+    provider_specs = (
+        ("google_iam_workload_identity_pool_provider.dev_app_publish[0]",
+         APP_PUBLISHER_PROVIDER_ID, APP_PUBLISHER_CONDITION, "application publisher"),
+        ("google_iam_workload_identity_pool_provider.dev_app_deploy[0]",
+         APP_DEPLOYER_PROVIDER_ID, APP_DEPLOYER_CONDITION, "application deployer"),
+    )
+    for address, provider_id, condition, label in provider_specs:
+        provider = values[address]
+        require(provider.get("project") == PROJECT
+                and provider.get("workload_identity_pool_id") == "helpdesk-github"
+                and provider.get("workload_identity_pool_provider_id") == provider_id
+                and provider.get("disabled") is False,
+                f"Unexpected Dev {label} Workload Identity provider")
+        require(provider.get("attribute_mapping") == APP_DELIVERY_MAPPING
+                and normalize_cel(provider.get("attribute_condition")) == condition,
+                f"Dev {label} provider trust condition or mapping is not exact")
+        oidc = only_item(provider.get("oidc"), f"Expected one Dev {label} OIDC issuer")
+        require(oidc.get("issuer_uri") == "https://token.actions.githubusercontent.com",
+                f"Unexpected Dev {label} OIDC issuer")
+
+    for address, member, email, label in (
+        ("google_service_account_iam_member.dev_app_publisher_wif[0]",
+         APP_PUBLISHER_MEMBER, APP_PUBLISHER_EMAIL, "application publisher"),
+        ("google_service_account_iam_member.dev_app_deployer_wif[0]",
+         APP_DEPLOYER_MEMBER, APP_DEPLOYER_EMAIL, "application deployer"),
+    ):
+        binding = values[address]
+        require(binding.get("role") == "roles/iam.workloadIdentityUser"
+                and binding.get("member") == member,
+                f"{label} impersonation binding must use the exact protected Environment subject")
+        expected_or_unknown(binding, address, ("service_account_id",),
+                            f"projects/{PROJECT}/serviceAccounts/{email}",
+                            changes, creates, f"{label} Workload Identity target")
+
+    writer_address = "google_artifact_registry_repository_iam_member.dev_app_publisher_writer[0]"
+    writer = values[writer_address]
+    require(writer.get("project") == PROJECT and writer.get("location") == "us-east1"
+            and writer.get("repository") in (REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH)
+            and writer.get("role") == "roles/artifactregistry.writer",
+            "Application publisher Writer must target only the existing Dev repository")
+    expected_or_unknown(writer, writer_address, ("member",),
+                        f"serviceAccount:{APP_PUBLISHER_EMAIL}",
+                        changes, creates, "application publisher repository writer")
+
+    viewer_address = "google_project_iam_member.dev_app_deployer_cluster_viewer[0]"
+    viewer = values[viewer_address]
+    require(viewer.get("project") in (PROJECT, PROJECT_NUMBER)
+            and viewer.get("role") == "roles/container.clusterViewer",
+            "Application deployer must use the reviewed GKE clusterViewer role")
+    expected_or_unknown(viewer, viewer_address, ("member",),
+                        f"serviceAccount:{APP_DEPLOYER_EMAIL}",
+                        changes, creates, "application deployer GKE connect identity")
+    require(viewer.get("condition") in (None, []),
+            "GKE DNS endpoint connect grant must be project-level and unconditional")
+
+    secret_address = "google_secret_manager_secret_iam_member.dev_app_gsa_secret_access[0]"
+    secret_grant = values[secret_address]
+    require(secret_grant.get("role") == "roles/secretmanager.secretAccessor",
+            "Application runtime secret role must be Secret Manager Secret Accessor")
+    expected_or_unknown(secret_grant, secret_address, ("secret_id",),
+                        f"projects/{PROJECT}/secrets/helpdesk-dev-db-connection",
+                        changes, creates, "application runtime connection-secret target")
+    expected_or_unknown(secret_grant, secret_address, ("member",),
+                        f"serviceAccount:helpdesk-app-dev@{PROJECT}.iam.gserviceaccount.com",
+                        changes, creates, "application runtime Google service account")
+
+
 def check_phase9_legacy_bindings(values):
     """Allow removal only of the exact pre-fix conditional Phase 9 IAM grants."""
     member = f"serviceAccount:{MIGRATION_RUNNER_EMAIL}"
@@ -583,11 +740,19 @@ def check_references(plan):
         ("google_service_account_iam_member.dev_migration_workload_identity", "service_account_id", "google_service_account.dev_migration[0].name"),
         ("google_service_account_iam_member.dev_app_support_images_wif", "service_account_id", "google_service_account.dev_app_support_image_publisher[0].name"),
         ("google_service_account_iam_member.dev_app_migration_runner_wif", "service_account_id", "google_service_account.dev_app_migration_runner[0].name"),
+        ("google_service_account_iam_member.dev_app_publisher_wif", "service_account_id", "google_service_account.dev_app_publisher[0].name"),
+        ("google_service_account_iam_member.dev_app_deployer_wif", "service_account_id", "google_service_account.dev_app_deployer[0].name"),
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "member", "google_service_account.dev_app_migration_runner[0].member"),
+        ("google_project_iam_member.dev_app_deployer_cluster_viewer", "member", "google_service_account.dev_app_deployer[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
         ("google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
         ("google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access", "member", "google_service_account.dev_migration[0].member"),
+        ("google_secret_manager_secret_iam_member.dev_app_gsa_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
+        ("google_secret_manager_secret_iam_member.dev_app_gsa_secret_access", "member", "google_service_account.dev_app[0].member"),
+        ("google_artifact_registry_repository_iam_member.dev_app_publisher_writer", "member", "google_service_account.dev_app_publisher[0].member"),
+        ("google_artifact_registry_repository_iam_member.dev_app_publisher_writer", "location", "google_artifact_registry_repository.dev_images[0].location"),
+        ("google_artifact_registry_repository_iam_member.dev_app_publisher_writer", "repository", "google_artifact_registry_repository.dev_images[0].repository_id"),
     ):
         references(resources.get(address, {}).get("expressions", {}).get(field, {}), expected, address,
                    exact=True)
@@ -599,6 +764,8 @@ def check_references(plan):
         ("google_service_account.dev_migration", "helpdesk-migrate-dev"),
         ("google_service_account.dev_app_support_image_publisher", SUPPORT_PUBLISHER_ACCOUNT_ID),
         ("google_service_account.dev_app_migration_runner", MIGRATION_RUNNER_ACCOUNT_ID),
+        ("google_service_account.dev_app_publisher", APP_PUBLISHER_ACCOUNT_ID),
+        ("google_service_account.dev_app_deployer", APP_DEPLOYER_ACCOUNT_ID),
     ):
         expressions = resources.get(address, {}).get("expressions", {})
         require(expressions.get("account_id", {}).get("constant_value") == account_id,
@@ -625,6 +792,10 @@ def check_references(plan):
          "service_account_id", "google_service_account.dev_app_migration_runner[0].name"),
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "roles/container.clusterViewer",
          "member", "google_service_account.dev_app_migration_runner[0].member"),
+        ("google_project_iam_member.dev_app_deployer_cluster_viewer", "roles/container.clusterViewer",
+         "member", "google_service_account.dev_app_deployer[0].member"),
+        ("google_artifact_registry_repository_iam_member.dev_app_publisher_writer", "roles/artifactregistry.writer",
+         "member", "google_service_account.dev_app_publisher[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "roles/secretmanager.secretAccessor",
          "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "roles/secretmanager.secretAccessor",
@@ -633,6 +804,10 @@ def check_references(plan):
          "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
         ("google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access", "roles/secretmanager.secretAccessor",
          "member", "google_service_account.dev_migration[0].member"),
+        ("google_secret_manager_secret_iam_member.dev_app_gsa_secret_access", "roles/secretmanager.secretAccessor",
+         "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
+        ("google_secret_manager_secret_iam_member.dev_app_gsa_secret_access", "roles/secretmanager.secretAccessor",
+         "member", "google_service_account.dev_app[0].member"),
     )
     for address, role, identity_field, identity_reference in role_specs:
         expressions = resources.get(address, {}).get("expressions", {})
@@ -667,6 +842,22 @@ def check_references(plan):
             == SUPPORT_PUBLISHER_MAPPING,
             "Migration-runner provider trust expression or mapping is not exact")
 
+    app_provider_specs = (
+        ("google_iam_workload_identity_pool_provider.dev_app_publish",
+         APP_PUBLISHER_PROVIDER_ID, APP_PUBLISHER_CONDITION, "application publisher"),
+        ("google_iam_workload_identity_pool_provider.dev_app_deploy",
+         APP_DEPLOYER_PROVIDER_ID, APP_DEPLOYER_CONDITION, "application deployer"),
+    )
+    for address, provider_id, condition, label in app_provider_specs:
+        expressions = resources.get(address, {}).get("expressions", {})
+        require(expressions.get("workload_identity_pool_id", {}).get("constant_value") == "helpdesk-github"
+                and expressions.get("workload_identity_pool_provider_id", {}).get("constant_value") == provider_id,
+                f"Unexpected {label} provider identity expression")
+        references(expressions.get("project", {}), "var.project_id", f"{label} provider project", exact=True)
+        require(normalize_cel(expressions.get("attribute_condition", {}).get("constant_value")) == condition
+                and expressions.get("attribute_mapping", {}).get("constant_value") == APP_DELIVERY_MAPPING,
+                f"{label} provider trust condition or mapping expression is not exact")
+
     migration_binding = resources.get("google_service_account_iam_member.dev_app_migration_runner_wif", {})
     migration_binding_expressions = migration_binding.get("expressions", {})
     require(migration_binding_expressions.get("role", {}).get("constant_value")
@@ -677,6 +868,22 @@ def check_references(plan):
     references(migration_binding_expressions.get("service_account_id", {}),
                "google_service_account.dev_app_migration_runner[0].name",
                "migration-runner Workload Identity target", exact=True)
+
+    app_binding_specs = (
+        ("google_service_account_iam_member.dev_app_publisher_wif",
+         APP_PUBLISHER_MEMBER, "google_service_account.dev_app_publisher[0].name",
+         "application publisher"),
+        ("google_service_account_iam_member.dev_app_deployer_wif",
+         APP_DEPLOYER_MEMBER, "google_service_account.dev_app_deployer[0].name",
+         "application deployer"),
+    )
+    for address, member, target, label in app_binding_specs:
+        expressions = resources.get(address, {}).get("expressions", {})
+        require(expressions.get("role", {}).get("constant_value") == "roles/iam.workloadIdentityUser"
+                and expressions.get("member", {}).get("constant_value") == member,
+                f"{label} impersonation role or exact Environment subject is not configured")
+        references(expressions.get("service_account_id", {}), target,
+                   f"{label} Workload Identity target", exact=True)
 
     cluster_viewer = resources.get("google_project_iam_member.dev_app_migration_runner_cluster_viewer", {})
     cluster_viewer_expressions = cluster_viewer.get("expressions", {})
@@ -690,6 +897,19 @@ def check_references(plan):
                "migration-runner GKE connect identity", exact=True)
     require(not cluster_viewer_expressions.get("condition"),
             "Migration-runner DNS endpoint connect grant must not use an IAM condition")
+
+    app_cluster_viewer = resources.get("google_project_iam_member.dev_app_deployer_cluster_viewer", {})
+    app_cluster_viewer_expressions = app_cluster_viewer.get("expressions", {})
+    require(app_cluster_viewer_expressions.get("role", {}).get("constant_value")
+            == "roles/container.clusterViewer",
+            "Application deployer GKE clusterViewer role is not exact")
+    references(app_cluster_viewer_expressions.get("project", {}), "var.project_id",
+               "application deployer IAM project", exact=True)
+    references(app_cluster_viewer_expressions.get("member", {}),
+               "google_service_account.dev_app_deployer[0].member",
+               "application deployer GKE connect identity", exact=True)
+    require(not app_cluster_viewer_expressions.get("condition"),
+            "Application deployer DNS endpoint grant must not use an IAM condition")
 
     support_binding = resources.get("google_service_account_iam_member.dev_app_support_images_wif", {})
     support_binding_expressions = support_binding.get("expressions", {})
@@ -917,6 +1137,8 @@ def permitted_drift(entry):
         CLUSTER_ADDRESS: PHASE7[CLUSTER_ADDRESS],
         PHASE8_PROVIDER_ADDRESS: PHASE8[PHASE8_PROVIDER_ADDRESS],
         MIGRATION_RUNNER_PROVIDER_ADDRESS: "google_iam_workload_identity_pool_provider",
+        **{address: "google_iam_workload_identity_pool_provider"
+           for address in APP_DELIVERY_PROVIDER_READBACKS},
         ARTIFACT_READER_IAM_ADDRESS: "google_artifact_registry_repository_iam_member",
         **{address: "google_project_iam_member" for address in PROJECT_IAM_READBACKS},
         **{secret: PHASE7[secret] for secret in SECRET_READBACK_NAMES},
@@ -927,6 +1149,25 @@ def permitted_drift(entry):
     before, after = change.get("before"), change.get("after")
     if change.get("actions") != ["update"] or not isinstance(before, dict) or not isinstance(after, dict):
         return False
+
+    if address in APP_DELIVERY_PROVIDER_READBACKS:
+        provider_id, condition = APP_DELIVERY_PROVIDER_READBACKS[address]
+        if not all(app_delivery_provider_identity_matches(snapshot, provider_id, condition)
+                   for snapshot in (before, after)):
+            return False
+
+        before_oidc, after_oidc = single_block(before.get("oidc")), single_block(after.get("oidc"))
+        before_audiences = before_oidc.get("allowed_audiences", MISSING)
+        after_audiences = after_oidc.get("allowed_audiences", MISSING)
+        empty_audiences = (MISSING, None, [])
+        if (before_audiences not in empty_audiences or after_audiences not in empty_audiences
+                or before_audiences == after_audiences):
+            return False
+
+        before_copy, after_copy = deepcopy(before), deepcopy(after)
+        single_block(before_copy.get("oidc")).pop("allowed_audiences", None)
+        single_block(after_copy.get("oidc")).pop("allowed_audiences", None)
+        return before_copy == after_copy
 
     if address == PHASE8_PROVIDER_ADDRESS:
         if not all(support_provider_identity_matches(snapshot) for snapshot in (before, after)):
@@ -1323,6 +1564,10 @@ def check_plan(plan):
     require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"]) for address in PHASE8),
             "Phase 8 update, replacement, or deletion requires review")
     migration_runner_creates = {address for address in PHASE9 if actions.get(address) == ["create"]}
+    app_delivery_creates = {address for address in PHASE10 if actions.get(address) == ["create"]}
+    require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"])
+                for address in PHASE10),
+            "Phase 10 update, replacement, or deletion requires review")
     cluster_viewer_address = MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS
     cluster_viewer_actions = actions.get(cluster_viewer_address, ["no-op"])
     legacy_dns_actions = actions.get(MIGRATION_RUNNER_DNS_BINDING_ADDRESS, ["no-op"])
@@ -1352,6 +1597,7 @@ def check_plan(plan):
     prior_phase7 = prior_addresses & set(PHASE7)
     prior_phase8 = prior_addresses & set(PHASE8)
     prior_phase9 = prior_addresses & set(PHASE9)
+    prior_phase10 = prior_addresses & set(PHASE10)
     prior_legacy_dns = MIGRATION_RUNNER_DNS_BINDING_ADDRESS in prior_addresses
     full_initial_create = creates == set(PHASE7) and not prior_phase7
     exact_apply12_recovery = creates == APPLY12_REMAINING and prior_phase7 == APPLY12_COMPLETED
@@ -1389,11 +1635,21 @@ def check_plan(plan):
         not migration_runner_creates and prior_phase9 == set(PHASE9)
         and not prior_legacy_dns and cluster_viewer_actions == ["no-op"]
     )
+    app_delivery_initial_create = (
+        not creates and not support_creates and not migration_runner_creates
+        and prior_phase7 == set(PHASE7) and prior_phase8 == set(PHASE8)
+        and prior_phase9 == set(PHASE9) and not prior_phase10
+        and app_delivery_creates == set(PHASE10)
+    )
+    app_delivery_complete = (
+        not app_delivery_creates and prior_phase10 == set(PHASE10)
+    )
     secret_access_recovery = (
         creates == {MIGRATION_GSA_SECRET_ACCESS_ADDRESS}
         and prior_phase7 == set(PHASE7) - {MIGRATION_GSA_SECRET_ACCESS_ADDRESS}
         and support_images_complete
         and migration_runner_complete
+        and app_delivery_complete
     )
     require(not prior_phase9 or prior_phase9 == set(PHASE9)
             or migration_runner_iam_remediation,
@@ -1408,6 +1664,8 @@ def check_plan(plan):
     require(migration_runner_initial_create or migration_runner_complete
             or migration_runner_iam_remediation,
             "Phase 9 migration-runner resources must be created as one exact batch after Phase 8, or already be complete")
+    require(app_delivery_initial_create or app_delivery_complete,
+            "Phase 10 application delivery identities must be created as one exact batch after Phase 9, or already be complete")
     if exact_phase8_provider_recovery:
         prior_phase8_values = {
             resource["address"]: resource.get("values", {})
@@ -1434,8 +1692,9 @@ def check_plan(plan):
     check_phase7(by_address, plan, creates)
     check_phase8(by_address, plan, support_creates)
     check_phase9(by_address, plan, migration_runner_creates)
+    check_phase10(by_address, plan, app_delivery_creates)
     check_references(plan)
-    return "apply" if (creates or support_creates or migration_runner_creates
+    return "apply" if (creates or support_creates or migration_runner_creates or app_delivery_creates
                         or migration_runner_iam_remediation or secret_access_recovery) else "no_changes"
 
 
@@ -1680,6 +1939,29 @@ def migration_provider_identity_matches(snapshot):
     return all(migration_provider_identity_checks(snapshot).values())
 
 
+def app_delivery_provider_identity_checks(snapshot, provider_id, condition):
+    expected_resource_id = (
+        f"projects/{PROJECT}/locations/global/workloadIdentityPools/"
+        f"helpdesk-github/providers/{provider_id}"
+    )
+    oidc = single_block(snapshot.get("oidc"))
+    return {
+        "project": snapshot.get("project") in (PROJECT, PROJECT_NUMBER),
+        "pool": snapshot.get("workload_identity_pool_id") == "helpdesk-github",
+        "provider": snapshot.get("workload_identity_pool_provider_id") == provider_id,
+        "enabled": snapshot.get("disabled") is False,
+        "mapping": snapshot.get("attribute_mapping") == APP_DELIVERY_MAPPING,
+        "attribute_condition": normalize_cel(snapshot.get("attribute_condition"))
+        == normalize_cel(condition),
+        "issuer": oidc.get("issuer_uri") == "https://token.actions.githubusercontent.com",
+        "resource_id": snapshot.get("id", expected_resource_id) == expected_resource_id,
+    }
+
+
+def app_delivery_provider_identity_matches(snapshot, provider_id, condition):
+    return all(app_delivery_provider_identity_checks(snapshot, provider_id, condition).values())
+
+
 def gke_node_config_readback_matches(value):
     """Check the security identity on one GKE-managed Autopilot node config."""
     return all(gke_node_config_readback_checks(value).values())
@@ -1827,6 +2109,19 @@ def diagnose_drift(plan):
                                           for name, matches in checks.items()))
                 lines.append("  " + snapshot_name + " oidc[0].allowed_audiences: "
                              + empty_set_status(oidc.get("allowed_audiences", MISSING)))
+        if (entry.get("address") in APP_DELIVERY_PROVIDER_READBACKS
+                and isinstance(before, dict) and isinstance(after, dict)):
+            provider_id, condition = APP_DELIVERY_PROVIDER_READBACKS[entry["address"]]
+            for snapshot_name, snapshot in (("before", before), ("after", after)):
+                oidc = single_block(snapshot.get("oidc"))
+                checks = app_delivery_provider_identity_checks(snapshot, provider_id, condition)
+                lines.append("  " + snapshot_name + " app-delivery provider identity: "
+                             + ("expected" if all(checks.values()) else "unexpected (values withheld)"))
+                lines.append("  " + snapshot_name + " app-delivery provider identity checks: "
+                             + ", ".join(f"{name}={'expected' if matches else 'unexpected'}"
+                                          for name, matches in checks.items()))
+                lines.append("  " + snapshot_name + " oidc[0].allowed_audiences: "
+                             + empty_set_status(oidc.get("allowed_audiences", MISSING)))
         if entry.get("address") in PROJECT_IAM_READBACKS and isinstance(before, dict) and isinstance(after, dict):
             expected_role, expected_member = PROJECT_IAM_READBACKS[entry["address"]]
             lines.append("  project representation: before=" + project_readback_status(before.get("project", MISSING))
@@ -1911,7 +2206,7 @@ def diagnose_drift(plan):
 
 def verify_deployment(paths):
     require(len(paths) == DEPLOYMENT_EVIDENCE_PATH_COUNT,
-            "Expected read-only Phase 7-8 evidence, Terraform state, and addresses")
+            "Expected read-only Phase 7-10 evidence, Terraform state, and addresses")
     network, subnet, address, connections, registry, registry_iam, project_iam, sql, databases, outputs = [read_json(p) for p in paths[:10]]
     state_addresses = set(Path(paths[-1]).read_text(encoding="utf-8").splitlines())
     require(state_addresses == set(PLANNED_EXPECTED), "Dev state does not contain exactly the approved resources")
@@ -2014,6 +2309,11 @@ def verify_deployment(paths):
                   registry_iam, project_iam)
     verify_phase9(read_json(paths[24]), read_json(paths[25]), read_json(paths[26]),
                   project_iam, app_secret_iam, admin_secret_iam, outputs)
+    verify_phase10(
+        read_json(paths[27]), read_json(paths[28]), read_json(paths[29]),
+        read_json(paths[30]), read_json(paths[31]), read_json(paths[32]),
+        registry_iam, project_iam, app_secret_iam, admin_secret_iam,
+    )
     resources = state.get("values", {}).get("root_module", {}).get("resources", [])
     protected = {
         "google_container_cluster.dev[0]": "GKE",
@@ -2059,8 +2359,13 @@ def verify_phase8(publisher_sa, publisher_sa_iam, provider, registry_iam, projec
     publisher_member = f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}"
     writer_bindings = [set(binding.get("members", [])) for binding in registry_iam.get("bindings", [])
                        if binding.get("role") == "roles/artifactregistry.writer"]
-    require(writer_bindings == [{publisher_member}],
-            "Artifact Registry Writer is not limited to the supporting-image publisher on the Dev repository")
+    allowed_publishers = {
+        publisher_member,
+        f"serviceAccount:{APP_PUBLISHER_EMAIL}",
+    }
+    require(len(writer_bindings) == 1 and publisher_member in writer_bindings[0]
+            and writer_bindings[0] <= allowed_publishers,
+            "Artifact Registry Writer contains an unexpected principal on the Dev repository")
     require(not has_binding(project_iam, "roles/artifactregistry.writer", publisher_member)
             and not has_binding(project_iam, "roles/artifactregistry.admin", publisher_member),
             "Supporting-image publisher has a project-wide Artifact Registry grant")
@@ -2114,6 +2419,102 @@ def verify_phase9(runner_sa, runner_sa_iam, provider, project_iam, app_secret_ia
             "Migration runner has direct Cloud SQL or Secret Manager project access")
     require(outputs.get("migration_runner_service_account", {}).get("value") == MIGRATION_RUNNER_EMAIL,
             "Terraform migration-runner service-account output mismatch")
+
+
+def verify_phase10(publisher_sa, publisher_sa_iam, publisher_provider,
+                   deployer_sa, deployer_sa_iam, deployer_provider,
+                   registry_iam, project_iam, app_secret_iam, admin_secret_iam):
+    """Verify only the two exact app-delivery identities and their resource-scoped grants."""
+    for account, email, label in (
+        (publisher_sa, APP_PUBLISHER_EMAIL, "application publisher"),
+        (deployer_sa, APP_DEPLOYER_EMAIL, "application deployer"),
+    ):
+        expected_display_name = (APP_PUBLISHER_DISPLAY_NAME if label == "application publisher"
+                                 else APP_DEPLOYER_DISPLAY_NAME)
+        require(account.get("email") == email and account.get("displayName") == expected_display_name
+                and account.get("disabled") is not True,
+                f"{label} service account identity or status mismatch")
+
+    for policy, member, label in (
+        (publisher_sa_iam, APP_PUBLISHER_MEMBER, "application publisher"),
+        (deployer_sa_iam, APP_DEPLOYER_MEMBER, "application deployer"),
+    ):
+        check_iam(policy, label + " service account")
+        wif_bindings = [set(binding.get("members", [])) for binding in policy.get("bindings", [])
+                        if binding.get("role") == "roles/iam.workloadIdentityUser"]
+        require(wif_bindings == [{member}] and len(policy.get("bindings", [])) == 1,
+                f"{label} impersonation is not limited to the exact protected Environment subject")
+
+    provider_specs = (
+        (publisher_provider, APP_PUBLISHER_PROVIDER_ID, APP_PUBLISHER_CONDITION,
+         "application publisher"),
+        (deployer_provider, APP_DEPLOYER_PROVIDER_ID, APP_DEPLOYER_CONDITION,
+         "application deployer"),
+    )
+    for provider, provider_id, condition, label in provider_specs:
+        expected_names = {
+            f"projects/{PROJECT}/locations/global/workloadIdentityPools/helpdesk-github/providers/{provider_id}",
+            f"projects/{PROJECT_NUMBER}/locations/global/workloadIdentityPools/helpdesk-github/providers/{provider_id}",
+        }
+        require(provider.get("name") in expected_names and provider.get("state") == "ACTIVE",
+                f"{label} Workload Identity provider identity or status mismatch")
+        require(provider.get("disabled") is False
+                and provider.get("attributeMapping") == APP_DELIVERY_MAPPING
+                and normalize_cel(provider.get("attributeCondition")) == condition
+                and provider.get("oidc", {}).get("issuerUri") == "https://token.actions.githubusercontent.com",
+                f"{label} provider trust configuration mismatch")
+
+    publisher_member = f"serviceAccount:{APP_PUBLISHER_EMAIL}"
+    deployer_member = f"serviceAccount:{APP_DEPLOYER_EMAIL}"
+    publisher_project_bindings = [binding for binding in project_iam.get("bindings", [])
+                                  if publisher_member in binding.get("members", [])]
+    deployer_project_bindings = [binding for binding in project_iam.get("bindings", [])
+                                 if deployer_member in binding.get("members", [])]
+    require(not publisher_project_bindings,
+            "Application publisher has an unapproved project-level IAM grant")
+    require(len(deployer_project_bindings) == 1
+            and deployer_project_bindings[0].get("role") == "roles/container.clusterViewer"
+            and not deployer_project_bindings[0].get("condition"),
+            "Application deployer must have only the unconditional GKE DNS endpoint clusterViewer grant")
+
+    writer_members = {
+        member
+        for binding in registry_iam.get("bindings", [])
+        if binding.get("role") == "roles/artifactregistry.writer"
+        for member in binding.get("members", [])
+    }
+    require(writer_members == {
+        f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}",
+        publisher_member,
+    }, "Dev repository Writer must be limited to the two approved publisher service accounts")
+    require(not has_binding(project_iam, "roles/artifactregistry.writer", publisher_member)
+            and not has_binding(project_iam, "roles/artifactregistry.admin", publisher_member),
+            "Application publisher has a project-wide Artifact Registry grant")
+
+    runtime_member = f"serviceAccount:helpdesk-app-dev@{PROJECT}.iam.gserviceaccount.com"
+    app_secret_bindings = [set(binding.get("members", [])) for binding in app_secret_iam.get("bindings", [])
+                           if binding.get("role") == "roles/secretmanager.secretAccessor"]
+    expected_app_secret_members = {
+        f"principal://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/"
+        f"workloadIdentityPools/{PROJECT}.svc.id.goog/subject/ns/helpdesk-dev/sa/helpdesk-dev-app",
+        runtime_member,
+    }
+    require(app_secret_bindings == [expected_app_secret_members]
+            and len(app_secret_iam.get("bindings", [])) == 1,
+            "Runtime Google service account must access only the app connection secret")
+    require(not any(runtime_member in binding.get("members", [])
+                    and binding.get("role") == "roles/secretmanager.secretAccessor"
+                    for binding in admin_secret_iam.get("bindings", [])),
+            "Runtime application service account has access to the administrator password secret")
+    require(not any(runtime_member in binding.get("members", [])
+                    and str(binding.get("role", "")).startswith("roles/secretmanager.")
+                    for binding in project_iam.get("bindings", [])),
+            "Runtime application service account has project-wide Secret Manager access")
+    require(not any(deployer_member in binding.get("members", [])
+                    and str(binding.get("role", "")).startswith(
+                        ("roles/artifactregistry.", "roles/cloudsql.", "roles/secretmanager."))
+                    for binding in project_iam.get("bindings", [])),
+            "Application deployer has an unapproved project-level data or registry grant")
 
 
 def verify_phase7(cluster, node_sa, app_sa, migration_sa, app_secret, admin_secret,
@@ -2205,6 +2606,8 @@ def verify_phase7(cluster, node_sa, app_sa, migration_sa, app_secret, admin_secr
             expected_members.add(
                 f"serviceAccount:helpdesk-migrate-dev@{PROJECT}.iam.gserviceaccount.com"
             )
+        else:
+            expected_members.add(f"serviceAccount:helpdesk-app-dev@{PROJECT}.iam.gserviceaccount.com")
         bindings = [set(b.get("members", [])) for b in policy.get("bindings", [])
                     if b.get("role") == "roles/secretmanager.secretAccessor"]
         require(bindings == [expected_members],
@@ -2248,7 +2651,9 @@ def main():
                              "CLUSTER NODE_SA APP_SA MIGRATION_SA APP_SECRET ADMIN_SECRET APP_SA_IAM MIGRATION_SA_IAM "
                              "APP_SECRET_IAM ADMIN_SECRET_IAM STATE_JSON SUPPORT_IMAGE_PUBLISHER_SA "
                              "SUPPORT_IMAGE_PUBLISHER_SA_IAM SUPPORT_IMAGE_PROVIDER MIGRATION_RUNNER_SA "
-                             "MIGRATION_RUNNER_SA_IAM MIGRATION_RUNNER_PROVIDER STATE_LIST")
+                             "MIGRATION_RUNNER_SA_IAM MIGRATION_RUNNER_PROVIDER APP_PUBLISHER_SA "
+                             "APP_PUBLISHER_SA_IAM APP_PUBLISHER_PROVIDER APP_DEPLOYER_SA "
+                             "APP_DEPLOYER_SA_IAM APP_DEPLOYER_PROVIDER STATE_LIST")
     except (ValueError, KeyError, IndexError, TypeError, OSError, json.JSONDecodeError) as error:
         print(f"Dev infrastructure guard stopped: {error}", file=sys.stderr)
         sys.exit(1)

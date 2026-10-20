@@ -222,6 +222,12 @@ jobs:
           gcloud iam service-accounts describe helpdesk-app-migr-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/migration-runner-sa.json"
           gcloud iam service-accounts get-iam-policy helpdesk-app-migr-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/migration-runner-sa-iam.json"
           gcloud iam workload-identity-pools providers describe github-app-migration-dev --workload-identity-pool=helpdesk-github --location=global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/migration-runner-provider.json"
+          gcloud iam service-accounts describe helpdesk-app-publisher-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-publisher-sa.json"
+          gcloud iam service-accounts get-iam-policy helpdesk-app-publisher-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-publisher-sa-iam.json"
+          gcloud iam workload-identity-pools providers describe github-app-publish-dev --workload-identity-pool=helpdesk-github --location=global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-publisher-provider.json"
+          gcloud iam service-accounts describe helpdesk-app-deployer-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-deployer-sa.json"
+          gcloud iam service-accounts get-iam-policy helpdesk-app-deployer-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-deployer-sa-iam.json"
+          gcloud iam workload-identity-pools providers describe github-app-deploy-dev --workload-identity-pool=helpdesk-github --location=global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-deployer-provider.json"
           terraform state list > "$RUNNER_TEMP/state-addresses.txt"
           terraform output -json > "$RUNNER_TEMP/outputs.json"
           terraform show -json > "$RUNNER_TEMP/state.json"
@@ -237,5 +243,8 @@ jobs:
             "$RUNNER_TEMP/state.json" "$RUNNER_TEMP/support-image-publisher-sa.json" \
             "$RUNNER_TEMP/support-image-publisher-sa-iam.json" "$RUNNER_TEMP/support-image-provider.json" \
             "$RUNNER_TEMP/migration-runner-sa.json" "$RUNNER_TEMP/migration-runner-sa-iam.json" \
-            "$RUNNER_TEMP/migration-runner-provider.json" \
+            "$RUNNER_TEMP/migration-runner-provider.json" "$RUNNER_TEMP/app-publisher-sa.json" \
+            "$RUNNER_TEMP/app-publisher-sa-iam.json" "$RUNNER_TEMP/app-publisher-provider.json" \
+            "$RUNNER_TEMP/app-deployer-sa.json" "$RUNNER_TEMP/app-deployer-sa-iam.json" \
+            "$RUNNER_TEMP/app-deployer-provider.json" \
             "$RUNNER_TEMP/state-addresses.txt"
