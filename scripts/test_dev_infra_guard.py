@@ -2198,6 +2198,37 @@ class GuardTests(unittest.TestCase):
         self.assertNotIn(VPC_PATH, report)
         self.assertNotIn(SUBNET_PATHS[0], report)
 
+    def test_gke_diagnostic_describes_node_readback_shape_without_values(self):
+        drift = gke_resource_labels_drift()
+        before = drift["change"]["before"]
+        after = drift["change"]["after"]
+        before["node_config"] = None
+        after["node_config"] = [{
+            "service_account": "private-service-account@example.iam.gserviceaccount.com",
+            "metadata": {"startup-script": "do-not-print-this-value"},
+        }]
+        before["node_pool"] = None
+        after["node_pool"] = [{
+            "name": "private-pool-name",
+            "node_config": [{"machine_type": "private-machine-type"}],
+        }]
+
+        report = "\n".join(diagnose_drift({"resource_drift": [drift]}))
+
+        self.assertIn("node_config readback structure: before=null; after=list(count=1; items=object(", report)
+        self.assertIn("service_account:string", report)
+        self.assertIn("metadata:map(contents withheld)", report)
+        self.assertIn("node_pool readback structure: before=null; after=list(count=1; items=object(", report)
+        self.assertIn("node_config:list(count=1; items=object(machine_type:string))", report)
+        for private_value in (
+            "private-service-account@example.iam.gserviceaccount.com",
+            "do-not-print-this-value",
+            "private-pool-name",
+            "private-machine-type",
+            "startup-script",
+        ):
+            self.assertNotIn(private_value, report)
+
     def test_gke_label_drift_rejects_unexpected_labels_or_cluster_changes(self):
         for mutate in (
             lambda d: d["change"]["after"].update(resource_labels={"owner": "someone"}),
