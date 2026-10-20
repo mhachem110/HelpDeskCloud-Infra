@@ -333,12 +333,20 @@ jobs:
         with:
           install_components: kubectl,gke-gcloud-auth-plugin
 
+      - name: Install gcloud for HTTPS API readiness checks
+        if: inputs.target == 'https-foundation'
+        uses: google-github-actions/setup-gcloud@v3
+
       - name: Prepare selected HTTPS target
         id: prepare-target
         env:
           COMPONENT: ${{ inputs.target }}
           IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
         run: bash ../scripts/prepare_dev_https_target.sh
+
+      - name: Report HTTPS API readiness
+        if: inputs.target == 'https-foundation'
+        run: python ../scripts/dev_https_api_preflight.py
 
       - name: Install Terraform 1.16.2
         uses: hashicorp/setup-terraform@v4.0.1
@@ -425,6 +433,10 @@ jobs:
       - name: Install gcloud for HTTPS resource checks
         if: inputs.target == 'https-foundation'
         uses: google-github-actions/setup-gcloud@v3
+
+      - name: Require one-time HTTPS API bootstrap
+        if: inputs.target == 'https-foundation'
+        run: python ../scripts/dev_https_api_preflight.py --require-enabled
 
       - name: Install GKE access tools for backend discovery
         if: inputs.target == 'https-access'

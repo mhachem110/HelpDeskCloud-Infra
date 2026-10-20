@@ -9,8 +9,6 @@ from pathlib import Path
 
 PROJECT = "helpdeskcloud-capstone-511905"
 FOUNDATION = {
-    "google_project_service.certificate_manager": "google_project_service",
-    "google_project_service.iap": "google_project_service",
     "google_compute_global_address.https": "google_compute_global_address",
     "google_compute_ssl_policy.https": "google_compute_ssl_policy",
     "google_certificate_manager_dns_authorization.https": "google_certificate_manager_dns_authorization",
@@ -92,17 +90,6 @@ def configuration_references(plan, address, expression_path):
 def check_foundation(plan, hostname):
     values = resource_values(plan, FOUNDATION)
     changes = check_actions(plan, FOUNDATION)
-    expected_services = {
-        "google_project_service.certificate_manager": "certificatemanager.googleapis.com",
-        "google_project_service.iap": "iap.googleapis.com",
-    }
-    for address, service in expected_services.items():
-        after = changes[address].get("change", {}).get("after") or values[address].get("values", {})
-        require(after.get("project") == PROJECT and after.get("service") == service,
-                "project API enablement is outside the reviewed exact services")
-        if after.get("disable_on_destroy") is not None:
-            require(after.get("disable_on_destroy") is False, "HTTPS service APIs must remain enabled on destroy")
-
     address = changes["google_compute_global_address.https"].get("change", {}).get("after") or values[
         "google_compute_global_address.https"]["values"]
     # The provider omits these two configured defaults from plan JSON in v7.8.0;
@@ -198,7 +185,7 @@ def main():
     args = parser.parse_args()
     if args.command == "check-foundation":
         check_foundation(read_json(args.plan_json), args.hostname)
-        print("HTTPS foundation plan contains only the exact retained IP, TLS/certificate resources and APIs.")
+        print("HTTPS foundation plan contains only the exact retained IP, TLS and certificate resources.")
     elif args.command == "check-access":
         check_access(read_json(args.plan_json), args.backend_service_name, args.allowed_email)
         print("IAP access plan contains only the exact single-user backend grant.")
