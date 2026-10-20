@@ -81,6 +81,9 @@ PHASE10 = {
 }
 DEPLOYMENT_EVIDENCE_PATH_COUNT = 34
 ARTIFACT_READER_IAM_ADDRESS = "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]"
+ARTIFACT_SUPPORT_WRITER_IAM_ADDRESS = (
+    "google_artifact_registry_repository_iam_member.dev_app_support_images_writer[0]"
+)
 SUPPORT_PUBLISHER_ACCOUNT_ID = "helpdesk-app-support-pub-dev"
 SUPPORT_PUBLISHER_DISPLAY_NAME = "helpdesk-app-support-image-publisher-dev"
 SUPPORT_PUBLISHER_EMAIL = f"{SUPPORT_PUBLISHER_ACCOUNT_ID}@{PROJECT}.iam.gserviceaccount.com"
@@ -1162,6 +1165,7 @@ def permitted_drift(entry):
         **{address: "google_iam_workload_identity_pool_provider"
            for address in APP_DELIVERY_PROVIDER_READBACKS},
         ARTIFACT_READER_IAM_ADDRESS: "google_artifact_registry_repository_iam_member",
+        ARTIFACT_SUPPORT_WRITER_IAM_ADDRESS: "google_artifact_registry_repository_iam_member",
         **{address: "google_project_iam_member" for address in PROJECT_IAM_READBACKS},
         **{secret: PHASE7[secret] for secret in SECRET_READBACK_NAMES},
         **{address: "google_secret_manager_secret_iam_member" for address in SECRET_IAM_READBACKS},
@@ -1356,13 +1360,18 @@ def permitted_drift(entry):
         return ({key: value for key, value in before.items() if key != "etag"}
                 == {key: value for key, value in after.items() if key != "etag"})
 
-    if address == ARTIFACT_READER_IAM_ADDRESS:
-        expected_member = f"serviceAccount:helpdesk-gke-node-dev@{PROJECT}.iam.gserviceaccount.com"
+    if address in (ARTIFACT_READER_IAM_ADDRESS, ARTIFACT_SUPPORT_WRITER_IAM_ADDRESS):
         expected_repositories = (REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH)
+        if address == ARTIFACT_READER_IAM_ADDRESS:
+            expected_role = "roles/artifactregistry.reader"
+            expected_member = f"serviceAccount:helpdesk-gke-node-dev@{PROJECT}.iam.gserviceaccount.com"
+        else:
+            expected_role = "roles/artifactregistry.writer"
+            expected_member = f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}"
         if any(snapshot.get("project") not in (PROJECT, PROJECT_NUMBER)
                or snapshot.get("location") != "us-east1"
                or snapshot.get("repository") not in expected_repositories
-               or snapshot.get("role") != "roles/artifactregistry.reader"
+               or snapshot.get("role") != expected_role
                or snapshot.get("member") != expected_member
                for snapshot in (before, after)):
             return False
@@ -1371,9 +1380,9 @@ def permitted_drift(entry):
                 or not isinstance(after_etag, str) or not after_etag
                 or before_etag == after_etag):
             return False
-        # Adding a repository-scoped member changes the repository policy etag.
-        # Permit only that metadata change when the existing reader grant and all
-        # other provider values remain identical.
+        # Repository policy etags are concurrency metadata. Permit only that
+        # field change when the exact reader or support-publisher writer grant
+        # and all other provider values remain identical.
         return ({key: value for key, value in before.items() if key != "etag"}
                 == {key: value for key, value in after.items() if key != "etag"})
 
@@ -2326,18 +2335,26 @@ def diagnose_drift(plan):
             lines.append("  etag representation: before="
                          + etag_readback_status(before.get("etag", MISSING))
                          + "; after=" + etag_readback_status(after.get("etag", MISSING)))
-        if entry.get("address") == ARTIFACT_READER_IAM_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
-            expected_member = f"serviceAccount:helpdesk-gke-node-dev@{PROJECT}.iam.gserviceaccount.com"
+        if (entry.get("address") in (ARTIFACT_READER_IAM_ADDRESS, ARTIFACT_SUPPORT_WRITER_IAM_ADDRESS)
+                and isinstance(before, dict) and isinstance(after, dict)):
             expected_repositories = (REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH)
+            if entry["address"] == ARTIFACT_READER_IAM_ADDRESS:
+                expected_role = "roles/artifactregistry.reader"
+                expected_member = f"serviceAccount:helpdesk-gke-node-dev@{PROJECT}.iam.gserviceaccount.com"
+                identity_label = "repository reader identity"
+            else:
+                expected_role = "roles/artifactregistry.writer"
+                expected_member = f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}"
+                identity_label = "support-image repository writer identity"
             for snapshot_name, snapshot in (("before", before), ("after", after)):
                 identity_matches = (
                     snapshot.get("project") in (PROJECT, PROJECT_NUMBER)
                     and snapshot.get("location") == "us-east1"
                     and snapshot.get("repository") in expected_repositories
-                    and snapshot.get("role") == "roles/artifactregistry.reader"
+                    and snapshot.get("role") == expected_role
                     and snapshot.get("member") == expected_member
                 )
-                lines.append("  " + snapshot_name + " repository reader identity: "
+                lines.append("  " + snapshot_name + " " + identity_label + ": "
                              + ("expected" if identity_matches else "unexpected (values withheld)"))
             lines.append("  etag representation: before="
                          + etag_readback_status(before.get("etag", MISSING))

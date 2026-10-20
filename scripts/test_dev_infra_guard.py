@@ -19,7 +19,8 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              SUPPORT_PUBLISHER_CONDITION, SUPPORT_PUBLISHER_DISPLAY_NAME,
                              SUPPORT_PUBLISHER_EMAIL, SUPPORT_PUBLISHER_MAPPING,
                              SUPPORT_PUBLISHER_MEMBER, SUPPORT_PUBLISHER_PROVIDER_ID,
-                             ARTIFACT_READER_IAM_ADDRESS, PHASE8_COMPLETED,
+                             ARTIFACT_READER_IAM_ADDRESS, ARTIFACT_SUPPORT_WRITER_IAM_ADDRESS,
+                             PHASE8_COMPLETED,
                              PHASE8_PROVIDER_ADDRESS,
                              SECRET_ACCESSOR_ROLE, SECRET_IAM_READBACKS,
                              MIGRATION_RUNNER_ACCOUNT_ID, MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
@@ -953,6 +954,21 @@ def artifact_reader_etag_drift(before_etag="etag-before", after_etag="etag-after
     after = copy.deepcopy(base)
     after["etag"] = after_etag
     return {"mode": "managed", "address": ARTIFACT_READER_IAM_ADDRESS,
+            "type": "google_artifact_registry_repository_iam_member",
+            "change": {"actions": ["update"], "before": base, "after": after}}
+
+
+def artifact_support_writer_etag_drift(before_etag="etag-before", after_etag="etag-after"):
+    project = PROJECT
+    base = {
+        "project": project, "location": "us-east1", "repository": REGISTRY_REPOSITORY_ID,
+        "role": "roles/artifactregistry.writer",
+        "member": f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}",
+        "etag": before_etag,
+    }
+    after = copy.deepcopy(base)
+    after["etag"] = after_etag
+    return {"mode": "managed", "address": ARTIFACT_SUPPORT_WRITER_IAM_ADDRESS,
             "type": "google_artifact_registry_repository_iam_member",
             "change": {"actions": ["update"], "before": base, "after": after}}
 
@@ -2369,8 +2385,35 @@ class GuardTests(unittest.TestCase):
     def test_exact_drift_is_permitted_with_zero_change_plan(self):
         self.plan["resource_changes"] = []
         set_prior_phase7(self.plan, PHASE7)
-        self.plan["resource_drift"] = [label_drift(), metadata_drift()]
+        self.plan["resource_drift"] = [label_drift(), metadata_drift(),
+                                        artifact_support_writer_etag_drift()]
         self.assertEqual(check_plan(self.plan), "no_changes")
+
+    def test_current_dev_readback_drift_batch_passes_without_acknowledgement(self):
+        plan = fixture()
+        plan["resource_changes"] = []
+        set_prior_phase7(plan, PHASE7)
+        app_providers = (
+            "google_iam_workload_identity_pool_provider.dev_app_deploy[0]",
+            "google_iam_workload_identity_pool_provider.dev_app_publish[0]",
+        )
+        project_iam = (
+            "google_project_iam_member.dev_app_cloudsql[0]",
+            "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]",
+            "google_project_iam_member.dev_gke_node_runtime[0]",
+            "google_project_iam_member.dev_migration_cloudsql[0]",
+        )
+        plan["resource_drift"] = [
+            artifact_support_writer_etag_drift(),
+            artifact_reader_etag_drift(),
+            *(app_delivery_provider_audience_drift(address, MISSING, [])
+              ["resource_drift"][0] for address in app_providers),
+            *(project_iam_etag_drift(address) for address in project_iam),
+            secret_iam_etag_drift(
+                "google_secret_manager_secret_iam_member.dev_app_gsa_secret_access[0]"),
+        ]
+        self.assertEqual(len(plan["resource_drift"]), 9)
+        self.assertEqual(check_plan(plan, secret_iam_policies=live_secret_iam_policies(plan)), "no_changes")
 
     def test_artifact_reader_etag_readback_is_permitted_only_for_the_exact_grant(self):
         drift = artifact_reader_etag_drift()
@@ -2400,6 +2443,37 @@ class GuardTests(unittest.TestCase):
         for before_etag, after_etag in ((None, "etag-after"), ("etag-before", None),
                                         ("etag-before", "etag-before"), ("", "etag-after")):
             changed = artifact_reader_etag_drift(before_etag, after_etag)
+            with self.subTest(before=before_etag, after=after_etag):
+                self.assertFalse(permitted_drift(changed))
+
+    def test_support_image_writer_etag_readback_is_permitted_only_for_the_exact_grant(self):
+        drift = artifact_support_writer_etag_drift()
+        self.assertTrue(permitted_drift(drift))
+        report = "\n".join(diagnose_drift({"resource_drift": [drift]}))
+        self.assertIn("before support-image repository writer identity: expected", report)
+        self.assertIn("after support-image repository writer identity: expected", report)
+        self.assertIn("etag representation: before=non-empty token; after=non-empty token", report)
+        self.assertNotIn("etag-before", report)
+        self.assertNotIn("etag-after", report)
+
+        for mutate in (
+            lambda d: d["change"]["after"].update(project="other-project"),
+            lambda d: d["change"]["after"].update(location="us-west1"),
+            lambda d: d["change"]["after"].update(repository="other-repository"),
+            lambda d: d["change"]["after"].update(role="roles/artifactregistry.admin"),
+            lambda d: d["change"]["after"].update(member="allUsers"),
+            lambda d: d["change"]["after"].update(etag={"unexpected": "shape"}),
+            lambda d: d["change"]["after"].update(extra="unexpected"),
+            lambda d: d["change"].update(actions=["delete"]),
+        ):
+            changed = artifact_support_writer_etag_drift()
+            mutate(changed)
+            with self.subTest(drift=changed):
+                self.assertFalse(permitted_drift(changed))
+
+        for before_etag, after_etag in ((None, "etag-after"), ("etag-before", None),
+                                        ("etag-before", "etag-before"), ("", "etag-after")):
+            changed = artifact_support_writer_etag_drift(before_etag, after_etag)
             with self.subTest(before=before_etag, after=after_etag):
                 self.assertFalse(permitted_drift(changed))
 
