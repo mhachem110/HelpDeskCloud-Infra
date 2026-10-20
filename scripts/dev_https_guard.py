@@ -24,6 +24,18 @@ PROVIDER_READBACK_DRIFT = {
     "google_compute_global_address.https": ("google_compute_global_address", "labels", None, {}),
     "google_compute_ssl_policy.https": ("google_compute_ssl_policy", "custom_features", None, []),
 }
+CERTIFICATE_READBACK_ADDRESS = "google_certificate_manager_certificate.https"
+CERTIFICATE_READBACK_TYPE = "google_certificate_manager_certificate"
+CERTIFICATE_STATUS_FIELDS = {
+    "managed[0].authorization_attempt_info[0].state": {
+        "STATE_UNSPECIFIED", "AUTHORIZING", "AUTHORIZED", "FAILED",
+    },
+    "managed[0].authorization_attempt_info[0].failure_reason": {
+        "FAILURE_REASON_UNSPECIFIED", "CONFIG", "CAA", "RATE_LIMITED",
+    },
+}
+CERTIFICATE_DETAILS_FIELD = "managed[0].authorization_attempt_info[0].details"
+CERTIFICATE_STATUS_KEYS = {"domain", "state", "failure_reason", "details"}
 _MISSING = object()
 SENSITIVE_DRIFT_PATH = re.compile(
     r"(?:secret|password|token|credential|private|oauth|email|member|authorization|signature|key|description)",
@@ -52,7 +64,7 @@ def resource_values(plan, expected, mode="managed"):
     return by_address
 
 
-def check_actions(plan, expected):
+def check_actions(plan, expected, certificate_hostname=None):
     changes = plan.get("resource_changes", [])
     managed = [item for item in changes if item.get("mode", "managed") == "managed"]
     by_address = {item.get("address"): item for item in managed}
@@ -63,24 +75,35 @@ def check_actions(plan, expected):
         actions = change.get("change", {}).get("actions", [])
         require(actions in (["create"], ["no-op"]),
                 "only an exact create or no-op is allowed; updates, deletes and replacements require review")
-    check_provider_readback_drift(plan.get("resource_drift", []), expected)
+    check_provider_readback_drift(plan.get("resource_drift", []), expected, certificate_hostname)
     prior = plan.get("prior_state", {}).get("values", {}).get("root_module", {}).get("resources", [])
     require(all(item.get("address") in expected for item in prior),
             "prior state contains an unexpected address")
     return by_address
 
 
-def check_provider_readback_drift(drift, expected):
-    """Allow only the two confirmed provider null-to-empty refresh differences.
+def check_provider_readback_drift(drift, expected, certificate_hostname=None):
+    """Allow only confirmed provider readback differences that cannot change config.
 
     Terraform 1.16.2 with google provider 7.8.0 reports labels/custom_features as
     null in the saved state and empty collection values after refresh. The normal
     resource-change guard still requires these retained resources to be no-ops.
+    Certificate Manager also refreshes its output-only authorization diagnostics
+    as DNS validation progresses; only the exact fields and hostname are allowed.
     """
     seen = set()
     missing = object()
     for item in drift:
         address = item.get("address")
+        if address == CERTIFICATE_READBACK_ADDRESS:
+            require(address in expected and expected[address] == CERTIFICATE_READBACK_TYPE,
+                    f"unexpected prior-state drift exists in the HTTPS root: {describe_drift(item)}")
+            require(certificate_hostname is not None,
+                    "certificate status drift requires the exact reviewed hostname")
+            check_certificate_status_readback_drift(item, certificate_hostname)
+            require(address not in seen, "duplicate provider readback drift resource")
+            seen.add(address)
+            continue
         allowed = PROVIDER_READBACK_DRIFT.get(address)
         require(address in expected and allowed is not None,
                 f"unexpected prior-state drift exists in the HTTPS root: {describe_drift(item)}")
@@ -106,6 +129,86 @@ def check_provider_readback_drift(drift, expected):
         seen.add(address)
 
 
+def _drift_differences(left, right, path=""):
+    if left is _MISSING or right is _MISSING:
+        yield path, left, right
+    elif isinstance(left, dict) and isinstance(right, dict):
+        for key in sorted(set(left) | set(right)):
+            child = f"{path}.{key}" if path else str(key)
+            yield from _drift_differences(left.get(key, _MISSING), right.get(key, _MISSING), child)
+    elif isinstance(left, list) and isinstance(right, list):
+        for index in range(max(len(left), len(right))):
+            child = f"{path}[{index}]"
+            yield from _drift_differences(left[index] if index < len(left) else _MISSING,
+                                          right[index] if index < len(right) else _MISSING, child)
+    elif left != right:
+        yield path, left, right
+
+
+def _is_missing_or_none(value):
+    return value is _MISSING or value is None
+
+
+def _validate_certificate_status_side(values, hostname):
+    managed = values.get("managed")
+    require(isinstance(managed, list) and len(managed) == 1 and
+            managed[0].get("domains") == [hostname],
+            "certificate status readback must retain the exact configured hostname")
+    status = managed[0].get("authorization_attempt_info", _MISSING)
+    if _is_missing_or_none(status) or status == []:
+        return
+    require(isinstance(status, list) and len(status) == 1 and isinstance(status[0], dict),
+            "certificate authorization status must contain only the single configured hostname")
+    attempt = status[0]
+    require(set(attempt) <= CERTIFICATE_STATUS_KEYS and attempt.get("domain") == hostname,
+            "certificate authorization status is outside the exact configured hostname")
+    for field, allowed_values in CERTIFICATE_STATUS_FIELDS.items():
+        key = field.rsplit(".", 1)[1]
+        value = attempt.get(key, _MISSING)
+        require(_is_missing_or_none(value) or value in allowed_values,
+                f"certificate authorization status has an unknown {key} enum")
+    details = attempt.get("details", _MISSING)
+    require(_is_missing_or_none(details) or isinstance(details, str) and len(details) <= 2048,
+            "certificate authorization details must be a bounded provider status string")
+
+
+def check_certificate_status_readback_drift(item, hostname):
+    require(item.get("mode", "managed") == "managed" and item.get("type") == CERTIFICATE_READBACK_TYPE,
+            f"provider readback drift is on an unexpected certificate resource type: {describe_drift(item)}")
+    change = item.get("change", {})
+    require(change.get("actions") == ["update"],
+            f"certificate provider readback drift must be a refresh-only update: {describe_drift(item)}")
+    before = change.get("before")
+    after = change.get("after")
+    require(isinstance(before, dict) and isinstance(after, dict),
+            f"certificate provider readback drift is missing before/after values: {describe_drift(item)}")
+    differences = list(_drift_differences(before, after))
+    require(bool(differences), "certificate provider readback drift has no changed fields")
+    allowed_paths = {"labels", *CERTIFICATE_STATUS_FIELDS, CERTIFICATE_DETAILS_FIELD}
+    for path, _, _ in differences:
+        require(path in allowed_paths,
+                f"certificate provider readback drift changed a configured or unreviewed field: "
+                f"{describe_drift(item)}")
+    _validate_certificate_status_side(before, hostname)
+    _validate_certificate_status_side(after, hostname)
+
+    for path, before_value, after_value in differences:
+        if path == "labels":
+            require(before_value is None and after_value == {},
+                    "certificate labels readback drift must be exactly null-to-empty")
+        elif path == CERTIFICATE_DETAILS_FIELD:
+            require((_is_missing_or_none(before_value) or isinstance(before_value, str)) and
+                    (_is_missing_or_none(after_value) or isinstance(after_value, str)) and
+                    (before_value is _MISSING or before_value is None or len(before_value) <= 2048) and
+                    (after_value is _MISSING or after_value is None or len(after_value) <= 2048),
+                    "certificate authorization details drift must be a bounded output-only status string")
+        else:
+            allowed_values = CERTIFICATE_STATUS_FIELDS[path]
+            require((_is_missing_or_none(before_value) or before_value in allowed_values) and
+                    (_is_missing_or_none(after_value) or after_value in allowed_values),
+                    f"certificate authorization status drift contains an unknown value for {path.rsplit('.', 1)[1]}")
+
+
 def describe_drift(item):
     """Return a bounded, secret-redacted summary for an HTTPS-root drift item."""
     change = item.get("change", {})
@@ -113,34 +216,14 @@ def describe_drift(item):
     after = change.get("after")
     paths = []
 
-    def walk(left, right, path):
-        if left is _MISSING or right is _MISSING:
-            if SENSITIVE_DRIFT_PATH.search(path):
-                left_text = right_text = "<redacted>"
-            else:
-                left_text = _format_drift_value(left)
-                right_text = _format_drift_value(right)
-            paths.append(f"{path}: {left_text} -> {right_text}")
-            return
-        if isinstance(left, dict) and isinstance(right, dict):
-            for key in sorted(set(left) | set(right)):
-                child = f"{path}.{key}" if path else str(key)
-                walk(left.get(key, _MISSING), right.get(key, _MISSING), child)
-        elif isinstance(left, list) and isinstance(right, list):
-            for index in range(max(len(left), len(right))):
-                child = f"{path}[{index}]"
-                walk(left[index] if index < len(left) else _MISSING,
-                     right[index] if index < len(right) else _MISSING, child)
-        elif left != right:
-            if SENSITIVE_DRIFT_PATH.search(path):
-                left_text = right_text = "<redacted>"
-            else:
-                left_text = _format_drift_value(left)
-                right_text = _format_drift_value(right)
-            paths.append(f"{path}: {left_text} -> {right_text}")
-
     if isinstance(before, dict) and isinstance(after, dict):
-        walk(before, after, "")
+        for path, left, right in _drift_differences(before, after):
+            if SENSITIVE_DRIFT_PATH.search(path):
+                left_text = right_text = "<redacted>"
+            else:
+                left_text = _format_drift_value(left)
+                right_text = _format_drift_value(right)
+            paths.append(f"{path}: {left_text} -> {right_text}")
     if not paths:
         paths = ["changed fields unavailable"]
     if len(paths) > 8:
@@ -202,7 +285,7 @@ def configuration_expressions(plan, address):
 
 def check_foundation(plan, hostname):
     values = resource_values(plan, FOUNDATION)
-    changes = check_actions(plan, FOUNDATION)
+    changes = check_actions(plan, FOUNDATION, hostname)
     address = changes["google_compute_global_address.https"].get("change", {}).get("after") or values[
         "google_compute_global_address.https"]["values"]
     # The provider returns an empty ip_version for a global IPv4 reservation.
