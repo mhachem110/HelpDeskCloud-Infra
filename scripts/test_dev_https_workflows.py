@@ -29,7 +29,10 @@ class DevHttpsWorkflowTests(unittest.TestCase):
         self.assertIn("providers/github-infra-dev", str(edge["steps"]))
         self.assertIn("dev_https_guard.py check-foundation", str(edge["steps"]))
         self.assertIn("dev_https_guard.py check-access", str(edge["steps"]))
-        self.assertIn("dev_https_api_preflight.py", str(edge["steps"]))
+        self.assertNotIn("dev_https_api_preflight.py", str(edge["steps"]))
+        bootstrap_notice = next(step for step in edge["steps"]
+                                if step.get("name") == "Report one-time HTTPS API bootstrap prerequisite")
+        self.assertIn("gcloud services enable certificatemanager.googleapis.com iap.googleapis.com", bootstrap_notice["run"])
         self.assertIn("setup-gcloud@v3", str(edge["steps"]))
         self.assertIn("vars.DEV_IAP_ALLOWED_EMAIL", str(edge))
         self.assertNotIn("inputs.https_hostname", str(workflow))
@@ -63,18 +66,22 @@ class DevHttpsWorkflowTests(unittest.TestCase):
         self.assertNotIn("inputs.operation", str(workflow))
         self.assertNotIn("inputs.acknowledged_drift_fingerprint", str(workflow))
 
-    def test_https_apply_reports_api_readiness_and_fails_closed_before_apply(self):
-        workflow = load_workflow(ROOT / ".github/workflows/terraform-dev-apply.yml")
-        review_steps = workflow["jobs"]["review-https-plan"]["steps"]
-        apply_steps = workflow["jobs"]["approved-https-apply"]["steps"]
-        self.assertIn("dev_https_api_preflight.py", str(review_steps))
-        strict = next(step for step in apply_steps if "--require-enabled" in step.get("run", ""))
-        plan = next(step for step in apply_steps if step.get("id") == "inspect-https")
-        apply = next(step for step in apply_steps if "terraform -chdir=\"$COMPONENT\" apply" in step.get("run", ""))
-        self.assertLess(apply_steps.index(strict), apply_steps.index(plan))
-        self.assertLess(apply_steps.index(plan), apply_steps.index(apply))
-        self.assertIn("dev_https_api_preflight.py --require-enabled", strict["run"])
-        self.assertEqual(workflow["jobs"]["approved-https-apply"]["environment"], "dev-network-apply")
+    def test_https_workflows_use_owner_bootstrap_without_runtime_service_usage_admin(self):
+        plan_workflow = load_workflow(ROOT / ".github/workflows/terraform-dev-plan.yml")
+        apply_workflow = load_workflow(ROOT / ".github/workflows/terraform-dev-apply.yml")
+        plan_steps = plan_workflow["jobs"]["https-plan"]["steps"]
+        review_steps = apply_workflow["jobs"]["review-https-plan"]["steps"]
+        apply_steps = apply_workflow["jobs"]["approved-https-apply"]["steps"]
+        expected_command = "gcloud services enable certificatemanager.googleapis.com iap.googleapis.com"
+        for steps in (plan_steps, review_steps):
+            notice = next(step for step in steps
+                          if step.get("name") == "Report one-time HTTPS API bootstrap prerequisite")
+            self.assertIn(expected_command, notice["run"])
+        self.assertNotIn("dev_https_api_preflight.py", str(plan_steps))
+        self.assertNotIn("dev_https_api_preflight.py", str(review_steps))
+        self.assertNotIn("dev_https_api_preflight.py", str(apply_steps))
+        self.assertNotIn("serviceUsageAdmin", str(plan_workflow) + str(apply_workflow))
+        self.assertEqual(apply_workflow["jobs"]["approved-https-apply"]["environment"], "dev-network-apply")
 
     def test_saved_plan_name_is_exact_for_each_https_state(self):
         workflow = load_workflow(ROOT / ".github/workflows/terraform-dev-apply.yml")
