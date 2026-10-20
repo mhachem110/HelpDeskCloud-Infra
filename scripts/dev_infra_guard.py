@@ -62,6 +62,7 @@ PHASE9 = {
     "google_iam_workload_identity_pool_provider.dev_app_migration[0]": "google_iam_workload_identity_pool_provider",
     "google_service_account_iam_member.dev_app_migration_runner_wif[0]": "google_service_account_iam_member",
     "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]": "google_project_iam_member",
+    "google_project_iam_member.dev_app_migration_runner_dns_endpoint[0]": "google_project_iam_member",
 }
 DEPLOYMENT_EVIDENCE_PATH_COUNT = 28
 ARTIFACT_READER_IAM_ADDRESS = "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]"
@@ -124,6 +125,17 @@ MIGRATION_RUNNER_MEMBER = (
     f"principal://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/"
     f"workloadIdentityPools/helpdesk-github/subject/{MIGRATION_RUNNER_SUBJECT}"
 )
+MIGRATION_RUNNER_DNS_ENDPOINT = (
+    "gke-2c60f148ddaa41c880bb7713114c59909a1a-260283083469.us-east1.gke.goog"
+)
+MIGRATION_RUNNER_DNS_BINDING_ADDRESS = (
+    "google_project_iam_member.dev_app_migration_runner_dns_endpoint[0]"
+)
+MIGRATION_RUNNER_DNS_BINDING_TITLE = "helpdesk-dev-migration-runner-dns-endpoint"
+MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION = (
+    "Allow GKE connection only to the existing Dev DNS endpoint"
+)
+MIGRATION_RUNNER_DNS_BINDING_CONDITION = f'resource.name == "{MIGRATION_RUNNER_DNS_ENDPOINT}"'
 MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION = (
     'resource.type == "container.googleapis.com/Cluster" && '
     f'resource.name == "projects/{PROJECT}/locations/us-east1/clusters/helpdeskcloud-dev-gke"'
@@ -390,7 +402,7 @@ def check_phase8(values, plan, creates, addresses=None):
                             changes, creates, "supporting-image repository writer")
 
 
-def check_phase9(values, plan, creates):
+def check_phase9(values, plan, creates, validate_dns_binding=True):
     """Validate the dedicated App migration-runner identity and cluster-only access."""
     changes = {c.get("address"): c for c in plan.get("resource_changes", [])}
     account_address = "google_service_account.dev_app_migration_runner[0]"
@@ -444,6 +456,23 @@ def check_phase9(values, plan, creates):
             and condition.get("description") == "Allow cluster discovery only for the existing Dev GKE cluster"
             and normalize_cel(condition.get("expression")) == MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
             "Migration-runner clusterViewer condition must match only the existing Dev GKE cluster")
+    if validate_dns_binding:
+        dns_viewer = values[MIGRATION_RUNNER_DNS_BINDING_ADDRESS]
+        require(dns_viewer.get("project") in (PROJECT, PROJECT_NUMBER)
+                and dns_viewer.get("role") == "roles/container.clusterViewer",
+                "Migration runner DNS binding must receive only the reviewed GKE clusterViewer role")
+        expected_or_unknown(dns_viewer, MIGRATION_RUNNER_DNS_BINDING_ADDRESS, ("member",),
+                            f"serviceAccount:{MIGRATION_RUNNER_EMAIL}", changes, creates,
+                            "migration-runner DNS endpoint identity")
+        dns_condition = only_item(dns_viewer.get("condition"),
+                                  "Expected one migration-runner DNS endpoint IAM condition")
+        require(dns_condition.get("title") == MIGRATION_RUNNER_DNS_BINDING_TITLE
+                and dns_condition.get("description") == MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION
+                and normalize_cel(dns_condition.get("expression")) == MIGRATION_RUNNER_DNS_BINDING_CONDITION,
+                "Migration-runner DNS IAM condition must match only the existing Dev endpoint")
+    else:
+        require(MIGRATION_RUNNER_DNS_BINDING_ADDRESS not in values,
+                "The pre-recovery Phase 9 state must not contain the DNS endpoint binding")
 
 
 def check_references(plan):
@@ -515,6 +544,7 @@ def check_references(plan):
         ("google_service_account_iam_member.dev_app_support_images_wif", "service_account_id", "google_service_account.dev_app_support_image_publisher[0].name"),
         ("google_service_account_iam_member.dev_app_migration_runner_wif", "service_account_id", "google_service_account.dev_app_migration_runner[0].name"),
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "member", "google_service_account.dev_app_migration_runner[0].member"),
+        ("google_project_iam_member.dev_app_migration_runner_dns_endpoint", "member", "google_service_account.dev_app_migration_runner[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
     ):
@@ -553,6 +583,8 @@ def check_references(plan):
         ("google_service_account_iam_member.dev_app_migration_runner_wif", "roles/iam.workloadIdentityUser",
          "service_account_id", "google_service_account.dev_app_migration_runner[0].name"),
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "roles/container.clusterViewer",
+         "member", "google_service_account.dev_app_migration_runner[0].member"),
+        ("google_project_iam_member.dev_app_migration_runner_dns_endpoint", "roles/container.clusterViewer",
          "member", "google_service_account.dev_app_migration_runner[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "roles/secretmanager.secretAccessor",
          "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
@@ -622,6 +654,25 @@ def check_references(plan):
             and normalize_cel(viewer_condition.get("expression", {}).get("constant_value"))
             == MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
             "Migration-runner clusterViewer condition must be exactly cluster-scoped")
+
+    dns_viewer = resources.get("google_project_iam_member.dev_app_migration_runner_dns_endpoint", {})
+    dns_viewer_expressions = dns_viewer.get("expressions", {})
+    require(dns_viewer_expressions.get("role", {}).get("constant_value")
+            == "roles/container.clusterViewer",
+            "Migration-runner DNS endpoint role is not exact")
+    references(dns_viewer_expressions.get("project", {}), "var.project_id",
+               "migration-runner DNS endpoint IAM project", exact=True)
+    references(dns_viewer_expressions.get("member", {}),
+               "google_service_account.dev_app_migration_runner[0].member",
+               "migration-runner DNS endpoint IAM identity", exact=True)
+    dns_viewer_condition = only_item(dns_viewer_expressions.get("condition"),
+                                     "Missing migration-runner DNS endpoint condition")
+    require(dns_viewer_condition.get("title", {}).get("constant_value") == MIGRATION_RUNNER_DNS_BINDING_TITLE
+            and dns_viewer_condition.get("description", {}).get("constant_value")
+            == MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION
+            and normalize_cel(dns_viewer_condition.get("expression", {}).get("constant_value"))
+            == MIGRATION_RUNNER_DNS_BINDING_CONDITION,
+            "Migration-runner DNS endpoint condition must match only the existing endpoint")
 
     support_binding = resources.get("google_service_account_iam_member.dev_app_support_images_wif", {})
     support_binding_expressions = support_binding.get("expressions", {})
@@ -1165,15 +1216,23 @@ def check_plan(plan):
         and prior_phase7 == set(PHASE7) and prior_phase8 == set(PHASE8)
         and not prior_phase9 and migration_runner_creates == set(PHASE9)
     )
+    migration_runner_dns_binding_recovery = (
+        not creates and not support_creates
+        and prior_phase7 == set(PHASE7) and prior_phase8 == set(PHASE8)
+        and prior_phase9 == set(PHASE9) - {MIGRATION_RUNNER_DNS_BINDING_ADDRESS}
+        and migration_runner_creates == {MIGRATION_RUNNER_DNS_BINDING_ADDRESS}
+    )
     migration_runner_complete = not migration_runner_creates and prior_phase9 == set(PHASE9)
-    require(not prior_phase9 or prior_phase9 == set(PHASE9),
+    require(not prior_phase9 or prior_phase9 == set(PHASE9)
+            or migration_runner_dns_binding_recovery,
             "Partial Phase 9 migration-runner state requires review")
     require(full_initial_create or exact_apply12_recovery or complete_no_changes
             or exact_phase8_provider_recovery,
             "Partial or inconsistent Phase 7 state/creation batch requires review")
     require(support_images_initial_create or support_images_complete or exact_phase8_provider_recovery,
             "Phase 8 must be created as one exact batch after Phase 7, or already be complete")
-    require(migration_runner_initial_create or migration_runner_complete,
+    require(migration_runner_initial_create or migration_runner_complete
+            or migration_runner_dns_binding_recovery,
             "Phase 9 migration-runner resources must be created as one exact batch after Phase 8, or already be complete")
     if exact_phase8_provider_recovery:
         prior_phase8_values = {
@@ -1181,6 +1240,13 @@ def check_plan(plan):
             for resource in prior_managed if resource.get("address") in PHASE8_COMPLETED
         }
         check_phase8(prior_phase8_values, plan, set(), addresses=PHASE8_COMPLETED)
+    if migration_runner_dns_binding_recovery:
+        prior_phase9_values = {
+            resource["address"]: resource.get("values", {})
+            for resource in prior_managed
+            if resource.get("address") in set(PHASE9) - {MIGRATION_RUNNER_DNS_BINDING_ADDRESS}
+        }
+        check_phase9(prior_phase9_values, plan, set(), validate_dns_binding=False)
     # Check the complete planned values, including no-op resources omitted from resource_changes.
     by_address = {r["address"]: r.get("values", {}) for r in managed}
     by_type = {r["type"]: r.get("values", {}) for r in managed if r["address"] in BASE}
@@ -1695,14 +1761,25 @@ def verify_phase9(runner_sa, runner_sa_iam, provider, project_iam, app_secret_ia
     runner_member = f"serviceAccount:{MIGRATION_RUNNER_EMAIL}"
     runner_project_bindings = [binding for binding in project_iam.get("bindings", [])
                                if runner_member in binding.get("members", [])]
-    require(len(runner_project_bindings) == 1,
-            "Migration runner must have exactly one direct project IAM binding")
-    viewer = runner_project_bindings[0]
-    condition = viewer.get("condition", {})
-    require(viewer.get("role") == "roles/container.clusterViewer"
-            and condition.get("title") == "helpdesk-dev-migration-runner-cluster"
-            and condition.get("description") == "Allow cluster discovery only for the existing Dev GKE cluster"
-            and normalize_cel(condition.get("expression")) == MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
+    bindings_by_title = {
+        binding.get("condition", {}).get("title"): binding
+        for binding in runner_project_bindings
+    }
+    require(len(runner_project_bindings) == 2
+            and set(bindings_by_title) == {
+                "helpdesk-dev-migration-runner-cluster", MIGRATION_RUNNER_DNS_BINDING_TITLE,
+            },
+            "Migration runner must have exactly the two reviewed conditional GKE bindings")
+    cluster_binding = bindings_by_title["helpdesk-dev-migration-runner-cluster"]
+    cluster_condition = cluster_binding.get("condition", {})
+    dns_binding = bindings_by_title[MIGRATION_RUNNER_DNS_BINDING_TITLE]
+    dns_condition = dns_binding.get("condition", {})
+    require(cluster_binding.get("role") == "roles/container.clusterViewer"
+            and cluster_condition.get("description") == "Allow cluster discovery only for the existing Dev GKE cluster"
+            and normalize_cel(cluster_condition.get("expression")) == MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION
+            and dns_binding.get("role") == "roles/container.clusterViewer"
+            and dns_condition.get("description") == MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION
+            and normalize_cel(dns_condition.get("expression")) == MIGRATION_RUNNER_DNS_BINDING_CONDITION,
             "Migration-runner GKE IAM access is not limited to the existing Dev cluster")
 
     for policy, label in ((app_secret_iam, "application Secret Manager"),
@@ -1744,7 +1821,8 @@ def verify_phase7(cluster, node_sa, app_sa, migration_sa, app_secret, admin_secr
             "GKE nodes are not confirmed private")
     endpoints = cluster.get("controlPlaneEndpointsConfig", {})
     require(endpoints.get("ipEndpointsConfig", {}).get("enabled") is False
-            and endpoints.get("dnsEndpointConfig", {}).get("allowExternalTraffic") is True,
+            and endpoints.get("dnsEndpointConfig", {}).get("allowExternalTraffic") is True
+            and endpoints.get("dnsEndpointConfig", {}).get("endpoint") == MIGRATION_RUNNER_DNS_ENDPOINT,
             "GKE control plane endpoints are not the reviewed DNS-only design")
     require(cluster.get("workloadIdentityConfig", {}).get("workloadPool") == f"{PROJECT}.svc.id.goog",
             "GKE Workload Identity pool mismatch")
