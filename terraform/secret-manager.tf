@@ -32,6 +32,16 @@ resource "google_secret_manager_secret_iam_member" "dev_app_secret_access" {
   depends_on = [google_container_cluster.dev]
 }
 
+# The Secret Manager CSI driver evaluates the request as the annotated Google
+# service account. Keep the direct Kubernetes principal above for CSI's
+# supported identity path and grant the runtime GSA access to this secret only.
+resource "google_secret_manager_secret_iam_member" "dev_app_gsa_secret_access" {
+  count     = var.environment == "dev" ? 1 : 0
+  secret_id = google_secret_manager_secret.dev_app_connection[0].id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = google_service_account.dev_app[0].member
+}
+
 resource "google_secret_manager_secret_iam_member" "dev_admin_secret_access" {
   count     = var.environment == "dev" ? 1 : 0
   secret_id = google_secret_manager_secret.dev_admin_password[0].id
