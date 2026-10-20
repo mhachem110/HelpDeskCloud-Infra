@@ -1121,18 +1121,39 @@ def permitted_drift(entry):
             return False
         before_config = before_settings[0].get("ip_configuration")
         after_config = after_settings[0].get("ip_configuration")
-        if (type(before_settings[0].get("version")) is not int or before_settings[0]["version"] != 1
-                or type(after_settings[0].get("version")) is not int or after_settings[0]["version"] != 3
-                or not isinstance(before_config, list) or len(before_config) != 1
+        if (not isinstance(before_config, list) or len(before_config) != 1
                 or not isinstance(after_config, list) or len(after_config) != 1
                 or not isinstance(before_config[0], dict) or not isinstance(after_config[0], dict)
                 or before_config[0].get("server_ca_mode") != "GOOGLE_MANAGED_INTERNAL_CA"
-                or after_config[0].get("server_ca_mode") != "GOOGLE_MANAGED_INTERNAL_CA"
-                or before_config[0].get("custom_subject_alternative_names", MISSING) is not None
-                or after_config[0].get("custom_subject_alternative_names", MISSING) != []):
+                or after_config[0].get("server_ca_mode") != "GOOGLE_MANAGED_INTERNAL_CA"):
             return False
-        # settings.version is Cloud SQL's concurrency generation. Remove only the two
-        # observed normalization fields before comparing the complete snapshots.
+
+        before_version = before_settings[0].get("version", MISSING)
+        after_version = after_settings[0].get("version", MISSING)
+        before_sans = before_config[0].get("custom_subject_alternative_names", MISSING)
+        after_sans = after_config[0].get("custom_subject_alternative_names", MISSING)
+
+        # Cloud SQL settings.version is an API concurrency generation, not a
+        # configured database setting. Permit a forward-only generation change
+        # when every other value on the exact Dev instance is exactly equal.
+        # Bound values to the API's signed Int64 representation.
+        max_settings_version = (1 << 63) - 1
+        if (type(before_version) is int and type(after_version) is int
+                and 0 < before_version < after_version <= max_settings_version
+                and before_sans == [] and after_sans == []):
+            before_copy, after_copy = deepcopy(before), deepcopy(after)
+            before_copy["settings"][0].pop("version")
+            after_copy["settings"][0].pop("version")
+            return before_copy == after_copy
+
+        # Preserve the separately observed initial provider normalization:
+        # generation 1 -> 3 and unset optional SAN list null -> []. Do not combine
+        # this exception with the general generation-only allowance above.
+        if (type(before_version) is not int or before_version != 1
+                or type(after_version) is not int or after_version != 3
+                or before_sans is not None or after_sans != []):
+            return False
+
         before_copy, after_copy = deepcopy(before), deepcopy(after)
         before_copy["settings"][0].pop("version")
         after_copy["settings"][0].pop("version")
