@@ -2,6 +2,25 @@ name: Terraform Dev Plan
 
 on:
   workflow_dispatch:
+    inputs:
+      component:
+        description: Select the existing core Dev root or one exact HTTPS Terraform root.
+        required: true
+        type: choice
+        default: core
+        options: [core, https-foundation, https-access]
+      https_hostname:
+        description: Owner-controlled hostname (required only for https-foundation).
+        required: false
+        type: string
+      iap_backend_service_name:
+        description: Exact backend name from the HelpDesk Gateway backend-services annotation (required only for https-access).
+        required: false
+        type: string
+      iap_allowed_email:
+        description: One owner-selected Google account (required only for https-access).
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -9,7 +28,7 @@ permissions:
 jobs:
   dev-plan:
     name: Review Dev infrastructure changes
-    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev'
+    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.component == 'core'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -63,3 +82,80 @@ jobs:
       # still requires the strict guard or an exact drift acknowledgement.
       - name: Validate plan safety (drift is informational)
         run: python ../scripts/dev_infra_guard.py check-plan "$RUNNER_TEMP/dev-diagnostic.json" --report-drift
+
+  https-plan:
+    name: Review isolated Dev HTTPS infrastructure
+    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.component != 'core'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      TF_IN_AUTOMATION: true
+      COMPONENT: ${{ inputs.component }}
+      HTTPS_HOSTNAME: ${{ inputs.https_hostname }}
+      IAP_BACKEND_SERVICE_NAME: ${{ inputs.iap_backend_service_name }}
+      IAP_ALLOWED_EMAIL: ${{ inputs.iap_allowed_email }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Verify trusted repository and branch
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          test "$REPOSITORY" = "mhachem110/HelpDeskCloud-Infra"
+          test "$REF" = "refs/heads/dev"
+
+      - name: Validate exact component inputs
+        run: |
+          set -euo pipefail
+          case "$COMPONENT" in
+            https-foundation)
+              [[ "$HTTPS_HOSTNAME" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || { echo '::error::Provide the owner-controlled hostname; no domain is assumed.'; exit 1; }
+              ;;
+            https-access)
+              [[ "$IAP_BACKEND_SERVICE_NAME" =~ ^gkegw-[a-z0-9-]{1,50}$ ]] || { echo '::error::Provide the exact generated global backend name from the HelpDesk Gateway annotation.'; exit 1; }
+              [[ "$IAP_ALLOWED_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || { echo '::error::Provide one Google account email; none is inferred.'; exit 1; }
+              ;;
+            *) echo '::error::Unknown HTTPS component.'; exit 1 ;;
+          esac
+
+      - name: Authenticate with the existing Dev OIDC provider
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: helpdeskcloud-capstone-511905
+          workload_identity_provider: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-infra-dev
+          service_account: helpdesk-terraform-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+          create_credentials_file: true
+
+      - name: Install Terraform 1.16.2
+        uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: 1.16.2
+
+      - name: Initialize the selected isolated HTTPS state
+        run: terraform -chdir="$COMPONENT" init -input=false -no-color -lockfile=readonly -backend-config=environments/dev.gcs.tfbackend
+
+      - name: Plan and check only the approved HTTPS resources
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ "$COMPONENT" == 'https-foundation' ]]; then
+            plan_file="$RUNNER_TEMP/dev-https-foundation.tfplan"
+            json_file="$RUNNER_TEMP/dev-https-foundation.json"
+            terraform -chdir="$COMPONENT" plan -input=false -no-color -lock-timeout=5m -var="hostname=$HTTPS_HOSTNAME" -out="$plan_file"
+            terraform -chdir="$COMPONENT" show -json "$plan_file" > "$json_file"
+            python ../scripts/dev_https_guard.py check-foundation "$json_file" --hostname "$HTTPS_HOSTNAME"
+          else
+            plan_file="$RUNNER_TEMP/dev-https-access.tfplan"
+            json_file="$RUNNER_TEMP/dev-https-access.json"
+            terraform -chdir="$COMPONENT" plan -input=false -no-color -lock-timeout=5m \
+              -var="backend_service_name=$IAP_BACKEND_SERVICE_NAME" -var="allowed_email=$IAP_ALLOWED_EMAIL" -out="$plan_file"
+            terraform -chdir="$COMPONENT" show -json "$plan_file" > "$json_file"
+            python ../scripts/dev_https_guard.py check-access "$json_file" \
+              --backend-service-name "$IAP_BACKEND_SERVICE_NAME" --allowed-email "$IAP_ALLOWED_EMAIL"
+          fi

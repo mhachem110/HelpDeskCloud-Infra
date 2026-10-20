@@ -78,6 +78,10 @@ Local Application Default Credentials can be used; no key file is required. A lo
 
 ## Branch flow
 
+See [HTTPS access preparation](docs/HTTPS-ACCESS-DESIGN.md) for the verified Dev
+baseline, proposed IAP-protected URL, resource ownership, cost and rebuild plan.
+That document does not authorize or enable a public endpoint.
+
 Changes move through protected branches: `feature/*` → `dev` → `stage` → `prod`. The PR workflow checks those source and target pairs. Merging to `dev` triggers the Dev backend check when Terraform or that workflow changes. It does not apply resources. Stage and Prod deployment identities, permissions, approvals, and pipelines are future work.
 
 See [Phase 4 notes](docs/PHASE4.md) for the established foundation, [Phase 5 notes](docs/PHASE5.md) for the network design and IAM limits, and [Phase 6 notes](docs/PHASE6.md) for database and registry settings, cost estimates, and deployment prerequisites.
