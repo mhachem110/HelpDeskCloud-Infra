@@ -55,7 +55,34 @@ class DevHttpsBackendTests(unittest.TestCase):
             backend.gateway_backend(gateway)
         gateway = gateway_fixture()
         gateway["metadata"]["annotations"][backend.BACKEND_ANNOTATION] = "arbitrary-backend"
-        with self.assertRaisesRegex(ValueError, "annotation"):
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            backend.gateway_backend(gateway)
+
+    def test_backend_annotation_accepts_exact_gke_resource_path_and_rejects_ambiguous_values(self):
+        gateway = gateway_fixture()
+        gateway["metadata"]["annotations"][backend.BACKEND_ANNOTATION] = (
+            "https://www.googleapis.com/compute/v1/projects/"
+            "helpdeskcloud-capstone-511905/global/backendServices/gkegw-helpdesk-service"
+        )
+        self.assertEqual(backend.gateway_backend(gateway), "gkegw-helpdesk-service")
+
+        gateway["metadata"]["annotations"][backend.BACKEND_ANNOTATION] = (
+            f"/projects/{backend.PROJECT_NUMBER}/global/"
+            "backendServices/gkegw-helpdesk-service"
+        )
+        self.assertEqual(backend.gateway_backend(gateway), "gkegw-helpdesk-service")
+
+        gateway["metadata"]["annotations"][backend.BACKEND_ANNOTATION] = (
+            "gkegw-helpdesk-service, gkegw-another-service"
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one backend"):
+            backend.gateway_backend(gateway)
+
+        gateway["metadata"]["annotations"][backend.BACKEND_ANNOTATION] = (
+            "https://www.googleapis.com/compute/v1/projects/other/global/"
+            "backendServices/gkegw-helpdesk-service"
+        )
+        with self.assertRaisesRegex(ValueError, "outside the approved project"):
             backend.gateway_backend(gateway)
 
     def test_arbitrary_cloud_backend_project_or_non_gke_group_is_rejected(self):

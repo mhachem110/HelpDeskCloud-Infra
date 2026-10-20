@@ -8,10 +8,15 @@ from pathlib import Path
 
 
 PROJECT = "helpdeskcloud-capstone-511905"
+PROJECT_NUMBER = "260283083469"
 GATEWAY_NAME = "helpdesk-dev-https"
 NAMESPACE = "helpdesk-dev"
 BACKEND_ANNOTATION = "networking.gke.io/backend-services"
 BACKEND_NAME = re.compile(r"^gkegw-[a-z0-9-]{1,50}$")
+BACKEND_RESOURCE_PATH = re.compile(
+    r"^(?:https?://[^/]+(?:/compute/(?:v[0-9]+|beta|alpha))?)?"
+    r"/projects/([^/]+)/global/backendServices/([^/]+)$"
+)
 
 
 class NotReady(ValueError):
@@ -33,10 +38,20 @@ def gateway_backend(gateway):
     state = {condition.get("type"): condition.get("status") for condition in conditions}
     if state.get("Accepted") != "True" or state.get("Programmed") != "True":
         raise NotReady("HelpDesk HTTPS Gateway is not accepted and programmed")
-    backend = metadata.get("annotations", {}).get(BACKEND_ANNOTATION, "")
-    if not BACKEND_NAME.fullmatch(backend):
-        raise ValueError("Gateway backend-services annotation is missing or not one GKE backend")
-    return backend
+    annotation = metadata.get("annotations", {}).get(BACKEND_ANNOTATION, "")
+    entries = [entry.strip() for entry in annotation.split(",") if entry.strip()]
+    if len(entries) != 1:
+        raise ValueError("Gateway backend-services annotation must identify exactly one backend")
+    backend = entries[0]
+    if BACKEND_NAME.fullmatch(backend):
+        return backend
+    resource_path = BACKEND_RESOURCE_PATH.fullmatch(backend)
+    if not resource_path:
+        raise ValueError("Gateway backend-services annotation is missing or malformed")
+    project, name = resource_path.groups()
+    if project not in (PROJECT, PROJECT_NUMBER) or not BACKEND_NAME.fullmatch(name):
+        raise ValueError("Gateway backend-services annotation is outside the approved project")
+    return name
 
 
 def validate_backend(gateway, backend_resource):
