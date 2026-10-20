@@ -134,6 +134,9 @@ MIGRATION_RUNNER_MEMBER = (
 MIGRATION_RUNNER_DNS_ENDPOINT = (
     "gke-2c60f148ddaa41c880bb7713114c59909a1a-260283083469.us-east1.gke.goog"
 )
+MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS = (
+    "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]"
+)
 MIGRATION_RUNNER_DNS_BINDING_ADDRESS = (
     "google_project_iam_member.dev_app_migration_runner_dns_endpoint[0]"
 )
@@ -202,6 +205,10 @@ SECRET_READBACK_NAMES = {
     "google_secret_manager_secret.dev_admin_password[0]": "helpdesk-dev-db-admin-password",
 }
 PROJECT_IAM_READBACKS = {
+    MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS: (
+        "roles/container.clusterViewer",
+        f"serviceAccount:helpdesk-app-migr-runner-dev@{PROJECT}.iam.gserviceaccount.com",
+    ),
     "google_project_iam_member.dev_gke_node_runtime[0]": (
         "roles/container.defaultNodeServiceAccount",
         f"serviceAccount:helpdesk-gke-node-dev@{PROJECT}.iam.gserviceaccount.com",
@@ -1171,7 +1178,7 @@ def permitted_drift(entry):
     return before_copy == after_copy
 
 
-def check_drift(plan):
+def check_drift(plan, *, allow_migration_runner_iam_replacement=False):
     drift = plan.get("resource_drift", [])
     require(isinstance(drift, list), "Unexpected resource drift format")
     require(len({entry.get("address") for entry in drift if isinstance(entry, dict)}) == len(drift),
@@ -1182,15 +1189,73 @@ def check_drift(plan):
     for entry in drift:
         requested = [change for change in plan.get("resource_changes", [])
                      if change.get("address") == entry.get("address")]
-        require(all(change.get("change", {}).get("actions") == ["no-op"] for change in requested),
-                "Provider drift is readback only; a proposed resource change requires review")
+        if (entry.get("address") == MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS
+                and allow_migration_runner_iam_replacement):
+            require(all(change.get("change", {}).get("actions") in (
+                ["no-op"], ["update"], ["create", "delete"], ["delete", "create"])
+                for change in requested),
+                "Migration-runner IAM drift is allowed only with the exact grant remediation")
+        else:
+            require(all(change.get("change", {}).get("actions") == ["no-op"] for change in requested),
+                    "Provider drift is readback only; a proposed resource change requires review")
+
+
+def migration_runner_iam_remediation_candidate(plan):
+    """Recognize only the phase-9 shape that may accompany the reviewed IAM fix.
+
+    The complete plan checks below still validate every address, type, value, and
+    transition. This early predicate exists so drift diagnostics retain priority.
+    """
+    changes = plan.get("resource_changes", [])
+    if not isinstance(changes, list):
+        return False
+    actions = {}
+    for change in changes:
+        if not isinstance(change, dict) or not isinstance(change.get("address"), str):
+            return False
+        address = change["address"]
+        if address in actions:
+            return False
+        actions[address] = change.get("change", {}).get("actions")
+
+    viewer_actions = actions.get(MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS, ["no-op"])
+    dns_actions = actions.get(MIGRATION_RUNNER_DNS_BINDING_ADDRESS, ["no-op"])
+    if viewer_actions not in (["update"], ["create", "delete"], ["delete", "create"]):
+        return False
+    if dns_actions != ["delete"]:
+        return False
+    if any(actions.get(address, ["no-op"]) != ["no-op"]
+           for address in set(PHASE7) | set(PHASE8)
+           | (set(PHASE9) - {MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS,
+                             MIGRATION_RUNNER_DNS_BINDING_ADDRESS})):
+        return False
+
+    prior_state = plan.get("prior_state")
+    if not isinstance(prior_state, dict):
+        return False
+    prior = prior_state.get("values", {}).get("root_module")
+    if not isinstance(prior, dict):
+        return False
+    prior_managed = [resource for resource in state_resources(prior)
+                     if isinstance(resource, dict) and resource.get("mode") == "managed"]
+    prior_addresses = {resource.get("address") for resource in prior_managed}
+    return (
+        set(PHASE7) <= prior_addresses
+        and set(PHASE8) <= prior_addresses
+        and set(PHASE9) <= prior_addresses
+        and MIGRATION_RUNNER_DNS_BINDING_ADDRESS in prior_addresses
+    )
 
 
 def check_plan(plan):
     for name, expected in {"project_id": PROJECT, "region": "us-east1", "environment": "dev"}.items():
         require(plan.get("variables", {}).get(name, {}).get("value") == expected, f"Unexpected {name}")
-    # Drift is separate from requested actions; only exact, tested readbacks are allowed.
-    check_drift(plan)
+    # Drift checks run first so their diagnostics remain actionable. The only
+    # exception is the exact phase-9 IAM remediation shape, validated in full below.
+    check_drift(
+        plan,
+        allow_migration_runner_iam_replacement=migration_runner_iam_remediation_candidate(plan),
+    )
     planned = planned_resources(plan.get("planned_values", {}).get("root_module", {}))
     managed = [r for r in planned if r.get("mode") == "managed"]
     require(len(managed) == len(PLANNED_EXPECTED)
@@ -1212,7 +1277,7 @@ def check_plan(plan):
     require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"]) for address in PHASE8),
             "Phase 8 update, replacement, or deletion requires review")
     migration_runner_creates = {address for address in PHASE9 if actions.get(address) == ["create"]}
-    cluster_viewer_address = "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]"
+    cluster_viewer_address = MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS
     cluster_viewer_actions = actions.get(cluster_viewer_address, ["no-op"])
     legacy_dns_actions = actions.get(MIGRATION_RUNNER_DNS_BINDING_ADDRESS, ["no-op"])
     require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"])

@@ -21,6 +21,7 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              ARTIFACT_READER_IAM_ADDRESS, PHASE8_COMPLETED,
                              PHASE8_PROVIDER_ADDRESS,
                              MIGRATION_RUNNER_ACCOUNT_ID, MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
+                             MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS,
                              MIGRATION_RUNNER_DNS_BINDING_ADDRESS,
                              MIGRATION_RUNNER_DNS_BINDING_CONDITION,
                              MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION,
@@ -462,7 +463,7 @@ def migration_runner_iam_remediation_plan():
                             "values": copy.deepcopy(legacy_dns)})
     for change in plan["resource_changes"]:
         if change["address"] == viewer_address:
-            change["change"] = {"actions": ["update"],
+            change["change"] = {"actions": ["create", "delete"],
                                  "before": copy.deepcopy(legacy_viewer["values"]),
                                  "after": copy.deepcopy(resource(plan, viewer_address)["values"]),
                                  "after_unknown": {}}
@@ -720,6 +721,8 @@ def gke_resource_labels_drift():
 def project_iam_etag_drift(address, before_etag="etag-before", after_etag="etag-after"):
     project = "helpdeskcloud-capstone-511905"
     identities = {
+        "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]": (
+            "roles/container.clusterViewer", "helpdesk-app-migr-runner-dev"),
         "google_project_iam_member.dev_gke_node_runtime[0]": (
             "roles/container.defaultNodeServiceAccount", "helpdesk-gke-node-dev"),
         "google_project_iam_member.dev_app_cloudsql[0]": (
@@ -1284,7 +1287,7 @@ class GuardTests(unittest.TestCase):
         actions = {change["address"]: change["change"]["actions"]
                    for change in plan["resource_changes"]}
         viewer_address = "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]"
-        self.assertEqual(actions[viewer_address], ["update"])
+        self.assertEqual(actions[viewer_address], ["create", "delete"])
         self.assertEqual(actions[MIGRATION_RUNNER_DNS_BINDING_ADDRESS], ["delete"])
 
         for mutate in (
@@ -1320,6 +1323,27 @@ class GuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             check_plan(plan)
 
+    def test_migration_runner_cluster_viewer_etag_drift_requires_exact_remediation(self):
+        plan = migration_runner_iam_remediation_plan()
+        plan["resource_drift"] = [project_iam_etag_drift(MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS)]
+        self.assertEqual(check_plan(plan), "apply")
+
+        blocked_plan = migration_runner_iam_remediation_plan()
+        legacy_delete = next(change for change in blocked_plan["resource_changes"]
+                             if change["address"] == MIGRATION_RUNNER_DNS_BINDING_ADDRESS)
+        legacy_delete["change"]["actions"] = ["no-op"]
+        blocked_plan["resource_drift"] = [
+            project_iam_etag_drift(MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS)]
+        with self.assertRaisesRegex(ValueError, "drift"):
+            check_plan(blocked_plan)
+
+        invalid_plan = migration_runner_iam_remediation_plan()
+        invalid_drift = project_iam_etag_drift(MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS)
+        invalid_drift["change"]["after"]["member"] = "allUsers"
+        invalid_plan["resource_drift"] = [invalid_drift]
+        with self.assertRaisesRegex(ValueError, "drift"):
+            check_plan(invalid_plan)
+
     def test_apply28_migration_provider_audience_and_iam_etag_drift_allow_exact_connect_remediation(self):
         plan = migration_runner_iam_remediation_plan()
         provider_drift = migration_provider_audience_drift(None, [])
@@ -1327,6 +1351,7 @@ class GuardTests(unittest.TestCase):
             "google_project_iam_member.dev_app_cloudsql[0]",
             "google_project_iam_member.dev_gke_node_runtime[0]",
             "google_project_iam_member.dev_migration_cloudsql[0]",
+            MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS,
         )]
         plan["resource_drift"] = [provider_drift, *iam_drift]
 
@@ -1340,9 +1365,9 @@ class GuardTests(unittest.TestCase):
         self.assertIn("after migration provider identity: expected", report)
         self.assertIn("before oidc[0].allowed_audiences: null", report)
         self.assertIn("after oidc[0].allowed_audiences: []", report)
-        self.assertEqual(report.count("before IAM role and member: expected"), 3)
+        self.assertEqual(report.count("before IAM role and member: expected"), 4)
         self.assertEqual(report.count(
-            "etag representation: before=non-empty token; after=non-empty token"), 3)
+            "etag representation: before=non-empty token; after=non-empty token"), 4)
         self.assertNotIn("etag-before", report)
         self.assertNotIn("etag-after", report)
 
