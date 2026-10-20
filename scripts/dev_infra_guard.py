@@ -195,6 +195,11 @@ SUBNET_SELF_LINKS = tuple(
     for project in (PROJECT, PROJECT_NUMBER)
 )
 SUBNET_LINKS = SUBNET_SELF_LINKS + SUBNET_PATHS
+GKE_NODE_SERVICE_ACCOUNT = f"helpdesk-gke-node-dev@{PROJECT}.iam.gserviceaccount.com"
+GKE_NODE_OAUTH_SCOPES = frozenset({
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/userinfo.email",
+})
 PSA_ADDRESS = PREFIX + "google_compute_global_address.private_services"
 SUBNET_ADDRESS = PREFIX + "google_compute_subnetwork.this"
 REGISTRY_ADDRESS = "google_artifact_registry_repository.dev_images[0]"
@@ -1021,10 +1026,27 @@ def permitted_drift(entry):
         ) or (
             after_labels == ATTRIBUTION_LABEL and before_labels in empty_representations
         )
-        if not (exact_normalization or empty_map_normalization):
+        unchanged_known_labels = (
+            before_labels == after_labels
+            and before_labels in (*empty_representations, ATTRIBUTION_LABEL)
+        )
+        if not (exact_normalization or empty_map_normalization or unchanged_known_labels):
             return False
-        return ({key: value for key, value in before.items() if key != "resource_labels"}
-                == {key: value for key, value in after.items() if key != "resource_labels"})
+        ignored = {"resource_labels"}
+        if before.get("node_config") != after.get("node_config") or before.get("node_pool") != after.get("node_pool"):
+            # In provider 7.8.0 these cluster fields are Optional+Computed. The
+            # Autopilot cluster had no provisioned pool in Terraform state; GKE
+            # created its managed pool for the already scheduled migration Pod.
+            # Permit this one empty-to-singleton readback only, with the configured
+            # node identity, cloud-platform/userinfo scopes, GKE metadata mode,
+            # and the private Dev subnet/pod range all checked above.
+            if (before.get("node_config") == after.get("node_config")
+                    or before.get("node_pool") == after.get("node_pool")
+                    or not gke_autopilot_node_readback_matches(before, after)):
+                return False
+            ignored.update(("node_config", "node_pool"))
+        return ({key: value for key, value in before.items() if key not in ignored}
+                == {key: value for key, value in after.items() if key not in ignored})
 
     if address in PROJECT_IAM_READBACKS:
         expected_role, expected_member = PROJECT_IAM_READBACKS[address]
@@ -1658,6 +1680,69 @@ def migration_provider_identity_matches(snapshot):
     return all(migration_provider_identity_checks(snapshot).values())
 
 
+def gke_node_config_readback_matches(value):
+    """Check the security identity on one GKE-managed Autopilot node config."""
+    return all(gke_node_config_readback_checks(value).values())
+
+
+def gke_node_config_readback_checks(value):
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+        return {"service account": False, "OAuth scopes": False, "Workload Identity mode": False}
+    config = value[0]
+    scopes = config.get("oauth_scopes")
+    workload_metadata = config.get("workload_metadata_config")
+    return {
+        "service account": config.get("service_account") == GKE_NODE_SERVICE_ACCOUNT,
+        "OAuth scopes": (isinstance(scopes, list) and len(scopes) == len(GKE_NODE_OAUTH_SCOPES)
+                         and all(isinstance(scope, str) for scope in scopes)
+                         and frozenset(scopes) == GKE_NODE_OAUTH_SCOPES),
+        "Workload Identity mode": (isinstance(workload_metadata, list)
+                                   and len(workload_metadata) == 1
+                                   and isinstance(workload_metadata[0], dict)
+                                   and workload_metadata[0].get("mode") == "GKE_METADATA"),
+    }
+
+
+def gke_autopilot_node_readback_checks(snapshot):
+    """Return value-free checks for GKE's computed Autopilot node readback."""
+    node_config_checks = gke_node_config_readback_checks(snapshot.get("node_config"))
+    pools = snapshot.get("node_pool")
+    pool_ok = isinstance(pools, list) and len(pools) == 1 and isinstance(pools[0], dict)
+    pool_config_checks = {"service account": False, "OAuth scopes": False,
+                          "Workload Identity mode": False}
+    private_network_ok = False
+    if pool_ok:
+        pool = pools[0]
+        pool_config_checks = gke_node_config_readback_checks(pool.get("node_config"))
+        network = pool.get("network_config")
+        private_network_ok = (
+            isinstance(network, list)
+            and len(network) == 1
+            and isinstance(network[0], dict)
+            and network[0].get("enable_private_nodes") is True
+            and network[0].get("subnetwork") in SUBNET_LINKS
+            and network[0].get("pod_range") == "helpdeskcloud-dev-pods"
+        )
+    return {
+        "node service account": node_config_checks["service account"],
+        "node OAuth scopes": node_config_checks["OAuth scopes"],
+        "node Workload Identity metadata mode": node_config_checks["Workload Identity mode"],
+        "Autopilot pool service account": pool_config_checks["service account"],
+        "Autopilot pool OAuth scopes": pool_config_checks["OAuth scopes"],
+        "Autopilot pool Workload Identity metadata mode": pool_config_checks["Workload Identity mode"],
+        "Autopilot pool private subnet and pod range": private_network_ok,
+    }
+
+
+def gke_autopilot_node_readback_matches(before, after):
+    """Recognize the exact empty-to-provisioned readback created by Autopilot."""
+    return (
+        before.get("node_config") == []
+        and before.get("node_pool") == []
+        and all(gke_autopilot_node_readback_checks(after).values())
+    )
+
+
 def ca_mode_status(value):
     if value in ("GOOGLE_MANAGED_INTERNAL_CA", "GOOGLE_MANAGED_CAS_CA", "CUSTOMER_MANAGED_CAS_CA"):
         return value
@@ -1711,6 +1796,13 @@ def diagnose_drift(plan):
                                  + safe_readback_shape(before.get(field, MISSING), field_name=field)
                                  + "; after="
                                  + safe_readback_shape(after.get(field, MISSING), field_name=field))
+            if any(path == "node_config" or path.startswith("node_config[")
+                   or path == "node_pool" or path.startswith("node_pool[")
+                   for path in paths):
+                checks = gke_autopilot_node_readback_checks(after)
+                lines.append("  Autopilot node readback security checks: "
+                             + ", ".join(f"{name}={'expected' if matches else 'unexpected'}"
+                                          for name, matches in checks.items()))
         if entry.get("address") == PHASE8_PROVIDER_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
             for snapshot_name, snapshot in (("before", before), ("after", after)):
                 oidc = single_block(snapshot.get("oidc"))
