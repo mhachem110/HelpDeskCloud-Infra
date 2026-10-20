@@ -4,6 +4,7 @@ The workflow stores JSON in the runner's temporary directory. This script prints
 only a decision or a short error, never plan or state contents.
 """
 
+import hashlib
 import json
 import re
 import sys
@@ -275,6 +276,27 @@ SECRET_READBACK_NAMES = {
     "google_secret_manager_secret.dev_app_connection[0]": "helpdesk-dev-db-connection",
     "google_secret_manager_secret.dev_admin_password[0]": "helpdesk-dev-db-admin-password",
 }
+SECRET_IAM_READBACKS = {
+    "google_secret_manager_secret_iam_member.dev_app_secret_access[0]": (
+        "helpdesk-dev-db-connection",
+        f"principal://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/"
+        f"workloadIdentityPools/{PROJECT}.svc.id.goog/subject/ns/helpdesk-dev/sa/helpdesk-dev-app",
+    ),
+    "google_secret_manager_secret_iam_member.dev_app_gsa_secret_access[0]": (
+        "helpdesk-dev-db-connection",
+        f"serviceAccount:helpdesk-app-dev@{PROJECT}.iam.gserviceaccount.com",
+    ),
+    "google_secret_manager_secret_iam_member.dev_admin_secret_access[0]": (
+        "helpdesk-dev-db-admin-password",
+        f"principal://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/"
+        f"workloadIdentityPools/{PROJECT}.svc.id.goog/subject/ns/helpdesk-dev/sa/helpdesk-dev-migrate",
+    ),
+    MIGRATION_GSA_SECRET_ACCESS_ADDRESS: (
+        "helpdesk-dev-db-admin-password",
+        f"serviceAccount:helpdesk-migrate-dev@{PROJECT}.iam.gserviceaccount.com",
+    ),
+}
+SECRET_ACCESSOR_ROLE = "roles/secretmanager.secretAccessor"
 PROJECT_IAM_READBACKS = {
     MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS: (
         "roles/container.clusterViewer",
@@ -1142,6 +1164,7 @@ def permitted_drift(entry):
         ARTIFACT_READER_IAM_ADDRESS: "google_artifact_registry_repository_iam_member",
         **{address: "google_project_iam_member" for address in PROJECT_IAM_READBACKS},
         **{secret: PHASE7[secret] for secret in SECRET_READBACK_NAMES},
+        **{address: "google_secret_manager_secret_iam_member" for address in SECRET_IAM_READBACKS},
     }.get(address)
     if entry.get("mode") != "managed" or expected_type is None or entry.get("type") != expected_type:
         return False
@@ -1221,6 +1244,28 @@ def permitted_drift(entry):
         # diagnostic classifies the live snapshots without exposing contents.
         return ({key: value for key, value in before.items() if key not in SECRET_EMPTY_MAP_FIELDS}
                 == {key: value for key, value in after.items() if key not in SECRET_EMPTY_MAP_FIELDS})
+
+    if address in SECRET_IAM_READBACKS:
+        secret_id, expected_member = SECRET_IAM_READBACKS[address]
+        expected_secret_path = f"projects/{PROJECT}/secrets/{secret_id}"
+        if any(
+            snapshot.get("secret_id") not in (secret_id, expected_secret_path)
+            or snapshot.get("role") != SECRET_ACCESSOR_ROLE
+            or snapshot.get("member") != expected_member
+            or snapshot.get("project", MISSING) not in (MISSING, PROJECT, PROJECT_NUMBER)
+            for snapshot in (before, after)
+        ):
+            return False
+        before_etag, after_etag = before.get("etag"), after.get("etag")
+        if (not isinstance(before_etag, str) or not before_etag
+                or not isinstance(after_etag, str) or not after_etag
+                or before_etag == after_etag):
+            return False
+        # A Secret Manager IAM member's etag is the shared secret-policy
+        # concurrency token. Permit that field alone; check_drift additionally
+        # requires a live policy snapshot matching all members in Terraform state.
+        return ({key: value for key, value in before.items() if key != "etag"}
+                == {key: value for key, value in after.items() if key != "etag"})
 
     if address == CLUSTER_ADDRESS:
         expected_identity = ("helpdeskcloud-dev-gke", "us-east1")
@@ -1465,15 +1510,157 @@ def permitted_drift(entry):
     return before_copy == after_copy
 
 
-def check_drift(plan, *, allow_migration_runner_iam_replacement=False):
+def check_secret_iam_policy(plan, secret_id, policy):
+    """Require the live secret policy to contain exactly its Terraform-tracked grants."""
+    prior_state = plan.get("prior_state")
+    require(isinstance(prior_state, dict), "Missing Terraform prior state for Secret Manager IAM evidence")
+    root_module = prior_state.get("values", {}).get("root_module")
+    require(isinstance(root_module, dict), "Malformed Terraform prior state for Secret Manager IAM evidence")
+
+    expected_members = []
+    seen_addresses = set()
+    for resource in state_resources(root_module):
+        if not isinstance(resource, dict) or resource.get("mode") != "managed":
+            continue
+        if resource.get("type") != "google_secret_manager_secret_iam_member":
+            continue
+        address = resource.get("address")
+        require(address in SECRET_IAM_READBACKS,
+                "Unrecognized Secret Manager IAM resource in Terraform state requires review")
+        require(address not in seen_addresses, "Duplicate Secret Manager IAM resource in Terraform state")
+        seen_addresses.add(address)
+        expected_secret, expected_member = SECRET_IAM_READBACKS[address]
+        if expected_secret != secret_id:
+            continue
+
+        values = resource.get("values")
+        expected_path = f"projects/{PROJECT}/secrets/{secret_id}"
+        require(isinstance(values, dict)
+                and values.get("secret_id") in (secret_id, expected_path)
+                and values.get("role") == SECRET_ACCESSOR_ROLE
+                and values.get("member") == expected_member
+                and values.get("project", MISSING) in (MISSING, PROJECT, PROJECT_NUMBER),
+                "Terraform state contains an unexpected Secret Manager IAM identity")
+        expected_members.append((SECRET_ACCESSOR_ROLE, expected_member))
+
+    require(bool(expected_members), "No Terraform-managed Secret Manager IAM members found for the affected secret")
+    require(isinstance(policy, dict) and set(policy).issubset({"bindings", "etag", "version", "auditConfigs"})
+            and isinstance(policy.get("bindings"), list),
+            "Invalid live Secret Manager IAM policy evidence")
+    require(policy.get("version", 1) in (1, 3), "Unexpected live Secret Manager IAM policy version")
+
+    actual_members = []
+    for binding in policy["bindings"]:
+        require(isinstance(binding, dict)
+                and set(binding).issubset({"role", "members", "condition"})
+                and binding.get("role") == SECRET_ACCESSOR_ROLE
+                and binding.get("condition") in (None, MISSING)
+                and isinstance(binding.get("members"), list)
+                and all(isinstance(member, str) and member for member in binding["members"]),
+                "Live Secret Manager policy contains an unexpected role or condition")
+        actual_members.extend((binding["role"], member) for member in binding["members"])
+
+    require(len(actual_members) == len(set(actual_members))
+            and set(actual_members) == set(expected_members),
+            "Live Secret Manager policy members differ from Terraform-managed identities")
+
+
+def check_secret_iam_evidence(plan, policies, drift):
+    affected_secrets = {
+        SECRET_IAM_READBACKS[entry["address"]][0]
+        for entry in drift
+        if entry.get("address") in SECRET_IAM_READBACKS
+    }
+    if not affected_secrets:
+        return
+    require(isinstance(policies, dict),
+            "Secret Manager IAM etag drift requires live secret-policy evidence")
+    for secret_id in affected_secrets:
+        require(secret_id in policies,
+                "Secret Manager IAM etag drift requires live secret-policy evidence")
+        check_secret_iam_policy(plan, secret_id, policies[secret_id])
+
+
+def drift_fingerprint(plan):
+    """Fingerprint drift addresses, actions and field paths without including values."""
+    drift = plan.get("resource_drift", [])
+    require(isinstance(drift, list), "Unexpected resource drift format")
+    entries = []
+    for entry in drift:
+        require(isinstance(entry, dict), "Malformed resource drift entry")
+        change = entry.get("change", {})
+        before, after = change.get("before"), change.get("after")
+        secret = entry.get("address") in SECRET_READBACK_NAMES
+        paths = sorted(set(safe_drift_path(path, secret=secret)
+                           for path in changed_paths(before, after)))
+        entries.append({
+            "mode": entry.get("mode"),
+            "address": entry.get("address"),
+            "type": entry.get("type"),
+            "actions": change.get("actions"),
+            "paths": paths,
+        })
+    canonical = json.dumps(sorted(entries, key=lambda item: (str(item["address"]), str(item["type"]))),
+                           sort_keys=True, separators=(",", ":"))
+    return "drift-v1-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def drift_is_acknowledgeable(plan):
+    """Permit explicit acknowledgement only for known managed updates, never delete/replace."""
+    drift = plan.get("resource_drift", [])
+    if not isinstance(drift, list) or not drift:
+        return False
+    addresses = [entry.get("address") for entry in drift if isinstance(entry, dict)]
+    if len(addresses) != len(drift) or len(set(addresses)) != len(addresses):
+        return False
+    for entry in drift:
+        if not isinstance(entry, dict):
+            return False
+        address = entry.get("address")
+        change = entry.get("change", {})
+        if (entry.get("mode") != "managed"
+                or address not in EXPECTED
+                or entry.get("type") != EXPECTED[address]
+                or change.get("actions") != ["update"]
+                or not isinstance(change.get("before"), dict)
+                or not isinstance(change.get("after"), dict)
+                or not changed_paths(change.get("before"), change.get("after"))):
+            return False
+    return True
+
+
+def check_drift(plan, *, allow_migration_runner_iam_replacement=False, secret_iam_policies=None,
+                acknowledged_drift_fingerprint=None, report_only=False):
     drift = plan.get("resource_drift", [])
     require(isinstance(drift, list), "Unexpected resource drift format")
     require(len({entry.get("address") for entry in drift if isinstance(entry, dict)}) == len(drift),
             "Duplicate or malformed resource drift")
-    require(all(isinstance(entry, dict) and permitted_drift(entry) for entry in drift),
-            "Unexpected resource drift requires review; run the Dev Plan diagnostic")
-    # A drift observation never authorizes a requested operation on that resource.
-    for entry in drift:
+    if report_only:
+        require(acknowledged_drift_fingerprint is None,
+                "A drift acknowledgement is not used by the read-only Dev Plan")
+        require(all(isinstance(entry, dict)
+                    and isinstance(entry.get("address"), str)
+                    and isinstance(entry.get("change"), dict)
+                    for entry in drift),
+                "Malformed resource drift entry")
+        return
+    check_secret_iam_evidence(plan, secret_iam_policies, drift)
+    permitted = all(isinstance(entry, dict) and permitted_drift(entry) for entry in drift)
+    acknowledged = False
+    if acknowledged_drift_fingerprint is not None:
+        require(bool(drift), "No resource drift remains; rerun Apply without a drift acknowledgement")
+        require(acknowledged_drift_fingerprint == drift_fingerprint(plan),
+                "Drift fingerprint does not match this plan; inspect the Dev Plan diagnostic and retry")
+    if not permitted and acknowledged_drift_fingerprint is not None:
+        require(drift_is_acknowledgeable(plan),
+                "Drift acknowledgement is limited to known managed updates; deletions, replacements, "
+                "unknown resources, and malformed drift remain blocked")
+        acknowledged = True
+    require(permitted or acknowledged,
+            "Unexpected resource drift requires review; run the Dev Plan diagnostic and, for an intentional "
+            "managed update, provide its exact drift fingerprint")
+    # Without an exact operator fingerprint, observed drift does not authorize a requested operation.
+    for entry in drift if not acknowledged else []:
         requested = [change for change in plan.get("resource_changes", [])
                      if change.get("address") == entry.get("address")]
         if (entry.get("address") == MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS
@@ -1534,14 +1721,19 @@ def migration_runner_iam_remediation_candidate(plan):
     )
 
 
-def check_plan(plan):
+def check_plan(plan, *, secret_iam_policies=None, acknowledged_drift_fingerprint=None,
+               report_drift_only=False):
     for name, expected in {"project_id": PROJECT, "region": "us-east1", "environment": "dev"}.items():
         require(plan.get("variables", {}).get(name, {}).get("value") == expected, f"Unexpected {name}")
-    # Drift checks run first so their diagnostics remain actionable. The only
-    # exception is the exact phase-9 IAM remediation shape, validated in full below.
+    # Drift checks run first so diagnostics remain actionable. The exception paths
+    # are the exact phase-9 remediation or a matching operator fingerprint; the full
+    # resource and action constraints below still apply in either case.
     check_drift(
         plan,
         allow_migration_runner_iam_replacement=migration_runner_iam_remediation_candidate(plan),
+        secret_iam_policies=secret_iam_policies,
+        acknowledged_drift_fingerprint=acknowledged_drift_fingerprint,
+        report_only=report_drift_only,
     )
     planned = planned_resources(plan.get("planned_values", {}).get("root_module", {}))
     managed = [r for r in planned if r.get("mode") == "managed"]
@@ -2150,6 +2342,21 @@ def diagnose_drift(plan):
             lines.append("  etag representation: before="
                          + etag_readback_status(before.get("etag", MISSING))
                          + "; after=" + etag_readback_status(after.get("etag", MISSING)))
+        if entry.get("address") in SECRET_IAM_READBACKS and isinstance(before, dict) and isinstance(after, dict):
+            secret_id, expected_member = SECRET_IAM_READBACKS[entry["address"]]
+            expected_path = f"projects/{PROJECT}/secrets/{secret_id}"
+            for snapshot_name, snapshot in (("before", before), ("after", after)):
+                identity_matches = (
+                    snapshot.get("secret_id") in (secret_id, expected_path)
+                    and snapshot.get("role") == SECRET_ACCESSOR_ROLE
+                    and snapshot.get("member") == expected_member
+                    and snapshot.get("project", MISSING) in (MISSING, PROJECT, PROJECT_NUMBER)
+                )
+                lines.append("  " + snapshot_name + " secret IAM role, resource and principal: "
+                             + ("expected" if identity_matches else "unexpected (values withheld)"))
+            lines.append("  etag representation: before="
+                         + etag_readback_status(before.get("etag", MISSING))
+                         + "; after=" + etag_readback_status(after.get("etag", MISSING)))
         if entry.get("address") == PSA_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
             lines.append("  labels: before=" + known_value(before.get("labels", MISSING), label=True)
                          + "; after=" + classify_address_labels(after.get("labels", MISSING)))
@@ -2200,7 +2407,14 @@ def diagnose_drift(plan):
             for field in SECRET_EMPTY_MAP_FIELDS:
                 lines.append("  " + field + ": before=" + empty_map_status(before.get(field, MISSING))
                              + "; after=" + empty_map_status(after.get(field, MISSING)))
-    lines.append("Only exact documented normalization patterns may pass; all other drift remains blocked.")
+    if drift_is_acknowledgeable(plan):
+        lines.append("Drift acknowledgement fingerprint (addresses/actions/field paths only; no values): "
+                     + drift_fingerprint(plan))
+        lines.append("If Apply blocks intentional drift, pass this fingerprint to the protected Terraform Dev Apply.")
+    else:
+        lines.append("No general acknowledgement is available for this drift; deletions, replacements, "
+                     "unknown resources, and malformed drift remain blocked.")
+    lines.append("Only exact documented normalization patterns pass automatically.")
     return lines
 
 
@@ -2633,8 +2847,34 @@ def check_iam(policy, label):
 
 def main():
     try:
-        if len(sys.argv) == 3 and sys.argv[1] == "check-plan":
-            print(check_plan(read_json(sys.argv[2])))
+        if len(sys.argv) >= 3 and sys.argv[1] == "check-plan":
+            plan_path = sys.argv[2]
+            arguments = sys.argv[3:]
+            report_drift_only = "--report-drift" in arguments
+            arguments = [argument for argument in arguments if argument != "--report-drift"]
+            acknowledged_drift_fingerprint = None
+            if "--acknowledged-drift" in arguments:
+                index = arguments.index("--acknowledged-drift")
+                if index + 1 >= len(arguments):
+                    raise ValueError("--acknowledged-drift requires the fingerprint from Dev Plan")
+                acknowledged_drift_fingerprint = arguments[index + 1] or None
+                del arguments[index:index + 2]
+            if arguments and arguments[-1] == "":
+                arguments.pop()
+            if len(arguments) not in (0, 2):
+                raise ValueError("check-plan accepts either zero or two live Secret Manager policy files")
+            policies = None
+            if arguments:
+                policies = {
+                    "helpdesk-dev-db-connection": read_json(arguments[0]),
+                    "helpdesk-dev-db-admin-password": read_json(arguments[1]),
+                }
+            print(check_plan(
+                read_json(plan_path),
+                secret_iam_policies=policies,
+                acknowledged_drift_fingerprint=acknowledged_drift_fingerprint,
+                report_drift_only=report_drift_only,
+            ))
         elif len(sys.argv) == 3 and sys.argv[1] == "diagnose-drift":
             print("\n".join(diagnose_drift(read_json(sys.argv[2]))))
         elif len(sys.argv) == 3 and sys.argv[1] == "check-project-iam":
@@ -2644,7 +2884,9 @@ def main():
             verify_deployment(sys.argv[2:])
             print("Approved Dev resources, IAM, outputs, and deletion protection verified")
         else:
-            raise ValueError("Usage: dev_infra_guard.py check-plan PLAN_JSON | diagnose-drift PLAN_JSON | "
+            raise ValueError("Usage: dev_infra_guard.py check-plan PLAN_JSON [APP_SECRET_IAM ADMIN_SECRET_IAM] "
+                             "[--report-drift] [--acknowledged-drift FINGERPRINT] | "
+                             "diagnose-drift PLAN_JSON | "
                              "check-project-iam PROJECT_IAM_JSON | "
                              "verify-deployment VPC SUBNET ADDRESS CONNECTIONS REGISTRY REGISTRY_IAM PROJECT_IAM "
                              "SQL DATABASES OUTPUTS "

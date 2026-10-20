@@ -59,6 +59,7 @@ jobs:
           terraform show -json "$plan_file" > "$json_file"
           python ../scripts/dev_infra_guard.py diagnose-drift "$json_file"
 
-      # Use the same strict decision as protected Apply, without changing GCP resources.
-      - name: Check saved plan with the Dev Apply guard
-        run: python ../scripts/dev_infra_guard.py check-plan "$RUNNER_TEMP/dev-diagnostic.json"
+      # This workflow is read-only: report drift without blocking review. Protected Apply
+      # still requires the strict guard or an exact drift acknowledgement.
+      - name: Validate plan safety (drift is informational)
+        run: python ../scripts/dev_infra_guard.py check-plan "$RUNNER_TEMP/dev-diagnostic.json" --report-drift

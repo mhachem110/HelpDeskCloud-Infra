@@ -11,6 +11,10 @@ on:
         options:
           - apply
           - verify-only
+      acknowledged_drift_fingerprint:
+        description: Optional exact fingerprint from Terraform Dev Plan for an intentional managed update
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -33,6 +37,7 @@ jobs:
         working-directory: terraform
     env:
       TF_IN_AUTOMATION: true
+      ACKNOWLEDGED_DRIFT_FINGERPRINT: ${{ inputs.acknowledged_drift_fingerprint }}
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -91,8 +96,12 @@ jobs:
           json_file="$RUNNER_TEMP/dev-infra-review.json"
           terraform plan -input=false -no-color -lock-timeout=5m -var-file=environments/dev.tfvars -out="$plan_file"
           terraform show -json "$plan_file" > "$json_file"
+          gcloud secrets get-iam-policy helpdesk-dev-db-connection --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-secret-iam.json"
+          gcloud secrets get-iam-policy helpdesk-dev-db-admin-password --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/admin-secret-iam.json"
           python ../scripts/dev_infra_guard.py diagnose-drift "$json_file"
-          python ../scripts/dev_infra_guard.py check-plan "$json_file"
+          python ../scripts/dev_infra_guard.py check-plan "$json_file" \
+            "$RUNNER_TEMP/app-secret-iam.json" "$RUNNER_TEMP/admin-secret-iam.json" \
+            --acknowledged-drift "$ACKNOWLEDGED_DRIFT_FINGERPRINT"
 
   approved-apply:
     name: Approved Dev operation
@@ -114,6 +123,7 @@ jobs:
         working-directory: terraform
     env:
       TF_IN_AUTOMATION: true
+      ACKNOWLEDGED_DRIFT_FINGERPRINT: ${{ inputs.acknowledged_drift_fingerprint }}
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -180,8 +190,12 @@ jobs:
           json_file="$RUNNER_TEMP/dev-infra-apply.json"
           terraform plan -input=false -no-color -lock-timeout=5m -var-file=environments/dev.tfvars -out="$plan_file"
           terraform show -json "$plan_file" > "$json_file"
+          gcloud secrets get-iam-policy helpdesk-dev-db-connection --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-secret-iam.json"
+          gcloud secrets get-iam-policy helpdesk-dev-db-admin-password --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/admin-secret-iam.json"
           python ../scripts/dev_infra_guard.py diagnose-drift "$json_file"
-          decision=$(python ../scripts/dev_infra_guard.py check-plan "$json_file")
+          decision=$(python ../scripts/dev_infra_guard.py check-plan "$json_file" \
+            "$RUNNER_TEMP/app-secret-iam.json" "$RUNNER_TEMP/admin-secret-iam.json" \
+            --acknowledged-drift "$ACKNOWLEDGED_DRIFT_FINGERPRINT")
           echo "decision=$decision" >> "$GITHUB_OUTPUT"
           echo "Guard decision: $decision"
 
