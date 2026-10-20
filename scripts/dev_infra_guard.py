@@ -1443,6 +1443,50 @@ def changed_paths(before, after, prefix=""):
     return [prefix or "<unknown>"]
 
 
+def safe_readback_shape(value, *, depth=0, field_name=""):
+    """Describe provider readback structure without logging resource values."""
+    if value is MISSING:
+        return "missing"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, dict):
+        # These Terraform fields are arbitrary user maps; never expose their keys.
+        if field_name in {"labels", "resource_labels", "terraform_labels", "effective_labels",
+                          "metadata", "annotations", "effective_annotations", "tags",
+                          "version_aliases"}:
+            return "map(contents withheld)"
+        if depth >= 4:
+            return f"object(field count={len(value)})"
+        fields = []
+        for key in sorted(value):
+            if not isinstance(key, str):
+                continue
+            fields.append(f"{key}:{safe_readback_shape(value[key], depth=depth + 1, field_name=key)}")
+        return "object(" + ", ".join(fields) + ")"
+    if isinstance(value, list):
+        if depth >= 4:
+            return f"list(count={len(value)})"
+        # An empty list is useful to distinguish from an omitted/null block;
+        # non-empty arrays report structure only, never item values.
+        if not value:
+            return "empty list"
+        if all(isinstance(item, dict) for item in value):
+            samples = "; ".join(
+                safe_readback_shape(item, depth=depth + 1, field_name=field_name)
+                for item in value[:3]
+            )
+            suffix = "; more items omitted" if len(value) > 3 else ""
+            return f"list(count={len(value)}; items={samples}{suffix})"
+        return f"list(count={len(value)}; item type={safe_readback_shape(value[0], depth=depth + 1)})"
+    return "other type"
+
+
 def safe_drift_path(path, secret=False):
     """Do not expose user-defined map keys or unknown secret paths in logs."""
     if secret:
@@ -1660,6 +1704,13 @@ def diagnose_drift(plan):
             lines.append("  resource_labels: before="
                          + classify_address_labels(before.get("resource_labels", MISSING))
                          + "; after=" + classify_address_labels(after.get("resource_labels", MISSING)))
+            for field in ("node_config", "node_pool"):
+                if any(path == field or path.startswith(field + "[") or path.startswith(field + ".")
+                       for path in paths):
+                    lines.append(f"  {field} readback structure: before="
+                                 + safe_readback_shape(before.get(field, MISSING), field_name=field)
+                                 + "; after="
+                                 + safe_readback_shape(after.get(field, MISSING), field_name=field))
         if entry.get("address") == PHASE8_PROVIDER_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
             for snapshot_name, snapshot in (("before", before), ("after", after)):
                 oidc = single_block(snapshot.get("oidc"))
