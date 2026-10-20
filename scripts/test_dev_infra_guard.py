@@ -26,7 +26,8 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              MIGRATION_RUNNER_DNS_BINDING_TITLE, MIGRATION_RUNNER_DNS_ENDPOINT,
                              MIGRATION_RUNNER_CONDITION, MIGRATION_RUNNER_DISPLAY_NAME,
                              MIGRATION_RUNNER_EMAIL, MIGRATION_RUNNER_MEMBER,
-                             MIGRATION_RUNNER_PROVIDER_ID,
+                             MIGRATION_RUNNER_PROVIDER_ADDRESS,
+                             MIGRATION_RUNNER_PROVIDER_ID, MIGRATION_RUNNER_PROVIDER_RESOURCE_ID,
                              MISSING,
                              REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH,
                              VPC_LINK, VPC_PATH, VPC_PATHS,
@@ -492,6 +493,26 @@ def support_provider_audience_drift(before_value, after_value):
         "change": {"actions": ["update"], "before": before, "after": after},
     }]
     return plan
+
+
+def migration_provider_audience_drift(before_value, after_value):
+    """Model a migration-provider readback where only unset audiences differ."""
+    plan = fixture()
+    values = resource(plan, MIGRATION_RUNNER_PROVIDER_ADDRESS)["values"]
+    before, after = copy.deepcopy(values), copy.deepcopy(values)
+    for snapshot, audience_value in ((before, before_value), (after, after_value)):
+        snapshot["id"] = MIGRATION_RUNNER_PROVIDER_RESOURCE_ID
+        audiences = snapshot["oidc"][0]
+        if audience_value is MISSING:
+            audiences.pop("allowed_audiences", None)
+        else:
+            audiences["allowed_audiences"] = copy.deepcopy(audience_value)
+    return {
+        "mode": "managed",
+        "address": MIGRATION_RUNNER_PROVIDER_ADDRESS,
+        "type": "google_iam_workload_identity_pool_provider",
+        "change": {"actions": ["update"], "before": before, "after": after},
+    }
 
 
 def apply12_recovery_plan():
@@ -1277,6 +1298,98 @@ class GuardTests(unittest.TestCase):
             prior_viewer["values"]["condition"][0]["expression"].replace(
                 "helpdeskcloud-dev-gke", "another-cluster"))
         with self.assertRaisesRegex(ValueError, "existing Dev GKE cluster"):
+            check_plan(plan)
+
+    def test_apply28_migration_provider_audience_and_iam_etag_drift_allow_exact_dns_binding_add(self):
+        plan = migration_runner_dns_binding_recovery_plan()
+        provider_drift = migration_provider_audience_drift(None, [])
+        iam_drift = [project_iam_etag_drift(address) for address in (
+            "google_project_iam_member.dev_app_cloudsql[0]",
+            "google_project_iam_member.dev_gke_node_runtime[0]",
+            "google_project_iam_member.dev_migration_cloudsql[0]",
+        )]
+        plan["resource_drift"] = [provider_drift, *iam_drift]
+
+        self.assertEqual(check_plan(plan), "apply")
+        creates = {change["address"] for change in plan["resource_changes"]
+                   if change["change"]["actions"] == ["create"]}
+        self.assertEqual(creates, {MIGRATION_RUNNER_DNS_BINDING_ADDRESS})
+
+        report = "\n".join(diagnose_drift(plan))
+        self.assertIn("before migration provider identity: expected", report)
+        self.assertIn("after migration provider identity: expected", report)
+        self.assertIn("before oidc[0].allowed_audiences: null", report)
+        self.assertIn("after oidc[0].allowed_audiences: []", report)
+        self.assertEqual(report.count("before IAM role and member: expected"), 3)
+        self.assertEqual(report.count(
+            "etag representation: before=non-empty token; after=non-empty token"), 3)
+        self.assertNotIn("etag-before", report)
+        self.assertNotIn("etag-after", report)
+
+    def test_migration_provider_audience_drift_rejects_values_identity_and_other_changes(self):
+        for before, after in (
+            (MISSING, None),
+            (None, MISSING),
+            (MISSING, []),
+            ([], MISSING),
+            (None, []),
+            ([], None),
+        ):
+            plan = migration_runner_dns_binding_recovery_plan()
+            plan["resource_drift"] = [migration_provider_audience_drift(before, after)]
+            with self.subTest(allowed_audiences_before=before, allowed_audiences_after=after):
+                self.assertEqual(check_plan(plan), "apply")
+
+        for before, after in (
+            (None, None),
+            (MISSING, MISSING),
+            (["https://unexpected.example"], []),
+            ([], ["https://unexpected.example"]),
+            (["https://first.example"], ["https://second.example"]),
+        ):
+            plan = migration_runner_dns_binding_recovery_plan()
+            plan["resource_drift"] = [migration_provider_audience_drift(before, after)]
+            with self.subTest(before=before, after=after), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(plan)
+
+        identity_mutations = (
+            lambda snapshot: snapshot.update(project="another-project"),
+            lambda snapshot: snapshot.update(workload_identity_pool_id="another-pool"),
+            lambda snapshot: snapshot.update(workload_identity_pool_provider_id="another-provider"),
+            lambda snapshot: snapshot.update(disabled=True),
+            lambda snapshot: snapshot.update(attribute_mapping={}),
+            lambda snapshot: snapshot.update(attribute_condition="true"),
+            lambda snapshot: snapshot.update(id=(
+                "projects/260283083469/locations/global/workloadIdentityPools/"
+                "helpdesk-github/providers/github-app-migration-dev")),
+        )
+        for mutate in identity_mutations:
+            plan = migration_runner_dns_binding_recovery_plan()
+            drift = migration_provider_audience_drift(None, [])
+            mutate(drift["change"]["before"])
+            mutate(drift["change"]["after"])
+            plan["resource_drift"] = [drift]
+            with self.subTest(mutation=mutate), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(plan)
+
+        for mutate in (
+            lambda snapshot: snapshot["oidc"][0].update(
+                issuer_uri="https://attacker.example"),
+            lambda snapshot: snapshot.update(display_name="unexpected provider display name"),
+        ):
+            plan = migration_runner_dns_binding_recovery_plan()
+            drift = migration_provider_audience_drift(None, [])
+            mutate(drift["change"]["after"])
+            plan["resource_drift"] = [drift]
+            with self.subTest(mutation=mutate), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(plan)
+
+        plan = migration_runner_dns_binding_recovery_plan()
+        plan["resource_drift"] = [migration_provider_audience_drift(None, [])]
+        change = next(item for item in plan["resource_changes"]
+                      if item["address"] == MIGRATION_RUNNER_PROVIDER_ADDRESS)
+        change["change"]["actions"] = ["update"]
+        with self.assertRaisesRegex(ValueError, "readback only"):
             check_plan(plan)
 
     def test_migration_runner_rejects_partial_state_or_partial_creation(self):
