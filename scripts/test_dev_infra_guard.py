@@ -742,6 +742,36 @@ def gke_resource_labels_drift():
             "change": {"actions": ["update"], "before": before, "after": after}}
 
 
+def gke_autopilot_node_readback_drift():
+    drift = gke_resource_labels_drift()
+    before = drift["change"]["before"]
+    after = drift["change"]["after"]
+    node_config = [{
+        "service_account": "helpdesk-gke-node-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com",
+        "oauth_scopes": [
+            "https://www.googleapis.com/auth/cloud-platform",
+            "https://www.googleapis.com/auth/userinfo.email",
+        ],
+        "workload_metadata_config": [{"mode": "GKE_METADATA"}],
+    }]
+    before["node_config"] = []
+    after["node_config"] = copy.deepcopy(node_config)
+    before["node_pool"] = []
+    after["node_pool"] = [{
+        "name": "gke-managed-pool",
+        "node_config": copy.deepcopy(node_config),
+        "network_config": [{
+            "enable_private_nodes": True,
+            "subnetwork": SUBNET_PATHS[0],
+            "pod_range": "helpdeskcloud-dev-pods",
+        }],
+    }]
+    # The live plan reported an unchanged empty map for the cluster labels.
+    before["resource_labels"] = {}
+    after["resource_labels"] = {}
+    return drift
+
+
 def project_iam_etag_drift(address, before_etag="etag-before", after_etag="etag-after"):
     project = "helpdeskcloud-capstone-511905"
     identities = {
@@ -2228,6 +2258,52 @@ class GuardTests(unittest.TestCase):
             "startup-script",
         ):
             self.assertNotIn(private_value, report)
+
+    def test_gke_autopilot_computed_node_readback_is_narrowly_permitted(self):
+        drift = gke_autopilot_node_readback_drift()
+        self.assertTrue(permitted_drift(drift))
+        report = "\n".join(diagnose_drift({"resource_drift": [drift]}))
+        self.assertIn("node service account=expected", report)
+        self.assertIn("node OAuth scopes=expected", report)
+        self.assertIn("node Workload Identity metadata mode=expected", report)
+        self.assertIn("Autopilot pool service account=expected", report)
+        self.assertIn("Autopilot pool OAuth scopes=expected", report)
+        self.assertIn("Autopilot pool private subnet and pod range=expected", report)
+
+        self.plan["resource_drift"] = [drift]
+        cluster_change = next(change for change in self.plan["resource_changes"]
+                              if change["address"] == "google_container_cluster.dev[0]")
+        cluster_change["change"]["actions"] = ["update"]
+        with self.assertRaisesRegex(ValueError, "readback only"):
+            check_plan(self.plan)
+
+    def test_gke_autopilot_node_readback_rejects_identity_network_and_shape_drift(self):
+        mutations = (
+            lambda d: d["change"]["after"]["node_config"][0].update(service_account="serviceAccount:bad"),
+            lambda d: d["change"]["after"]["node_config"][0]["oauth_scopes"].append(
+                "https://www.googleapis.com/auth/cloud-platform.read-only"),
+            lambda d: d["change"]["after"]["node_config"][0]["oauth_scopes"].append(
+                "https://www.googleapis.com/auth/cloud-platform"),
+            lambda d: d["change"]["after"]["node_config"][0]["workload_metadata_config"][0].update(
+                mode="GCE_METADATA"),
+            lambda d: d["change"]["after"]["node_pool"][0]["node_config"][0].update(
+                service_account="unexpected@example.iam.gserviceaccount.com"),
+            lambda d: d["change"]["after"]["node_pool"][0]["network_config"][0].update(
+                enable_private_nodes=False),
+            lambda d: d["change"]["after"]["node_pool"][0]["network_config"][0].update(
+                subnetwork="projects/other-project/regions/us-east1/subnetworks/other"),
+            lambda d: d["change"]["after"]["node_pool"][0]["network_config"][0].update(
+                pod_range="unexpected-pods"),
+            lambda d: d["change"]["after"]["node_pool"].append(
+                copy.deepcopy(d["change"]["after"]["node_pool"][0])),
+            lambda d: d["change"]["after"].update(enable_autopilot=False),
+            lambda d: d["change"]["after"].update(unrelated_security_field=True),
+        )
+        for mutate in mutations:
+            drift = gke_autopilot_node_readback_drift()
+            mutate(drift)
+            with self.subTest(drift=drift):
+                self.assertFalse(permitted_drift(drift))
 
     def test_gke_label_drift_rejects_unexpected_labels_or_cluster_changes(self):
         for mutate in (
