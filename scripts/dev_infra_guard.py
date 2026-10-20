@@ -104,6 +104,13 @@ MIGRATION_RUNNER_ACCOUNT_ID = "helpdesk-app-migr-runner-dev"
 MIGRATION_RUNNER_DISPLAY_NAME = "helpdesk-app-migration-runner-dev"
 MIGRATION_RUNNER_EMAIL = f"{MIGRATION_RUNNER_ACCOUNT_ID}@{PROJECT}.iam.gserviceaccount.com"
 MIGRATION_RUNNER_PROVIDER_ID = "github-app-migration-dev"
+MIGRATION_RUNNER_PROVIDER_ADDRESS = (
+    "google_iam_workload_identity_pool_provider.dev_app_migration[0]"
+)
+MIGRATION_RUNNER_PROVIDER_RESOURCE_ID = (
+    f"projects/{PROJECT}/locations/global/workloadIdentityPools/"
+    f"helpdesk-github/providers/{MIGRATION_RUNNER_PROVIDER_ID}"
+)
 MIGRATION_RUNNER_SUBJECT = (
     "repo:mhachem110@150286776/HelpDeskCloud-App@1423008128:"
     "environment:dev-db-migration"
@@ -885,6 +892,7 @@ def permitted_drift(entry):
         SQL_ADDRESS: PHASE6[SQL_ADDRESS],
         CLUSTER_ADDRESS: PHASE7[CLUSTER_ADDRESS],
         PHASE8_PROVIDER_ADDRESS: PHASE8[PHASE8_PROVIDER_ADDRESS],
+        MIGRATION_RUNNER_PROVIDER_ADDRESS: "google_iam_workload_identity_pool_provider",
         ARTIFACT_READER_IAM_ADDRESS: "google_artifact_registry_repository_iam_member",
         **{address: "google_project_iam_member" for address in PROJECT_IAM_READBACKS},
         **{secret: PHASE7[secret] for secret in SECRET_READBACK_NAMES},
@@ -910,6 +918,25 @@ def permitted_drift(entry):
 
         # The Google API and provider may represent the unset optional audience
         # list as missing, null, or []. Keep every other provider value exact.
+        before_copy, after_copy = deepcopy(before), deepcopy(after)
+        single_block(before_copy.get("oidc")).pop("allowed_audiences", None)
+        single_block(after_copy.get("oidc")).pop("allowed_audiences", None)
+        return before_copy == after_copy
+
+    if address == MIGRATION_RUNNER_PROVIDER_ADDRESS:
+        if not all(migration_provider_identity_matches(snapshot) for snapshot in (before, after)):
+            return False
+
+        before_oidc, after_oidc = single_block(before.get("oidc")), single_block(after.get("oidc"))
+        before_audiences = before_oidc.get("allowed_audiences", MISSING)
+        after_audiences = after_oidc.get("allowed_audiences", MISSING)
+        empty_audiences = (MISSING, None, [])
+        if (before_audiences not in empty_audiences or after_audiences not in empty_audiences
+                or before_audiences == after_audiences):
+            return False
+
+        # The Google API and provider may represent the unset optional audience
+        # list as missing, null, or []. Keep every other migration-provider value exact.
         before_copy, after_copy = deepcopy(before), deepcopy(after)
         single_block(before_copy.get("oidc")).pop("allowed_audiences", None)
         single_block(after_copy.get("oidc")).pop("allowed_audiences", None)
@@ -1435,6 +1462,27 @@ def support_provider_identity_matches(snapshot):
     return all(support_provider_identity_checks(snapshot).values())
 
 
+def migration_provider_identity_checks(snapshot):
+    """Validate the exact Phase 9 provider before accepting audience-only drift."""
+    oidc = single_block(snapshot.get("oidc"))
+    return {
+        "project": snapshot.get("project") in (PROJECT, PROJECT_NUMBER),
+        "pool": snapshot.get("workload_identity_pool_id") == "helpdesk-github",
+        "provider": snapshot.get("workload_identity_pool_provider_id") == MIGRATION_RUNNER_PROVIDER_ID,
+        "enabled": snapshot.get("disabled") is False,
+        "mapping": snapshot.get("attribute_mapping") == SUPPORT_PUBLISHER_MAPPING,
+        "attribute_condition": normalize_cel(snapshot.get("attribute_condition")) == MIGRATION_RUNNER_CONDITION,
+        "issuer": oidc.get("issuer_uri") == "https://token.actions.githubusercontent.com",
+        # The provider's create/readback logs use the canonical project-ID path.
+        "resource_id": snapshot.get("id", MIGRATION_RUNNER_PROVIDER_RESOURCE_ID)
+        == MIGRATION_RUNNER_PROVIDER_RESOURCE_ID,
+    }
+
+
+def migration_provider_identity_matches(snapshot):
+    return all(migration_provider_identity_checks(snapshot).values())
+
+
 def ca_mode_status(value):
     if value in ("GOOGLE_MANAGED_INTERNAL_CA", "GOOGLE_MANAGED_CAS_CA", "CUSTOMER_MANAGED_CAS_CA"):
         return value
@@ -1489,6 +1537,18 @@ def diagnose_drift(plan):
                                 else "unexpected (values withheld)"))
                 checks = support_provider_identity_checks(snapshot)
                 lines.append("  " + snapshot_name + " provider identity checks: "
+                             + ", ".join(f"{name}={'expected' if matches else 'unexpected'}"
+                                          for name, matches in checks.items()))
+                lines.append("  " + snapshot_name + " oidc[0].allowed_audiences: "
+                             + empty_set_status(oidc.get("allowed_audiences", MISSING)))
+        if (entry.get("address") == MIGRATION_RUNNER_PROVIDER_ADDRESS
+                and isinstance(before, dict) and isinstance(after, dict)):
+            for snapshot_name, snapshot in (("before", before), ("after", after)):
+                oidc = single_block(snapshot.get("oidc"))
+                checks = migration_provider_identity_checks(snapshot)
+                lines.append("  " + snapshot_name + " migration provider identity: "
+                             + ("expected" if all(checks.values()) else "unexpected (values withheld)"))
+                lines.append("  " + snapshot_name + " migration provider identity checks: "
                              + ", ".join(f"{name}={'expected' if matches else 'unexpected'}"
                                           for name, matches in checks.items()))
                 lines.append("  " + snapshot_name + " oidc[0].allowed_audiences: "
