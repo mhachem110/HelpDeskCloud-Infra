@@ -3,36 +3,12 @@ name: Terraform Dev Apply
 on:
   workflow_dispatch:
     inputs:
-      component:
-        description: Select the existing core Dev root or one exact HTTPS Terraform root.
+      target:
+        description: Select one isolated Terraform Dev root.
         required: true
         type: choice
         default: core
         options: [core, https-foundation, https-access]
-      operation:
-        description: Choose a reviewed Apply or read-only verification
-        required: true
-        type: choice
-        default: apply
-        options:
-          - apply
-          - verify-only
-      acknowledged_drift_fingerprint:
-        description: Optional exact fingerprint from Terraform Dev Plan for an intentional managed update
-        required: false
-        type: string
-      https_hostname:
-        description: Owner-controlled hostname (required only for https-foundation).
-        required: false
-        type: string
-      iap_backend_service_name:
-        description: Exact backend name from the HelpDesk Gateway backend-services annotation (required only for https-access).
-        required: false
-        type: string
-      iap_allowed_email:
-        description: One owner-selected Google account (required only for https-access).
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -45,7 +21,9 @@ concurrency:
 jobs:
   review-plan:
     name: Show Dev plan
-    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.component == 'core' && inputs.operation == 'apply'
+    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.target == 'core'
+    outputs:
+      drift_fingerprint: ${{ steps.reviewed-drift.outputs.fingerprint }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -55,7 +33,6 @@ jobs:
         working-directory: terraform
     env:
       TF_IN_AUTOMATION: true
-      ACKNOWLEDGED_DRIFT_FINGERPRINT: ${{ inputs.acknowledged_drift_fingerprint }}
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -107,6 +84,7 @@ jobs:
 
       # Terraform displays the plan in this job's log. The saved copy stays on this runner.
       - name: Display and check review plan
+        id: reviewed-plan
         run: |
           set -euo pipefail
           umask 077
@@ -119,18 +97,30 @@ jobs:
           python ../scripts/dev_infra_guard.py diagnose-drift "$json_file"
           python ../scripts/dev_infra_guard.py check-plan "$json_file" \
             "$RUNNER_TEMP/app-secret-iam.json" "$RUNNER_TEMP/admin-secret-iam.json" \
-            --acknowledged-drift "$ACKNOWLEDGED_DRIFT_FINGERPRINT"
+            --report-drift
+
+      - name: Record reviewable drift fingerprint
+        id: reviewed-drift
+        run: |
+          set -euo pipefail
+          fingerprint=$(python ../scripts/dev_infra_guard.py review-drift "$RUNNER_TEMP/dev-infra-review.json")
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+          if [[ -n "$fingerprint" ]]; then
+            echo "Drift fingerprint: \`$fingerprint\`" >> "$GITHUB_STEP_SUMMARY"
+            echo 'The protected Apply will accept only this same fingerprint after its reviewer approves this deployment.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'No Terraform resource drift was observed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   approved-apply:
-    name: Approved Dev operation
+    name: Apply and verify Dev infrastructure
     needs: review-plan
-    # A verify-only dispatch skips the plan job but still uses this same protected environment.
     if: >-
       always() &&
       github.repository == 'mhachem110/HelpDeskCloud-Infra' &&
       github.ref == 'refs/heads/dev' &&
-      inputs.component == 'core' &&
-      ((inputs.operation == 'apply' && needs.review-plan.result == 'success') || inputs.operation == 'verify-only')
+      inputs.target == 'core' &&
+      needs.review-plan.result == 'success'
     environment: dev-network-apply
     runs-on: ubuntu-latest
     permissions:
@@ -142,7 +132,7 @@ jobs:
         working-directory: terraform
     env:
       TF_IN_AUTOMATION: true
-      ACKNOWLEDGED_DRIFT_FINGERPRINT: ${{ inputs.acknowledged_drift_fingerprint }}
+      REVIEWED_DRIFT_FINGERPRINT: ${{ needs.review-plan.outputs.drift_fingerprint }}
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -201,7 +191,6 @@ jobs:
       # This is a new plan after approval; it is never uploaded or committed.
       - name: Check saved apply plan
         id: inspect
-        if: inputs.operation == 'apply'
         run: |
           set -euo pipefail
           umask 077
@@ -212,18 +201,28 @@ jobs:
           gcloud secrets get-iam-policy helpdesk-dev-db-connection --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/app-secret-iam.json"
           gcloud secrets get-iam-policy helpdesk-dev-db-admin-password --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/admin-secret-iam.json"
           python ../scripts/dev_infra_guard.py diagnose-drift "$json_file"
-          decision=$(python ../scripts/dev_infra_guard.py check-plan "$json_file" \
-            "$RUNNER_TEMP/app-secret-iam.json" "$RUNNER_TEMP/admin-secret-iam.json" \
-            --acknowledged-drift "$ACKNOWLEDGED_DRIFT_FINGERPRINT")
+          current_fingerprint=$(python ../scripts/dev_infra_guard.py review-drift "$json_file")
+          if [[ "$current_fingerprint" != "$REVIEWED_DRIFT_FINGERPRINT" ]]; then
+            echo '::error::Terraform drift changed after the review plan. Rerun Apply and inspect the new plan before approval.'
+            exit 1
+          fi
+          if [[ -n "$current_fingerprint" ]]; then
+            decision=$(python ../scripts/dev_infra_guard.py check-plan "$json_file" \
+              "$RUNNER_TEMP/app-secret-iam.json" "$RUNNER_TEMP/admin-secret-iam.json" \
+              --acknowledged-drift "$current_fingerprint")
+          else
+            decision=$(python ../scripts/dev_infra_guard.py check-plan "$json_file" \
+              "$RUNNER_TEMP/app-secret-iam.json" "$RUNNER_TEMP/admin-secret-iam.json")
+          fi
           echo "decision=$decision" >> "$GITHUB_OUTPUT"
           echo "Guard decision: $decision"
 
       - name: Apply only the checked saved plan
-        if: inputs.operation == 'apply' && steps.inspect.outputs.decision == 'apply'
+        if: steps.inspect.outputs.decision == 'apply'
         run: terraform apply -input=false -no-color -lock-timeout=5m "$RUNNER_TEMP/dev-infra-apply.tfplan"
 
       - name: Report already deployed Dev infrastructure
-        if: inputs.operation == 'apply' && steps.inspect.outputs.decision == 'no_changes'
+        if: steps.inspect.outputs.decision == 'no_changes'
         run: echo 'The fresh Dev plan has no changes; apply was skipped.'
 
       - name: Verify deployed Dev infrastructure and state
@@ -283,8 +282,12 @@ jobs:
             "$RUNNER_TEMP/state-addresses.txt"
 
   review-https-plan:
-    name: Show isolated Dev HTTPS plan
-    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.operation == 'apply' && inputs.component != 'core'
+    name: Review isolated HTTPS plan
+    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.target != 'core'
+    outputs:
+      ready: ${{ steps.prepare-target.outputs.ready }}
+      hostname: ${{ steps.prepare-target.outputs.hostname }}
+      backend_service_name: ${{ steps.prepare-target.outputs.backend_service_name }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -294,10 +297,8 @@ jobs:
         working-directory: terraform
     env:
       TF_IN_AUTOMATION: true
-      COMPONENT: ${{ inputs.component }}
-      HTTPS_HOSTNAME: ${{ inputs.https_hostname }}
-      IAP_BACKEND_SERVICE_NAME: ${{ inputs.iap_backend_service_name }}
-      IAP_ALLOWED_EMAIL: ${{ inputs.iap_allowed_email }}
+      COMPONENT: ${{ inputs.target }}
+      IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -309,17 +310,12 @@ jobs:
           test "$REPOSITORY" = "mhachem110/HelpDeskCloud-Infra"
           test "$REF" = "refs/heads/dev"
 
-      - name: Validate exact component inputs
+      - name: Validate selected Terraform target
         run: |
           set -euo pipefail
           case "$COMPONENT" in
-            https-foundation)
-              [[ "$HTTPS_HOSTNAME" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || { echo '::error::Provide the owner-controlled hostname; no domain is assumed.'; exit 1; }
-              ;;
-            https-access)
-              [[ "$IAP_BACKEND_SERVICE_NAME" =~ ^gkegw-[a-z0-9-]{1,50}$ ]] || { echo '::error::Provide the exact generated global backend name from the HelpDesk Gateway annotation.'; exit 1; }
-              [[ "$IAP_ALLOWED_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || { echo '::error::Provide one Google account email; none is inferred.'; exit 1; }
-              ;;
+            https-foundation) test -f https-foundation/environments/dev.tfvars ;;
+            https-access) : ;;
             *) echo '::error::Unknown HTTPS component.'; exit 1 ;;
           esac
 
@@ -331,22 +327,41 @@ jobs:
           service_account: helpdesk-terraform-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
           create_credentials_file: true
 
+      - name: Install GKE access tools
+        if: inputs.target == 'https-access'
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          install_components: kubectl,gke-gcloud-auth-plugin
+
+      - name: Prepare selected HTTPS target
+        id: prepare-target
+        env:
+          COMPONENT: ${{ inputs.target }}
+          IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
+        run: bash ../scripts/prepare_dev_https_target.sh
+
       - name: Install Terraform 1.16.2
         uses: hashicorp/setup-terraform@v4.0.1
         with:
           terraform_version: 1.16.2
 
       - name: Initialize the selected isolated HTTPS state
+        if: steps.prepare-target.outputs.ready == 'true'
         run: terraform -chdir="$COMPONENT" init -input=false -no-color -lockfile=readonly -backend-config=environments/dev.gcs.tfbackend
 
       - name: Display and check review plan
+        if: steps.prepare-target.outputs.ready == 'true'
+        env:
+          HTTPS_HOSTNAME: ${{ steps.prepare-target.outputs.hostname }}
+          IAP_BACKEND_SERVICE_NAME: ${{ steps.prepare-target.outputs.backend_service_name }}
+          IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
         run: |
           set -euo pipefail
           umask 077
           if [[ "$COMPONENT" == 'https-foundation' ]]; then
             plan_file="$RUNNER_TEMP/dev-https-foundation-review.tfplan"
             json_file="$RUNNER_TEMP/dev-https-foundation-review.json"
-            terraform -chdir="$COMPONENT" plan -input=false -no-color -lock-timeout=5m -var="hostname=$HTTPS_HOSTNAME" -out="$plan_file"
+            terraform -chdir="$COMPONENT" plan -input=false -no-color -lock-timeout=5m -var-file=environments/dev.tfvars -out="$plan_file"
             terraform -chdir="$COMPONENT" show -json "$plan_file" > "$json_file"
             python ../scripts/dev_https_guard.py check-foundation "$json_file" --hostname "$HTTPS_HOSTNAME"
           else
@@ -360,9 +375,9 @@ jobs:
           fi
 
   approved-https-apply:
-    name: Approved isolated HTTPS operation
+    name: Apply isolated HTTPS changes
     needs: review-https-plan
-    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.operation == 'apply' && inputs.component != 'core' && needs.review-https-plan.result == 'success'
+    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.target != 'core' && needs.review-https-plan.result == 'success' && needs.review-https-plan.outputs.ready == 'true'
     environment: dev-network-apply
     runs-on: ubuntu-latest
     permissions:
@@ -374,10 +389,10 @@ jobs:
         working-directory: terraform
     env:
       TF_IN_AUTOMATION: true
-      COMPONENT: ${{ inputs.component }}
-      HTTPS_HOSTNAME: ${{ inputs.https_hostname }}
-      IAP_BACKEND_SERVICE_NAME: ${{ inputs.iap_backend_service_name }}
-      IAP_ALLOWED_EMAIL: ${{ inputs.iap_allowed_email }}
+      COMPONENT: ${{ inputs.target }}
+      IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
+      REVIEWED_HTTPS_HOSTNAME: ${{ needs.review-https-plan.outputs.hostname }}
+      REVIEWED_BACKEND_SERVICE_NAME: ${{ needs.review-https-plan.outputs.backend_service_name }}
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -407,29 +422,56 @@ jobs:
           service_account: helpdesk-terraform-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
           create_credentials_file: true
 
-      - uses: google-github-actions/setup-gcloud@v3
+      - name: Install gcloud for HTTPS resource checks
+        if: inputs.target == 'https-foundation'
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Install GKE access tools for backend discovery
+        if: inputs.target == 'https-access'
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          install_components: kubectl,gke-gcloud-auth-plugin
 
       - name: Install Terraform 1.16.2
         uses: hashicorp/setup-terraform@v4.0.1
         with:
           terraform_version: 1.16.2
 
+      - name: Revalidate selected HTTPS target after approval
+        id: prepare-target
+        env:
+          COMPONENT: ${{ inputs.target }}
+          IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
+        run: |
+          set -euo pipefail
+          bash ../scripts/prepare_dev_https_target.sh
+          if [[ "$COMPONENT" == 'https-foundation' ]]; then
+            test "$(sed -n 's/^hostname=//p' "$GITHUB_OUTPUT")" = "$REVIEWED_HTTPS_HOSTNAME"
+          else
+            test "$(sed -n 's/^backend_service_name=//p' "$GITHUB_OUTPUT")" = "$REVIEWED_BACKEND_SERVICE_NAME"
+          fi
+
       - name: Initialize the selected isolated HTTPS state
+        if: steps.prepare-target.outputs.ready == 'true'
         run: terraform -chdir="$COMPONENT" init -input=false -no-color -lockfile=readonly -backend-config=environments/dev.gcs.tfbackend
 
       - name: Create a fresh guarded apply plan
         id: inspect-https
+        if: steps.prepare-target.outputs.ready == 'true'
+        env:
+          HTTPS_HOSTNAME: ${{ steps.prepare-target.outputs.hostname }}
+          IAP_BACKEND_SERVICE_NAME: ${{ steps.prepare-target.outputs.backend_service_name }}
+          IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
         run: |
           set -euo pipefail
           umask 077
+          plan_file="$RUNNER_TEMP/dev-${COMPONENT}-apply.tfplan"
           if [[ "$COMPONENT" == 'https-foundation' ]]; then
-            plan_file="$RUNNER_TEMP/dev-https-foundation-apply.tfplan"
             json_file="$RUNNER_TEMP/dev-https-foundation-apply.json"
-            terraform -chdir="$COMPONENT" plan -input=false -no-color -lock-timeout=5m -var="hostname=$HTTPS_HOSTNAME" -out="$plan_file"
+            terraform -chdir="$COMPONENT" plan -input=false -no-color -lock-timeout=5m -var-file=environments/dev.tfvars -out="$plan_file"
             terraform -chdir="$COMPONENT" show -json "$plan_file" > "$json_file"
             python ../scripts/dev_https_guard.py check-foundation "$json_file" --hostname "$HTTPS_HOSTNAME"
           else
-            plan_file="$RUNNER_TEMP/dev-https-access-apply.tfplan"
             json_file="$RUNNER_TEMP/dev-https-access-apply.json"
             terraform -chdir="$COMPONENT" plan -input=false -no-color -lock-timeout=5m \
               -var="backend_service_name=$IAP_BACKEND_SERVICE_NAME" -var="allowed_email=$IAP_ALLOWED_EMAIL" -out="$plan_file"
@@ -442,20 +484,23 @@ jobs:
           else
             echo 'decision=apply' >> "$GITHUB_OUTPUT"
           fi
+          echo "plan_file=$plan_file" >> "$GITHUB_OUTPUT"
           echo "Guarded HTTPS plan decision: $(tail -n 1 "$GITHUB_OUTPUT" | cut -d= -f2)"
 
       - name: Apply only the fresh guarded plan
         if: steps.inspect-https.outputs.decision == 'apply'
-        run: terraform -chdir="$COMPONENT" apply -input=false -no-color -lock-timeout=5m "$RUNNER_TEMP/dev-https-${COMPONENT}-apply.tfplan"
+        env:
+          PLAN_FILE: ${{ steps.inspect-https.outputs.plan_file }}
+        run: terraform -chdir="$COMPONENT" apply -input=false -no-color -lock-timeout=5m "$PLAN_FILE"
 
       - name: Report unchanged HTTPS resources
         if: steps.inspect-https.outputs.decision == 'no_changes'
         run: echo 'The fresh isolated HTTPS plan has no changes; apply was skipped.'
 
       - name: Verify retained HTTPS foundation and report DNS authorization
-        if: inputs.component == 'https-foundation'
+        if: inputs.target == 'https-foundation'
         env:
-          HTTPS_HOSTNAME: ${{ inputs.https_hostname }}
+          HTTPS_HOSTNAME: ${{ steps.prepare-target.outputs.hostname }}
         run: |
           set -euo pipefail
           umask 077
@@ -482,10 +527,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify the exact IAP backend user grant
-        if: inputs.component == 'https-access'
+        if: inputs.target == 'https-access'
         env:
-          IAP_BACKEND_SERVICE_NAME: ${{ inputs.iap_backend_service_name }}
-          IAP_ALLOWED_EMAIL: ${{ inputs.iap_allowed_email }}
+          IAP_BACKEND_SERVICE_NAME: ${{ steps.prepare-target.outputs.backend_service_name }}
+          IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
         run: |
           set -euo pipefail
           umask 077

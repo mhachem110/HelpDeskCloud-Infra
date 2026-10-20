@@ -41,7 +41,8 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              MISSING, PROJECT,
                              REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH,
                              VPC_LINK, VPC_PATH, VPC_PATHS,
-                             check_plan, diagnose_drift, drift_fingerprint, main, normalize_cel, permitted_drift,
+                             check_plan, diagnose_drift, drift_fingerprint, reviewed_drift_fingerprint,
+                             main, normalize_cel, permitted_drift,
                              support_provider_identity_checks, verify_deployment)
 
 
@@ -2154,6 +2155,7 @@ class GuardTests(unittest.TestCase):
         fingerprint = drift_fingerprint(self.plan)
         self.assertIn(fingerprint, report)
         self.assertEqual(check_plan(self.plan, report_drift_only=True), "apply")
+        self.assertEqual(reviewed_drift_fingerprint(self.plan), fingerprint)
         self.assertEqual(check_plan(self.plan, acknowledged_drift_fingerprint=fingerprint), "apply")
         with self.assertRaisesRegex(ValueError, "fingerprint"):
             check_plan(self.plan, acknowledged_drift_fingerprint="drift-v1-wrong")
@@ -2165,14 +2167,23 @@ class GuardTests(unittest.TestCase):
         deleted = copy.deepcopy(self.plan)
         deleted["resource_drift"][0]["change"]["actions"] = ["delete"]
         with self.assertRaisesRegex(ValueError, "deletions"):
+            reviewed_drift_fingerprint(deleted)
+        with self.assertRaisesRegex(ValueError, "deletions"):
             check_plan(deleted, acknowledged_drift_fingerprint=drift_fingerprint(deleted))
 
         clean = fixture()
         set_prior_phase7(clean, PHASE7)
         for change in clean["resource_changes"]:
             change["change"]["actions"] = ["no-op"]
+        self.assertEqual(reviewed_drift_fingerprint(clean), "")
         with self.assertRaisesRegex(ValueError, "No resource drift remains"):
             check_plan(clean, acknowledged_drift_fingerprint=fingerprint)
+
+        unknown = copy.deepcopy(self.plan)
+        unknown["resource_drift"][0]["address"] = "google_compute_firewall.unapproved"
+        unknown["resource_drift"][0]["type"] = "google_compute_firewall"
+        with self.assertRaisesRegex(ValueError, "cannot be approved"):
+            reviewed_drift_fingerprint(unknown)
 
     def test_check_plan_cli_supports_read_only_reporting_and_exact_acknowledgement(self):
         self.plan["resource_drift"] = [{
@@ -2188,12 +2199,14 @@ class GuardTests(unittest.TestCase):
             for arguments in (
                 ["check-plan", str(plan_path), "--report-drift"],
                 ["check-plan", str(plan_path), "--acknowledged-drift", drift_fingerprint(self.plan)],
+                ["review-drift", str(plan_path)],
             ):
                 output = StringIO()
                 with patch("sys.argv", ["dev_infra_guard.py", *arguments]), redirect_stdout(output):
                     main()
                 with self.subTest(arguments=arguments):
-                    self.assertEqual(output.getvalue().strip(), "apply")
+                    expected = drift_fingerprint(self.plan) if arguments[0] == "review-drift" else "apply"
+                    self.assertEqual(output.getvalue().strip(), expected)
 
     def test_two_exact_normalization_differences_are_permitted(self):
         self.plan["resource_drift"] = [label_drift(), metadata_drift()]
@@ -3039,22 +3052,24 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(DEPLOYMENT_EVIDENCE_PATH_COUNT, len(expected_names))
         self.assertEqual(tuple(argument_names), expected_names)
 
-    def test_read_only_plan_reports_drift_and_protected_apply_accepts_exact_acknowledgement(self):
+    def test_read_only_plan_reports_drift_and_protected_apply_rechecks_reviewed_fingerprint(self):
         workflows = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         plan = (workflows / "terraform-dev-plan.yml").read_text(encoding="utf-8")
         apply = (workflows / "terraform-dev-apply.yml").read_text(encoding="utf-8")
 
         self.assertIn("check-plan \"$RUNNER_TEMP/dev-diagnostic.json\" --report-drift", plan)
         self.assertNotIn("gcloud secrets get-iam-policy", plan)
-        self.assertIn("acknowledged_drift_fingerprint", apply)
-        self.assertIn("ACKNOWLEDGED_DRIFT_FINGERPRINT", apply)
+        self.assertNotIn("acknowledged_drift_fingerprint", apply)
+        self.assertNotIn("ACKNOWLEDGED_DRIFT_FINGERPRINT", apply)
+        self.assertIn("REVIEWED_DRIFT_FINGERPRINT", apply)
+        self.assertIn('review-drift "$json_file"', apply)
         self.assertIn("gcloud secrets get-iam-policy helpdesk-dev-db-connection", apply)
         self.assertIn("gcloud secrets get-iam-policy helpdesk-dev-db-admin-password", apply)
         self.assertIn('"$RUNNER_TEMP/app-secret-iam.json"', apply)
         self.assertIn('"$RUNNER_TEMP/admin-secret-iam.json"', apply)
-        self.assertEqual(apply.count('--acknowledged-drift "$ACKNOWLEDGED_DRIFT_FINGERPRINT"'), 2)
+        self.assertEqual(apply.count('--acknowledged-drift "$current_fingerprint"'), 1)
 
-        self.assertEqual(apply.count("python ../scripts/dev_infra_guard.py check-plan"), 2)
+        self.assertEqual(apply.count("python ../scripts/dev_infra_guard.py check-plan"), 3)
 
     def test_phase7_read_only_verification_rejects_unsafe_api_responses(self):
         # The fixture follows GKE, IAM and Secret Manager's documented JSON nesting.
