@@ -46,7 +46,11 @@ PHASE7 = {
     "google_secret_manager_secret.dev_admin_password[0]": "google_secret_manager_secret",
     "google_secret_manager_secret_iam_member.dev_app_secret_access[0]": "google_secret_manager_secret_iam_member",
     "google_secret_manager_secret_iam_member.dev_admin_secret_access[0]": "google_secret_manager_secret_iam_member",
+    "google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access[0]": "google_secret_manager_secret_iam_member",
 }
+MIGRATION_GSA_SECRET_ACCESS_ADDRESS = (
+    "google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access[0]"
+)
 # Phase 8 adds one exact, separately scoped GitHub publisher identity. The plan
 # guard accepts this as one complete create batch after Phase 7 is already present.
 PHASE8 = {
@@ -577,6 +581,8 @@ def check_references(plan):
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "member", "google_service_account.dev_app_migration_runner[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
+        ("google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
+        ("google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access", "member", "google_service_account.dev_migration[0].member"),
     ):
         references(resources.get(address, {}).get("expressions", {}).get(field, {}), expected, address,
                    exact=True)
@@ -618,6 +624,10 @@ def check_references(plan):
          "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "roles/secretmanager.secretAccessor",
          "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
+        ("google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access", "roles/secretmanager.secretAccessor",
+         "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
+        ("google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access", "roles/secretmanager.secretAccessor",
+         "member", "google_service_account.dev_migration[0].member"),
     )
     for address, role, identity_field, identity_reference in role_specs:
         expressions = resources.get(address, {}).get("expressions", {})
@@ -864,6 +874,20 @@ def check_phase7(values, plan, creates):
         expected_or_unknown(grant, address, ("secret_id",),
                             f"projects/{PROJECT}/secrets/{secret_id}", changes, creates,
                             f"Secret Manager target: {address}")
+
+    migration_gsa_grant = item(MIGRATION_GSA_SECRET_ACCESS_ADDRESS)
+    require(migration_gsa_grant.get("role") == "roles/secretmanager.secretAccessor",
+            "Migration Google service account must receive only Secret Manager Secret Accessor")
+    expected_or_unknown(
+        migration_gsa_grant, MIGRATION_GSA_SECRET_ACCESS_ADDRESS, ("member",),
+        f"serviceAccount:helpdesk-migrate-dev@{PROJECT}.iam.gserviceaccount.com",
+        changes, creates, "migration Google service-account Secret Manager principal",
+    )
+    expected_or_unknown(
+        migration_gsa_grant, MIGRATION_GSA_SECRET_ACCESS_ADDRESS, ("secret_id",),
+        f"projects/{PROJECT}/secrets/helpdesk-dev-db-admin-password",
+        changes, creates, "migration Google service-account Secret Manager target",
+    )
 
 
 def valid_rfc3339_timestamp(value):
@@ -1343,13 +1367,19 @@ def check_plan(plan):
         not migration_runner_creates and prior_phase9 == set(PHASE9)
         and not prior_legacy_dns and cluster_viewer_actions == ["no-op"]
     )
+    secret_access_recovery = (
+        creates == {MIGRATION_GSA_SECRET_ACCESS_ADDRESS}
+        and prior_phase7 == set(PHASE7) - {MIGRATION_GSA_SECRET_ACCESS_ADDRESS}
+        and support_images_complete
+        and migration_runner_complete
+    )
     require(not prior_phase9 or prior_phase9 == set(PHASE9)
             or migration_runner_iam_remediation,
             "Partial Phase 9 migration-runner state requires review")
     require(not prior_legacy_dns or migration_runner_iam_remediation,
             "Legacy Phase 9 state requires the exact GKE IAM remediation")
     require(full_initial_create or exact_apply12_recovery or complete_no_changes
-            or exact_phase8_provider_recovery,
+            or exact_phase8_provider_recovery or secret_access_recovery,
             "Partial or inconsistent Phase 7 state/creation batch requires review")
     require(support_images_initial_create or support_images_complete or exact_phase8_provider_recovery,
             "Phase 8 must be created as one exact batch after Phase 7, or already be complete")
@@ -1384,7 +1414,7 @@ def check_plan(plan):
     check_phase9(by_address, plan, migration_runner_creates)
     check_references(plan)
     return "apply" if (creates or support_creates or migration_runner_creates
-                        or migration_runner_iam_remediation) else "no_changes"
+                        or migration_runner_iam_remediation or secret_access_recovery) else "no_changes"
 
 
 SENSITIVE_PARTS = {"id", "name", "project", "region", "self_link", "network", "subnetwork", "ip_cidr_range",
@@ -2027,9 +2057,15 @@ def verify_phase7(cluster, node_sa, app_sa, migration_sa, app_secret, admin_secr
         check_iam(policy, name)
         member = (f"principal://iam.googleapis.com/projects/260283083469/locations/global/"
                   f"workloadIdentityPools/{PROJECT}.svc.id.goog/subject/ns/helpdesk-dev/sa/{ksa}")
+        expected_members = {member}
+        if name == "helpdesk-dev-db-admin-password":
+            expected_members.add(
+                f"serviceAccount:helpdesk-migrate-dev@{PROJECT}.iam.gserviceaccount.com"
+            )
         bindings = [set(b.get("members", [])) for b in policy.get("bindings", [])
                     if b.get("role") == "roles/secretmanager.secretAccessor"]
-        require(bindings == [{member}], "Secret access is not limited to the intended KSA")
+        require(bindings == [expected_members],
+                "Secret access is not limited to the intended workload identities")
         require(len(policy.get("bindings", [])) == 1, "Unexpected direct secret IAM binding")
 
     for key, expected in {

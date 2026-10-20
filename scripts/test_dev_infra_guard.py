@@ -11,7 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_LABEL, BASE, EXPECTED,
-                             DEPLOYMENT_EVIDENCE_PATH_COUNT, PLANNED_EXPECTED,
+                             DEPLOYMENT_EVIDENCE_PATH_COUNT, MIGRATION_GSA_SECRET_ACCESS_ADDRESS,
+                             PLANNED_EXPECTED,
                              NETWORK, PHASE6, PHASE7, PHASE8, PHASE9, LEGACY_PHASE9,
                              PSA_ADDRESS, REGISTRY_ADDRESS, SQL_ADDRESS,
                              SUBNET_ADDRESS, SUBNET_PATHS, SUPPORT_PUBLISHER_ACCOUNT_ID,
@@ -70,6 +71,8 @@ def strict_reference_cases(plan):
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "member", "google_service_account.dev_app_migration_runner[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
+        ("google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
+        ("google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access", "member", "google_service_account.dev_migration[0].member"),
         ("google_project_iam_member.dev_gke_node_runtime", "member", "google_service_account.dev_gke_nodes[0].member"),
         ("google_project_iam_member.dev_app_cloudsql", "member", "google_service_account.dev_app[0].member"),
         ("google_project_iam_member.dev_migration_cloudsql", "member", "google_service_account.dev_migration[0].member"),
@@ -176,6 +179,10 @@ def fixture():
             "role": "roles/secretmanager.secretAccessor",
             "secret_id": f"projects/{project}/secrets/helpdesk-dev-db-admin-password",
             "member": principal + "helpdesk-dev-migrate"},
+        "google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access[0]": {
+            "role": "roles/secretmanager.secretAccessor",
+            "secret_id": f"projects/{project}/secrets/helpdesk-dev-db-admin-password",
+            "member": f"serviceAccount:{migration}"},
     }
     phase8 = {
         "google_service_account.dev_app_support_image_publisher[0]": {
@@ -258,6 +265,10 @@ def fixture():
                  "depends_on": ["google_container_cluster.dev"],
                  "expressions": {"role": {"constant_value": "roles/secretmanager.secretAccessor"},
                                  "secret_id": {"references": terraform_references("google_secret_manager_secret.dev_admin_password[0].id")}}},
+                 {"address": "google_secret_manager_secret_iam_member.dev_migration_gsa_secret_access",
+                  "expressions": {"role": {"constant_value": "roles/secretmanager.secretAccessor"},
+                                  "secret_id": {"references": terraform_references("google_secret_manager_secret.dev_admin_password[0].id")},
+                                  "member": {"references": terraform_references("google_service_account.dev_migration[0].member")}}},
                 {"address": "google_service_account.dev_gke_nodes", "expressions": {
                     "account_id": {"constant_value": "helpdesk-gke-node-dev"},
                     "project": {"references": ["var.project_id"]}}},
@@ -365,6 +376,17 @@ def set_prior_phase7(plan, addresses):
         copy.deepcopy(item) for item in plan["planned_values"]["root_module"]["resources"]
         if item["address"] in allowed
     ]
+
+
+def migration_secret_access_recovery_plan():
+    """Model the one missing Secret Manager grant after the approved phases exist."""
+    plan = fixture()
+    for change in plan["resource_changes"]:
+        change["change"]["actions"] = ["no-op"]
+    set_prior_phase7(plan, set(PHASE7) - {MIGRATION_GSA_SECRET_ACCESS_ADDRESS})
+    next(change for change in plan["resource_changes"]
+         if change["address"] == MIGRATION_GSA_SECRET_ACCESS_ADDRESS)["change"]["actions"] = ["create"]
+    return plan
 
 
 def support_images_create_plan():
@@ -591,6 +613,8 @@ def unknown_identity_plan():
         ("google_service_account_iam_member.dev_migration_workload_identity[0]", ("service_account_id",)),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access[0]", ("secret_id",)),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access[0]", ("secret_id",)),
+        (MIGRATION_GSA_SECRET_ACCESS_ADDRESS, ("secret_id",)),
+        (MIGRATION_GSA_SECRET_ACCESS_ADDRESS, ("member",)),
     ]
     for address, field_path in computed_fields:
         mark_unknown(plan, address, field_path)
@@ -862,7 +886,8 @@ def evidence():
         {"bindings": [{"role": "roles/iam.workloadIdentityUser", "members": [app_ksa]}]},
         {"bindings": [{"role": "roles/iam.workloadIdentityUser", "members": [migration_ksa]}]},
         {"bindings": [{"role": "roles/secretmanager.secretAccessor", "members": [principal + "helpdesk-dev-app"]}]},
-        {"bindings": [{"role": "roles/secretmanager.secretAccessor", "members": [principal + "helpdesk-dev-migrate"]}]},
+        {"bindings": [{"role": "roles/secretmanager.secretAccessor", "members": [
+            principal + "helpdesk-dev-migrate", f"serviceAccount:{migration_email}"]}]},
         state,
         {"email": SUPPORT_PUBLISHER_EMAIL, "disabled": False},
         {"bindings": [{"role": "roles/iam.workloadIdentityUser",
@@ -893,6 +918,47 @@ class GuardTests(unittest.TestCase):
 
     def test_exact_phase7_creations(self):
         self.assertEqual(check_plan(self.plan), "apply")
+
+    def test_migration_secret_access_recovery_allows_only_the_exact_missing_grant(self):
+        plan = migration_secret_access_recovery_plan()
+        self.assertEqual(check_plan(plan), "apply")
+        creates = {change["address"] for change in plan["resource_changes"]
+                   if change["change"]["actions"] == ["create"]}
+        self.assertEqual(creates, {MIGRATION_GSA_SECRET_ACCESS_ADDRESS})
+
+    def test_migration_secret_access_recovery_rejects_wrong_identity_role_or_secret(self):
+        mutations = (
+            ("member", "allUsers", "migration Google service-account Secret Manager principal"),
+            ("member", "serviceAccount:someone@example.com", "migration Google service-account Secret Manager principal"),
+            ("role", "roles/secretmanager.admin", "Secret Accessor"),
+            ("secret_id", "projects/other-project/secrets/helpdesk-dev-db-admin-password",
+             "migration Google service-account Secret Manager target"),
+            ("secret_id", "projects/helpdeskcloud-capstone-511905/secrets/other-secret",
+             "migration Google service-account Secret Manager target"),
+        )
+        for field, value, message in mutations:
+            plan = migration_secret_access_recovery_plan()
+            resource(plan, MIGRATION_GSA_SECRET_ACCESS_ADDRESS)["values"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, message):
+                check_plan(plan)
+
+    def test_migration_secret_access_recovery_rejects_replacement_deletion_and_drift(self):
+        for actions in (["delete"], ["delete", "create"], ["create", "delete"]):
+            plan = migration_secret_access_recovery_plan()
+            next(change for change in plan["resource_changes"]
+                 if change["address"] == MIGRATION_GSA_SECRET_ACCESS_ADDRESS)["change"]["actions"] = actions
+            with self.subTest(actions=actions), self.assertRaisesRegex(ValueError, "Phase 7"):
+                check_plan(plan)
+
+        plan = migration_secret_access_recovery_plan()
+        plan["resource_drift"] = [{
+            "mode": "managed", "address": MIGRATION_GSA_SECRET_ACCESS_ADDRESS,
+            "type": "google_secret_manager_secret_iam_member",
+            "change": {"actions": ["update"], "before": {"role": "roles/secretmanager.secretAccessor"},
+                       "after": {"role": "roles/secretmanager.admin"}},
+        }]
+        with self.assertRaisesRegex(ValueError, "drift"):
+            check_plan(plan)
 
     def test_exact_apply12_partial_state_allows_only_the_verified_remainder(self):
         plan = apply12_recovery_plan()
@@ -2469,6 +2535,29 @@ class GuardTests(unittest.TestCase):
                 state = Path(temporary) / "state-addresses.txt"
                 state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "metadata or replication"):
+                    verify_deployment([str(path) for path in paths] + [str(state)])
+
+    def test_post_apply_requires_exact_kubernetes_and_google_migration_identities(self):
+        mutations = (
+            lambda policy: policy["bindings"][0].update(
+                members=[member for member in policy["bindings"][0]["members"]
+                         if not member.startswith("serviceAccount:helpdesk-migrate-dev@")]),
+            lambda policy: policy["bindings"][0].update(
+                members=[member if not member.startswith("serviceAccount:helpdesk-migrate-dev@")
+                         else "serviceAccount:other@example.com"
+                         for member in policy["bindings"][0]["members"]]),
+            lambda policy: policy["bindings"][0]["members"].append("allUsers"),
+        )
+        for mutate in mutations:
+            with tempfile.TemporaryDirectory() as temporary:
+                values = evidence()
+                mutate(values[19])
+                paths = [Path(temporary) / f"evidence-{index}.json" for index in range(len(values))]
+                for path, value in zip(paths, values):
+                    path.write_text(json.dumps(value), encoding="utf-8")
+                state = Path(temporary) / "state-addresses.txt"
+                state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
+                with self.assertRaises(ValueError):
                     verify_deployment([str(path) for path in paths] + [str(state)])
 
     def test_artifact_registry_outputs_match_apply_log_and_api_formats(self):
