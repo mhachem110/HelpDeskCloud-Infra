@@ -4,6 +4,7 @@ The workflow stores JSON in the runner's temporary directory. This script prints
 only a decision or a short error, never plan or state contents.
 """
 
+import hashlib
 import json
 import re
 import sys
@@ -1580,16 +1581,86 @@ def check_secret_iam_evidence(plan, policies, drift):
         check_secret_iam_policy(plan, secret_id, policies[secret_id])
 
 
-def check_drift(plan, *, allow_migration_runner_iam_replacement=False, secret_iam_policies=None):
+def drift_fingerprint(plan):
+    """Fingerprint drift addresses, actions and field paths without including values."""
+    drift = plan.get("resource_drift", [])
+    require(isinstance(drift, list), "Unexpected resource drift format")
+    entries = []
+    for entry in drift:
+        require(isinstance(entry, dict), "Malformed resource drift entry")
+        change = entry.get("change", {})
+        before, after = change.get("before"), change.get("after")
+        secret = entry.get("address") in SECRET_READBACK_NAMES
+        paths = sorted(set(safe_drift_path(path, secret=secret)
+                           for path in changed_paths(before, after)))
+        entries.append({
+            "mode": entry.get("mode"),
+            "address": entry.get("address"),
+            "type": entry.get("type"),
+            "actions": change.get("actions"),
+            "paths": paths,
+        })
+    canonical = json.dumps(sorted(entries, key=lambda item: (str(item["address"]), str(item["type"]))),
+                           sort_keys=True, separators=(",", ":"))
+    return "drift-v1-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def drift_is_acknowledgeable(plan):
+    """Permit explicit acknowledgement only for known managed updates, never delete/replace."""
+    drift = plan.get("resource_drift", [])
+    if not isinstance(drift, list) or not drift:
+        return False
+    addresses = [entry.get("address") for entry in drift if isinstance(entry, dict)]
+    if len(addresses) != len(drift) or len(set(addresses)) != len(addresses):
+        return False
+    for entry in drift:
+        if not isinstance(entry, dict):
+            return False
+        address = entry.get("address")
+        change = entry.get("change", {})
+        if (entry.get("mode") != "managed"
+                or address not in EXPECTED
+                or entry.get("type") != EXPECTED[address]
+                or change.get("actions") != ["update"]
+                or not isinstance(change.get("before"), dict)
+                or not isinstance(change.get("after"), dict)
+                or not changed_paths(change.get("before"), change.get("after"))):
+            return False
+    return True
+
+
+def check_drift(plan, *, allow_migration_runner_iam_replacement=False, secret_iam_policies=None,
+                acknowledged_drift_fingerprint=None, report_only=False):
     drift = plan.get("resource_drift", [])
     require(isinstance(drift, list), "Unexpected resource drift format")
     require(len({entry.get("address") for entry in drift if isinstance(entry, dict)}) == len(drift),
             "Duplicate or malformed resource drift")
-    require(all(isinstance(entry, dict) and permitted_drift(entry) for entry in drift),
-            "Unexpected resource drift requires review; run the Dev Plan diagnostic")
+    if report_only:
+        require(acknowledged_drift_fingerprint is None,
+                "A drift acknowledgement is not used by the read-only Dev Plan")
+        require(all(isinstance(entry, dict)
+                    and isinstance(entry.get("address"), str)
+                    and isinstance(entry.get("change"), dict)
+                    for entry in drift),
+                "Malformed resource drift entry")
+        return
     check_secret_iam_evidence(plan, secret_iam_policies, drift)
-    # A drift observation never authorizes a requested operation on that resource.
-    for entry in drift:
+    permitted = all(isinstance(entry, dict) and permitted_drift(entry) for entry in drift)
+    acknowledged = False
+    if acknowledged_drift_fingerprint is not None:
+        require(bool(drift), "No resource drift remains; rerun Apply without a drift acknowledgement")
+        require(acknowledged_drift_fingerprint == drift_fingerprint(plan),
+                "Drift fingerprint does not match this plan; inspect the Dev Plan diagnostic and retry")
+    if not permitted and acknowledged_drift_fingerprint is not None:
+        require(drift_is_acknowledgeable(plan),
+                "Drift acknowledgement is limited to known managed updates; deletions, replacements, "
+                "unknown resources, and malformed drift remain blocked")
+        acknowledged = True
+    require(permitted or acknowledged,
+            "Unexpected resource drift requires review; run the Dev Plan diagnostic and, for an intentional "
+            "managed update, provide its exact drift fingerprint")
+    # Without an exact operator fingerprint, observed drift does not authorize a requested operation.
+    for entry in drift if not acknowledged else []:
         requested = [change for change in plan.get("resource_changes", [])
                      if change.get("address") == entry.get("address")]
         if (entry.get("address") == MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS
@@ -1650,15 +1721,19 @@ def migration_runner_iam_remediation_candidate(plan):
     )
 
 
-def check_plan(plan, *, secret_iam_policies=None):
+def check_plan(plan, *, secret_iam_policies=None, acknowledged_drift_fingerprint=None,
+               report_drift_only=False):
     for name, expected in {"project_id": PROJECT, "region": "us-east1", "environment": "dev"}.items():
         require(plan.get("variables", {}).get(name, {}).get("value") == expected, f"Unexpected {name}")
-    # Drift checks run first so their diagnostics remain actionable. The only
-    # exception is the exact phase-9 IAM remediation shape, validated in full below.
+    # Drift checks run first so diagnostics remain actionable. The exception paths
+    # are the exact phase-9 remediation or a matching operator fingerprint; the full
+    # resource and action constraints below still apply in either case.
     check_drift(
         plan,
         allow_migration_runner_iam_replacement=migration_runner_iam_remediation_candidate(plan),
         secret_iam_policies=secret_iam_policies,
+        acknowledged_drift_fingerprint=acknowledged_drift_fingerprint,
+        report_only=report_drift_only,
     )
     planned = planned_resources(plan.get("planned_values", {}).get("root_module", {}))
     managed = [r for r in planned if r.get("mode") == "managed"]
@@ -2332,7 +2407,14 @@ def diagnose_drift(plan):
             for field in SECRET_EMPTY_MAP_FIELDS:
                 lines.append("  " + field + ": before=" + empty_map_status(before.get(field, MISSING))
                              + "; after=" + empty_map_status(after.get(field, MISSING)))
-    lines.append("Only exact documented normalization patterns may pass; all other drift remains blocked.")
+    if drift_is_acknowledgeable(plan):
+        lines.append("Drift acknowledgement fingerprint (addresses/actions/field paths only; no values): "
+                     + drift_fingerprint(plan))
+        lines.append("If Apply blocks intentional drift, pass this fingerprint to the protected Terraform Dev Apply.")
+    else:
+        lines.append("No general acknowledgement is available for this drift; deletions, replacements, "
+                     "unknown resources, and malformed drift remain blocked.")
+    lines.append("Only exact documented normalization patterns pass automatically.")
     return lines
 
 
@@ -2765,14 +2847,34 @@ def check_iam(policy, label):
 
 def main():
     try:
-        if len(sys.argv) == 3 and sys.argv[1] == "check-plan":
-            print(check_plan(read_json(sys.argv[2])))
-        elif len(sys.argv) == 5 and sys.argv[1] == "check-plan":
-            policies = {
-                "helpdesk-dev-db-connection": read_json(sys.argv[3]),
-                "helpdesk-dev-db-admin-password": read_json(sys.argv[4]),
-            }
-            print(check_plan(read_json(sys.argv[2]), secret_iam_policies=policies))
+        if len(sys.argv) >= 3 and sys.argv[1] == "check-plan":
+            plan_path = sys.argv[2]
+            arguments = sys.argv[3:]
+            report_drift_only = "--report-drift" in arguments
+            arguments = [argument for argument in arguments if argument != "--report-drift"]
+            acknowledged_drift_fingerprint = None
+            if "--acknowledged-drift" in arguments:
+                index = arguments.index("--acknowledged-drift")
+                if index + 1 >= len(arguments):
+                    raise ValueError("--acknowledged-drift requires the fingerprint from Dev Plan")
+                acknowledged_drift_fingerprint = arguments[index + 1] or None
+                del arguments[index:index + 2]
+            if arguments and arguments[-1] == "":
+                arguments.pop()
+            if len(arguments) not in (0, 2):
+                raise ValueError("check-plan accepts either zero or two live Secret Manager policy files")
+            policies = None
+            if arguments:
+                policies = {
+                    "helpdesk-dev-db-connection": read_json(arguments[0]),
+                    "helpdesk-dev-db-admin-password": read_json(arguments[1]),
+                }
+            print(check_plan(
+                read_json(plan_path),
+                secret_iam_policies=policies,
+                acknowledged_drift_fingerprint=acknowledged_drift_fingerprint,
+                report_drift_only=report_drift_only,
+            ))
         elif len(sys.argv) == 3 and sys.argv[1] == "diagnose-drift":
             print("\n".join(diagnose_drift(read_json(sys.argv[2]))))
         elif len(sys.argv) == 3 and sys.argv[1] == "check-project-iam":
@@ -2782,7 +2884,8 @@ def main():
             verify_deployment(sys.argv[2:])
             print("Approved Dev resources, IAM, outputs, and deletion protection verified")
         else:
-            raise ValueError("Usage: dev_infra_guard.py check-plan PLAN_JSON [APP_SECRET_IAM ADMIN_SECRET_IAM] | "
+            raise ValueError("Usage: dev_infra_guard.py check-plan PLAN_JSON [APP_SECRET_IAM ADMIN_SECRET_IAM] "
+                             "[--report-drift] [--acknowledged-drift FINGERPRINT] | "
                              "diagnose-drift PLAN_JSON | "
                              "check-project-iam PROJECT_IAM_JSON | "
                              "verify-deployment VPC SUBNET ADDRESS CONNECTIONS REGISTRY REGISTRY_IAM PROJECT_IAM "

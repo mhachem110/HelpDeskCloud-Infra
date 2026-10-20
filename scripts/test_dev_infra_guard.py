@@ -40,7 +40,7 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              MISSING, PROJECT,
                              REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH,
                              VPC_LINK, VPC_PATH, VPC_PATHS,
-                             check_plan, diagnose_drift, main, normalize_cel, permitted_drift,
+                             check_plan, diagnose_drift, drift_fingerprint, main, normalize_cel, permitted_drift,
                              support_provider_identity_checks, verify_deployment)
 
 
@@ -2135,6 +2135,49 @@ class GuardTests(unittest.TestCase):
         self.assertIn("routing_mode", report)
         self.assertIn("security-sensitive paths=yes", report)
         self.assertNotIn("GLOBAL", report)
+        fingerprint = drift_fingerprint(self.plan)
+        self.assertIn(fingerprint, report)
+        self.assertEqual(check_plan(self.plan, report_drift_only=True), "apply")
+        self.assertEqual(check_plan(self.plan, acknowledged_drift_fingerprint=fingerprint), "apply")
+        with self.assertRaisesRegex(ValueError, "fingerprint"):
+            check_plan(self.plan, acknowledged_drift_fingerprint="drift-v1-wrong")
+
+        changed_path = copy.deepcopy(self.plan)
+        changed_path["resource_drift"][0]["change"]["after"] = {"routing_mode": "GLOBAL", "mtu": 1460}
+        self.assertNotEqual(drift_fingerprint(changed_path), fingerprint)
+
+        deleted = copy.deepcopy(self.plan)
+        deleted["resource_drift"][0]["change"]["actions"] = ["delete"]
+        with self.assertRaisesRegex(ValueError, "deletions"):
+            check_plan(deleted, acknowledged_drift_fingerprint=drift_fingerprint(deleted))
+
+        clean = fixture()
+        set_prior_phase7(clean, PHASE7)
+        for change in clean["resource_changes"]:
+            change["change"]["actions"] = ["no-op"]
+        with self.assertRaisesRegex(ValueError, "No resource drift remains"):
+            check_plan(clean, acknowledged_drift_fingerprint=fingerprint)
+
+    def test_check_plan_cli_supports_read_only_reporting_and_exact_acknowledgement(self):
+        self.plan["resource_drift"] = [{
+            "mode": "managed",
+            "address": next(iter(NETWORK)),
+            "type": "google_compute_network",
+            "change": {"actions": ["update"], "before": {"routing_mode": "REGIONAL"},
+                       "after": {"routing_mode": "GLOBAL"}},
+        }]
+        with tempfile.TemporaryDirectory() as temporary:
+            plan_path = Path(temporary) / "plan.json"
+            plan_path.write_text(json.dumps(self.plan), encoding="utf-8")
+            for arguments in (
+                ["check-plan", str(plan_path), "--report-drift"],
+                ["check-plan", str(plan_path), "--acknowledged-drift", drift_fingerprint(self.plan)],
+            ):
+                output = StringIO()
+                with patch("sys.argv", ["dev_infra_guard.py", *arguments]), redirect_stdout(output):
+                    main()
+                with self.subTest(arguments=arguments):
+                    self.assertEqual(output.getvalue().strip(), "apply")
 
     def test_two_exact_normalization_differences_are_permitted(self):
         self.plan["resource_drift"] = [label_drift(), metadata_drift()]
@@ -2393,6 +2436,9 @@ class GuardTests(unittest.TestCase):
             mutate(changed_policies["helpdesk-dev-db-admin-password"])
             with self.subTest(policy=changed_policies["helpdesk-dev-db-admin-password"]), self.assertRaises(ValueError):
                 check_plan(plan, secret_iam_policies=changed_policies)
+            with self.subTest(acknowledged_policy=changed_policies["helpdesk-dev-db-admin-password"]), self.assertRaises(ValueError):
+                check_plan(plan, secret_iam_policies=changed_policies,
+                           acknowledged_drift_fingerprint=drift_fingerprint(plan))
 
     def test_secret_iam_etag_readback_rejects_identity_and_non_etag_changes(self):
         address = "google_secret_manager_secret_iam_member.dev_admin_secret_access[0]"
@@ -2919,17 +2965,20 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(DEPLOYMENT_EVIDENCE_PATH_COUNT, len(expected_names))
         self.assertEqual(tuple(argument_names), expected_names)
 
-    def test_dev_plan_and_apply_supply_live_secret_iam_evidence_to_guard(self):
+    def test_read_only_plan_reports_drift_and_protected_apply_accepts_exact_acknowledgement(self):
         workflows = Path(__file__).resolve().parents[1] / ".github" / "workflows"
         plan = (workflows / "terraform-dev-plan.yml").read_text(encoding="utf-8")
         apply = (workflows / "terraform-dev-apply.yml").read_text(encoding="utf-8")
 
-        for workflow_name, workflow in (("Terraform Dev Plan", plan), ("Terraform Dev Apply", apply)):
-            with self.subTest(workflow=workflow_name):
-                self.assertIn("gcloud secrets get-iam-policy helpdesk-dev-db-connection", workflow)
-                self.assertIn("gcloud secrets get-iam-policy helpdesk-dev-db-admin-password", workflow)
-                self.assertIn('"$RUNNER_TEMP/app-secret-iam.json"', workflow)
-                self.assertIn('"$RUNNER_TEMP/admin-secret-iam.json"', workflow)
+        self.assertIn("check-plan \"$RUNNER_TEMP/dev-diagnostic.json\" --report-drift", plan)
+        self.assertNotIn("gcloud secrets get-iam-policy", plan)
+        self.assertIn("acknowledged_drift_fingerprint", apply)
+        self.assertIn("ACKNOWLEDGED_DRIFT_FINGERPRINT", apply)
+        self.assertIn("gcloud secrets get-iam-policy helpdesk-dev-db-connection", apply)
+        self.assertIn("gcloud secrets get-iam-policy helpdesk-dev-db-admin-password", apply)
+        self.assertIn('"$RUNNER_TEMP/app-secret-iam.json"', apply)
+        self.assertIn('"$RUNNER_TEMP/admin-secret-iam.json"', apply)
+        self.assertEqual(apply.count('--acknowledged-drift "$ACKNOWLEDGED_DRIFT_FINGERPRINT"'), 2)
 
         self.assertEqual(apply.count("python ../scripts/dev_infra_guard.py check-plan"), 2)
 
