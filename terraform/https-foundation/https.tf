@@ -1,14 +1,5 @@
-resource "google_project_service" "certificate_manager" {
-  project            = var.project_id
-  service            = "certificatemanager.googleapis.com"
-  disable_on_destroy = false
-}
-
-resource "google_project_service" "iap" {
-  project            = var.project_id
-  service            = "iap.googleapis.com"
-  disable_on_destroy = false
-}
+# Enable Certificate Manager and IAP once through the project bootstrap identity.
+# The routine Terraform identity intentionally has no serviceusage.services.enable permission.
 
 resource "google_compute_global_address" "https" {
   project      = var.project_id
@@ -39,8 +30,6 @@ resource "google_certificate_manager_dns_authorization" "https" {
   description = "DNS authorization for the owner-selected HelpDesk Dev hostname"
   domain      = var.hostname
 
-  depends_on = [google_project_service.certificate_manager]
-
   lifecycle {
     prevent_destroy = true
   }
@@ -59,8 +48,6 @@ resource "google_certificate_manager_certificate" "https" {
     ]
   }
 
-  depends_on = [google_project_service.certificate_manager]
-
   lifecycle {
     prevent_destroy = true
   }
@@ -70,8 +57,6 @@ resource "google_certificate_manager_certificate_map" "https" {
   project     = var.project_id
   name        = "helpdesk-dev-https-map"
   description = "Certificate map for the HelpDesk Dev HTTPS Gateway"
-
-  depends_on = [google_project_service.certificate_manager]
 
   lifecycle {
     prevent_destroy = true

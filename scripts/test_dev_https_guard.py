@@ -18,10 +18,6 @@ def foundation_plan(action=("create",)):
     dns_id = "projects/helpdeskcloud-capstone-511905/locations/global/dnsAuthorizations/helpdesk-dev-https-dns-auth"
     cert_id = "projects/helpdeskcloud-capstone-511905/locations/global/certificates/helpdesk-dev-https-certificate"
     items = {
-        "google_project_service.certificate_manager": ("google_project_service", {
-            "project": guard.PROJECT, "service": "certificatemanager.googleapis.com", "disable_on_destroy": False}),
-        "google_project_service.iap": ("google_project_service", {
-            "project": guard.PROJECT, "service": "iap.googleapis.com", "disable_on_destroy": False}),
         "google_compute_global_address.https": ("google_compute_global_address", {
             "project": guard.PROJECT, "name": "helpdesk-dev-https-ip", "address_type": "EXTERNAL", "ip_version": "IPV4"}),
         "google_compute_ssl_policy.https": ("google_compute_ssl_policy", {
@@ -60,6 +56,20 @@ def foundation_plan(action=("create",)):
             "configuration": configuration}
 
 
+def partial_foundation_plan():
+    """Model the failed Apply: retained IP and TLS policy, with four resources still to add."""
+    plan = foundation_plan()
+    retained = {"google_compute_global_address.https", "google_compute_ssl_policy.https"}
+    resources = plan["planned_values"]["root_module"]["resources"]
+    for change in plan["resource_changes"]:
+        if change["address"] in retained:
+            change["change"]["actions"] = ["no-op"]
+    plan["prior_state"]["values"]["root_module"]["resources"] = [
+        deepcopy(resource) for resource in resources if resource["address"] in retained
+    ]
+    return plan
+
+
 def access_plan(action=("create",)):
     values = {"project": guard.PROJECT, "web_backend_service": BACKEND,
               "role": "roles/iap.httpsResourceAccessor", "member": f"user:{EMAIL}"}
@@ -80,9 +90,27 @@ class DevHttpsGuardTests(unittest.TestCase):
     def test_exact_https_foundation_noop_is_allowed(self):
         guard.check_foundation(foundation_plan(("no-op",)), HOST)
 
+    def test_partial_apply_state_preserves_ip_and_tls_and_creates_only_remaining_certificates(self):
+        plan = partial_foundation_plan()
+        guard.check_foundation(plan, HOST)
+        actions = {change["address"]: change["change"]["actions"]
+                   for change in plan["resource_changes"]}
+        self.assertEqual(actions["google_compute_global_address.https"], ["no-op"])
+        self.assertEqual(actions["google_compute_ssl_policy.https"], ["no-op"])
+        self.assertEqual(sum(action == ["create"] for action in actions.values()), 4)
+        self.assertEqual(sum(action == ["no-op"] for action in actions.values()), 2)
+
+    def test_foundation_rejects_project_api_enablement_resources(self):
+        plan = foundation_plan()
+        plan["planned_values"]["root_module"]["resources"].append({
+            "address": "google_project_service.iap", "mode": "managed",
+            "type": "google_project_service", "values": {"service": "iap.googleapis.com"}})
+        with self.assertRaises(ValueError):
+            guard.check_foundation(plan, HOST)
+
     def test_provider_omitted_global_address_defaults_are_checked_live_after_apply(self):
         plan = foundation_plan()
-        address = plan["resource_changes"][2]["change"]["after"]
+        address = plan["resource_changes"][0]["change"]["after"]
         address["address_type"] = None
         address["ip_version"] = None
         plan["planned_values"]["root_module"]["resources"][2]["values"].update(
@@ -119,13 +147,13 @@ class DevHttpsGuardTests(unittest.TestCase):
 
     def test_foundation_rejects_weaker_tls(self):
         plan = foundation_plan()
-        plan["resource_changes"][3]["change"]["after"]["min_tls_version"] = "TLS_1_0"
+        plan["resource_changes"][1]["change"]["after"]["min_tls_version"] = "TLS_1_0"
         with self.assertRaises(ValueError):
             guard.check_foundation(plan, HOST)
 
     def test_foundation_rejects_broad_certificate(self):
         plan = foundation_plan()
-        plan["resource_changes"][5]["change"]["after"]["managed"][0]["domains"] = ["*.example.test"]
+        plan["resource_changes"][3]["change"]["after"]["managed"][0]["domains"] = ["*.example.test"]
         with self.assertRaises(ValueError):
             guard.check_foundation(plan, HOST)
 
