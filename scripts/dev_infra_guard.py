@@ -2672,7 +2672,10 @@ def verify_phase10(publisher_sa, publisher_sa_iam, publisher_provider,
         }
         require(provider.get("name") in expected_names and provider.get("state") == "ACTIVE",
                 f"{label} Workload Identity provider identity or status mismatch")
-        require(provider.get("disabled") is False
+        # gcloud can omit the API's default-false `disabled` field from a GET
+        # response. The ACTIVE state was checked above; accept either that
+        # omission or an explicit false, while still rejecting true/malformed values.
+        require(("disabled" not in provider or provider.get("disabled") is False)
                 and provider.get("attributeMapping") == APP_DELIVERY_MAPPING
                 and normalize_cel(provider.get("attributeCondition")) == condition
                 and provider.get("oidc", {}).get("issuerUri") == "https://token.actions.githubusercontent.com",

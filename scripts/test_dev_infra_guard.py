@@ -3025,6 +3025,7 @@ class GuardTests(unittest.TestCase):
             (28, lambda value: value["bindings"].append({"role": "roles/owner", "members": ["user:other@example.com"]}),
              "application publisher impersonation"),
             (29, lambda value: value.update(attributeCondition="true"), "application publisher provider trust"),
+            (29, lambda value: value.update(disabled=True), "application publisher provider trust"),
             (30, lambda value: value.update(email="other@example.com"), "application deployer service account"),
             (31, lambda value: value["bindings"][0].update(members=["principalSet://iam.googleapis.com/*"]),
              "application deployer impersonation"),
@@ -3050,6 +3051,19 @@ class GuardTests(unittest.TestCase):
                 state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, message):
                     verify_deployment([str(path) for path in paths] + [str(state)])
+
+    def test_phase10_accepts_omitted_default_false_provider_disabled_field(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            values = evidence()
+            values[29].pop("disabled")
+            values[32].pop("disabled")
+            paths = [Path(temporary) / f"evidence-{index}.json" for index in range(len(values))]
+            for path, value in zip(paths, values):
+                path.write_text(json.dumps(value), encoding="utf-8")
+            state = Path(temporary) / "state-addresses.txt"
+            state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
+
+            verify_deployment([str(path) for path in paths] + [str(state)])
 
     def test_secret_manager_accepts_canonical_project_number_resource_names(self):
         with tempfile.TemporaryDirectory() as temporary:
