@@ -24,6 +24,11 @@ PROVIDER_READBACK_DRIFT = {
     "google_compute_global_address.https": ("google_compute_global_address", "labels", None, {}),
     "google_compute_ssl_policy.https": ("google_compute_ssl_policy", "custom_features", None, []),
 }
+_MISSING = object()
+SENSITIVE_DRIFT_PATH = re.compile(
+    r"(?:secret|password|token|credential|private|oauth|email|member|authorization|signature|key|description)",
+    re.IGNORECASE,
+)
 
 
 def require(condition, message):
@@ -78,26 +83,90 @@ def check_provider_readback_drift(drift, expected):
         address = item.get("address")
         allowed = PROVIDER_READBACK_DRIFT.get(address)
         require(address in expected and allowed is not None,
-                "unexpected prior-state drift exists in the HTTPS root")
+                f"unexpected prior-state drift exists in the HTTPS root: {describe_drift(item)}")
         resource_type, field, before_value, after_value = allowed
         require(item.get("mode", "managed") == "managed" and item.get("type") == resource_type,
-                "provider readback drift is on an unexpected resource type")
+                f"provider readback drift is on an unexpected resource type: {describe_drift(item)}")
         change = item.get("change", {})
         require(change.get("actions") == ["update"],
-                "provider readback drift must be a refresh-only update")
+                f"provider readback drift must be a refresh-only update: {describe_drift(item)}")
         before = change.get("before")
         after = change.get("after")
         require(isinstance(before, dict) and isinstance(after, dict),
-                "provider readback drift is missing its before/after values")
+                f"provider readback drift is missing its before/after values: {describe_drift(item)}")
         changed_fields = {
             key for key in set(before) | set(after)
             if before.get(key, missing) != after.get(key, missing)
         }
         require(changed_fields == {field} and before.get(field, missing) == before_value and
                 after.get(field, missing) == after_value,
-                "provider readback drift differs from the exact confirmed null-to-empty field")
+                "provider readback drift differs from the exact confirmed null-to-empty field: "
+                f"expected only {field}={before_value!r}->{after_value!r}; {describe_drift(item)}")
         require(address not in seen, "duplicate provider readback drift resource")
         seen.add(address)
+
+
+def describe_drift(item):
+    """Return a bounded, secret-redacted summary for an HTTPS-root drift item."""
+    change = item.get("change", {})
+    before = change.get("before")
+    after = change.get("after")
+    paths = []
+
+    def walk(left, right, path):
+        if left is _MISSING or right is _MISSING:
+            if SENSITIVE_DRIFT_PATH.search(path):
+                left_text = right_text = "<redacted>"
+            else:
+                left_text = _format_drift_value(left)
+                right_text = _format_drift_value(right)
+            paths.append(f"{path}: {left_text} -> {right_text}")
+            return
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key in sorted(set(left) | set(right)):
+                child = f"{path}.{key}" if path else str(key)
+                walk(left.get(key, _MISSING), right.get(key, _MISSING), child)
+        elif isinstance(left, list) and isinstance(right, list):
+            for index in range(max(len(left), len(right))):
+                child = f"{path}[{index}]"
+                walk(left[index] if index < len(left) else _MISSING,
+                     right[index] if index < len(right) else _MISSING, child)
+        elif left != right:
+            if SENSITIVE_DRIFT_PATH.search(path):
+                left_text = right_text = "<redacted>"
+            else:
+                left_text = _format_drift_value(left)
+                right_text = _format_drift_value(right)
+            paths.append(f"{path}: {left_text} -> {right_text}")
+
+    if isinstance(before, dict) and isinstance(after, dict):
+        walk(before, after, "")
+    if not paths:
+        paths = ["changed fields unavailable"]
+    if len(paths) > 8:
+        paths = [*paths[:8], f"... and {len(paths) - 8} more field(s)"]
+    return (f"address={item.get('address', '<unknown>')}, type={item.get('type', '<unknown>')}, "
+            f"actions={change.get('actions', '<unknown>')}, fields=[{' ; '.join(paths)}]")
+
+
+def _format_drift_value(value):
+    if value is _MISSING:
+        return "<missing>"
+
+    def redact_nested(candidate, path=""):
+        if SENSITIVE_DRIFT_PATH.search(path):
+            return "<redacted>"
+        if isinstance(candidate, dict):
+            return {key: redact_nested(item, f"{path}.{key}" if path else str(key))
+                    for key, item in candidate.items()}
+        if isinstance(candidate, list):
+            return [redact_nested(item, f"{path}[{index}]") for index, item in enumerate(candidate)]
+        if isinstance(candidate, str) and ("@" in candidate or len(candidate) > 160):
+            return "<redacted>"
+        return candidate
+
+    text = json.dumps(redact_nested(value), sort_keys=True, separators=(",", ":"), default=str)
+    return text if len(text) <= 200 else f"{text[:197]}..."
 
 
 def configuration_references(plan, address, expression_path):

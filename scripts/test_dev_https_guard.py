@@ -187,6 +187,52 @@ class DevHttpsGuardTests(unittest.TestCase):
             with self.subTest(address=address, field=field), self.assertRaises(ValueError):
                 guard.check_foundation(plan, HOST)
 
+    def test_unapproved_drift_reports_resource_fields_and_redacts_sensitive_values(self):
+        plan = partial_foundation_plan()
+        plan["resource_drift"] = [{
+            "address": "google_certificate_manager_certificate.https",
+            "mode": "managed",
+            "type": "google_certificate_manager_certificate",
+            "change": {
+                "actions": ["update"],
+                "before": {"managed": [{"domains": [HOST]}],
+                           "oauth_client_secret": "sensitive-before", "owner_email": "before@example.test"},
+                "after": {"managed": [{"domains": ["changed.example.test"]}],
+                          "oauth_client_secret": "sensitive-after", "owner_email": "after@example.test"},
+            },
+        }]
+
+        with self.assertRaises(ValueError) as error:
+            guard.check_foundation(plan, HOST)
+
+        message = str(error.exception)
+        self.assertIn("google_certificate_manager_certificate.https", message)
+        self.assertIn("managed[0].domains[0]", message)
+        self.assertIn('"dev.example.test" -> "changed.example.test"', message)
+        self.assertIn("oauth_client_secret: <redacted> -> <redacted>", message)
+        self.assertIn("owner_email: <redacted> -> <redacted>", message)
+        self.assertNotIn("sensitive-before", message)
+        self.assertNotIn("sensitive-after", message)
+        self.assertNotIn("before@example.test", message)
+        self.assertNotIn("after@example.test", message)
+
+    def test_unexpected_field_drift_on_an_allowlisted_resource_reports_actual_transition(self):
+        plan = partial_foundation_plan()
+        plan["resource_drift"] = [{
+            "address": "google_compute_global_address.https", "mode": "managed",
+            "type": "google_compute_global_address",
+            "change": {"actions": ["update"],
+                       "before": {"address": "34.8.56.208"},
+                       "after": {"address": "34.8.56.209"}},
+        }]
+
+        with self.assertRaises(ValueError) as error:
+            guard.check_foundation(plan, HOST)
+
+        message = str(error.exception)
+        self.assertIn("expected only labels=None->{}", message)
+        self.assertIn('address: "34.8.56.208" -> "34.8.56.209"', message)
+
     def test_foundation_rejects_readback_drift_if_retained_resource_would_change(self):
         plan = partial_foundation_plan()
         plan["resource_changes"][0]["change"]["actions"] = ["update"]
