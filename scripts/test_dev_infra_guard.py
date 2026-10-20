@@ -662,6 +662,18 @@ def sql_readback_drift():
             "change": {"actions": ["update"], "before": before, "after": after}}
 
 
+def sql_settings_generation_drift(before_version=3, after_version=4):
+    """Model the observed Cloud SQL settings-generation-only readback drift."""
+    drift = sql_readback_drift()
+    before = drift["change"]["before"]
+    after = drift["change"]["after"]
+    before["settings"][0]["version"] = before_version
+    after["settings"][0]["version"] = after_version
+    before["settings"][0]["ip_configuration"][0]["custom_subject_alternative_names"] = []
+    after["settings"][0]["ip_configuration"][0]["custom_subject_alternative_names"] = []
+    return drift
+
+
 def secret_empty_map_drift(address):
     names = {
         "google_secret_manager_secret.dev_app_connection[0]": "helpdesk-dev-db-connection",
@@ -1822,6 +1834,59 @@ class GuardTests(unittest.TestCase):
         self.plan["resource_drift"] = [drift]
         with self.assertRaisesRegex(ValueError, "drift"):
             check_plan(self.plan)
+
+    def test_cloud_sql_forward_settings_generation_only_drift_is_allowed(self):
+        drift = sql_settings_generation_drift(3, 4)
+        self.assertTrue(permitted_drift(drift))
+        self.plan["resource_drift"] = [drift]
+        self.assertEqual(check_plan(self.plan), "apply")
+        report = "\n".join(diagnose_drift(self.plan))
+        self.assertIn("settings[0].version: before=3; after=4", report)
+        self.assertIn("custom_subject_alternative_names: before=[]; after=[]", report)
+
+    def test_cloud_sql_settings_generation_drift_rejects_invalid_generation_or_other_changes(self):
+        invalid_generations = (
+            (3, 3),                 # no generation change
+            (4, 3),                 # backwards generation
+            (0, 4),                 # invalid generation
+            (True, 4),              # bool is not an integer generation
+            (3, "4"),               # reject string coercion
+            (3, 1 << 63),           # outside API Int64 range
+        )
+        for before_version, after_version in invalid_generations:
+            self.plan["resource_drift"] = [sql_settings_generation_drift(
+                before_version, after_version)]
+            with self.subTest(before=before_version, after=after_version):
+                with self.assertRaisesRegex(ValueError, "drift"):
+                    check_plan(self.plan)
+
+        mutations = (
+            lambda d: d["change"]["after"].update(project="another-project"),
+            lambda d: d["change"]["after"].update(name="another-instance"),
+            lambda d: d["change"]["after"].update(region="us-west1"),
+            lambda d: d["change"]["after"].update(database_version="POSTGRES_16"),
+            lambda d: d["change"]["after"].update(deletion_protection=False),
+            lambda d: d["change"]["after"]["settings"][0].update(tier="db-custom-2-7680"),
+            lambda d: d["change"]["after"]["settings"][0]["ip_configuration"][0].update(
+                private_network="projects/other-project/global/networks/other-vpc"),
+            lambda d: d["change"]["after"]["settings"][0]["ip_configuration"][0].update(
+                server_ca_mode="CUSTOMER_MANAGED_CAS_CA"),
+            lambda d: d["change"]["after"]["settings"][0]["ip_configuration"][0].update(
+                custom_subject_alternative_names=["unexpected.example"]),
+        )
+        for mutate in mutations:
+            drift = sql_settings_generation_drift(3, 4)
+            mutate(drift)
+            self.plan["resource_drift"] = [drift]
+            with self.subTest(drift=drift), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(self.plan)
+
+        for actions in (["delete", "create"], ["delete"]):
+            drift = sql_settings_generation_drift(3, 4)
+            drift["change"]["actions"] = actions
+            self.plan["resource_drift"] = [drift]
+            with self.subTest(actions=actions), self.assertRaisesRegex(ValueError, "drift"):
+                check_plan(self.plan)
 
     def test_phase6_diagnostic_withholds_unexpected_values_and_keeps_guard_closed(self):
         registry = registry_drift()
