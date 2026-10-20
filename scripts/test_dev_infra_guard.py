@@ -21,6 +21,7 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              SUPPORT_PUBLISHER_MEMBER, SUPPORT_PUBLISHER_PROVIDER_ID,
                              ARTIFACT_READER_IAM_ADDRESS, PHASE8_COMPLETED,
                              PHASE8_PROVIDER_ADDRESS,
+                             SECRET_ACCESSOR_ROLE, SECRET_IAM_READBACKS,
                              MIGRATION_RUNNER_ACCOUNT_ID, MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
                              MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS,
                              MIGRATION_RUNNER_DNS_BINDING_ADDRESS,
@@ -36,7 +37,7 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              APP_PUBLISHER_PROVIDER_ID, APP_DEPLOYER_ACCOUNT_ID, APP_DEPLOYER_CONDITION,
                              APP_DEPLOYER_DISPLAY_NAME, APP_DEPLOYER_EMAIL, APP_DEPLOYER_MEMBER,
                              APP_DEPLOYER_PROVIDER_ID,
-                             MISSING,
+                             MISSING, PROJECT,
                              REGISTRY_REPOSITORY_ID, REGISTRY_REPOSITORY_PATH,
                              VPC_LINK, VPC_PATH, VPC_PATHS,
                              check_plan, diagnose_drift, main, normalize_cel, permitted_drift,
@@ -954,6 +955,37 @@ def artifact_reader_etag_drift(before_etag="etag-before", after_etag="etag-after
     return {"mode": "managed", "address": ARTIFACT_READER_IAM_ADDRESS,
             "type": "google_artifact_registry_repository_iam_member",
             "change": {"actions": ["update"], "before": base, "after": after}}
+
+
+def secret_iam_etag_drift(address, before_etag="etag-before", after_etag="etag-after"):
+    secret_id, member = SECRET_IAM_READBACKS[address]
+    before = {
+        "secret_id": f"projects/{PROJECT}/secrets/{secret_id}",
+        "role": SECRET_ACCESSOR_ROLE,
+        "member": member,
+        "etag": before_etag,
+    }
+    after = copy.deepcopy(before)
+    after["etag"] = after_etag
+    return {"mode": "managed", "address": address,
+            "type": "google_secret_manager_secret_iam_member",
+            "change": {"actions": ["update"], "before": before, "after": after}}
+
+
+def live_secret_iam_policies(plan):
+    policies = {}
+    for secret_id in {secret for secret, _ in SECRET_IAM_READBACKS.values()}:
+        members = []
+        for item in plan["prior_state"]["values"]["root_module"]["resources"]:
+            address = item["address"]
+            if address in SECRET_IAM_READBACKS and SECRET_IAM_READBACKS[address][0] == secret_id:
+                members.append(item["values"]["member"])
+        policies[secret_id] = {
+            "bindings": [{"role": SECRET_ACCESSOR_ROLE, "members": members}],
+            "etag": "live-policy-etag",
+            "version": 1,
+        }
+    return policies
 
 
 def evidence():
@@ -2328,6 +2360,61 @@ class GuardTests(unittest.TestCase):
             with self.subTest(before=before_etag, after=after_etag):
                 self.assertFalse(permitted_drift(changed))
 
+    def test_secret_iam_etag_drift_requires_exact_live_policy_evidence(self):
+        address = "google_secret_manager_secret_iam_member.dev_admin_secret_access[0]"
+        drift = secret_iam_etag_drift(address)
+        self.assertTrue(permitted_drift(drift))
+        report = "\n".join(diagnose_drift({"resource_drift": [drift]}))
+        self.assertIn("before secret IAM role, resource and principal: expected", report)
+        self.assertIn("etag representation: before=non-empty token; after=non-empty token", report)
+        self.assertNotIn("etag-before", report)
+        self.assertNotIn("etag-after", report)
+
+        plan = fixture()
+        set_prior_phase7(plan, PHASE7)
+        for change in plan["resource_changes"]:
+            change["change"]["actions"] = ["no-op"]
+        plan["resource_drift"] = [drift]
+        policies = live_secret_iam_policies(plan)
+        self.assertEqual(check_plan(plan, secret_iam_policies=policies), "no_changes")
+
+        with self.assertRaisesRegex(ValueError, "policy evidence"):
+            check_plan(plan)
+
+        mutations = (
+            lambda policy: policy["bindings"][0]["members"].append("user:unknown@example.com"),
+            lambda policy: policy["bindings"][0]["members"].pop(),
+            lambda policy: policy["bindings"][0].update(role="roles/secretmanager.admin"),
+            lambda policy: policy["bindings"][0].update(condition={"title": "unexpected"}),
+            lambda policy: policy["bindings"].append({"role": "roles/editor", "members": ["user:x@example.com"]}),
+        )
+        for mutate in mutations:
+            changed_policies = copy.deepcopy(policies)
+            mutate(changed_policies["helpdesk-dev-db-admin-password"])
+            with self.subTest(policy=changed_policies["helpdesk-dev-db-admin-password"]), self.assertRaises(ValueError):
+                check_plan(plan, secret_iam_policies=changed_policies)
+
+    def test_secret_iam_etag_readback_rejects_identity_and_non_etag_changes(self):
+        address = "google_secret_manager_secret_iam_member.dev_admin_secret_access[0]"
+        for mutate in (
+            lambda drift: drift["change"]["after"].update(secret_id="projects/other/secrets/x"),
+            lambda drift: drift["change"]["after"].update(role="roles/secretmanager.admin"),
+            lambda drift: drift["change"]["after"].update(member="allUsers"),
+            lambda drift: drift["change"]["after"].update(project="other-project"),
+            lambda drift: drift["change"]["after"].update(extra="unexpected"),
+            lambda drift: drift["change"].update(actions=["delete"]),
+        ):
+            changed = secret_iam_etag_drift(address)
+            mutate(changed)
+            with self.subTest(drift=changed):
+                self.assertFalse(permitted_drift(changed))
+
+        for before_etag, after_etag in ((None, "etag-after"), ("etag-before", None),
+                                        ("etag-before", "etag-before"), ("", "etag-after")):
+            changed = secret_iam_etag_drift(address, before_etag, after_etag)
+            with self.subTest(before=before_etag, after=after_etag):
+                self.assertFalse(permitted_drift(changed))
+
     def test_gke_and_project_iam_project_number_readbacks_are_permitted(self):
         set_prior_phase7(self.plan, PHASE7)
         for change in self.plan["resource_changes"]:
@@ -2831,6 +2918,20 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(DEPLOYMENT_EVIDENCE_PATH_COUNT, len(expected_names))
         self.assertEqual(tuple(argument_names), expected_names)
+
+    def test_dev_plan_and_apply_supply_live_secret_iam_evidence_to_guard(self):
+        workflows = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+        plan = (workflows / "terraform-dev-plan.yml").read_text(encoding="utf-8")
+        apply = (workflows / "terraform-dev-apply.yml").read_text(encoding="utf-8")
+
+        for workflow_name, workflow in (("Terraform Dev Plan", plan), ("Terraform Dev Apply", apply)):
+            with self.subTest(workflow=workflow_name):
+                self.assertIn("gcloud secrets get-iam-policy helpdesk-dev-db-connection", workflow)
+                self.assertIn("gcloud secrets get-iam-policy helpdesk-dev-db-admin-password", workflow)
+                self.assertIn('"$RUNNER_TEMP/app-secret-iam.json"', workflow)
+                self.assertIn('"$RUNNER_TEMP/admin-secret-iam.json"', workflow)
+
+        self.assertEqual(apply.count("python ../scripts/dev_infra_guard.py check-plan"), 2)
 
     def test_phase7_read_only_verification_rejects_unsafe_api_responses(self):
         # The fixture follows GKE, IAM and Secret Manager's documented JSON nesting.

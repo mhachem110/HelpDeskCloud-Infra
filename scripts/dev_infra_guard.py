@@ -275,6 +275,27 @@ SECRET_READBACK_NAMES = {
     "google_secret_manager_secret.dev_app_connection[0]": "helpdesk-dev-db-connection",
     "google_secret_manager_secret.dev_admin_password[0]": "helpdesk-dev-db-admin-password",
 }
+SECRET_IAM_READBACKS = {
+    "google_secret_manager_secret_iam_member.dev_app_secret_access[0]": (
+        "helpdesk-dev-db-connection",
+        f"principal://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/"
+        f"workloadIdentityPools/{PROJECT}.svc.id.goog/subject/ns/helpdesk-dev/sa/helpdesk-dev-app",
+    ),
+    "google_secret_manager_secret_iam_member.dev_app_gsa_secret_access[0]": (
+        "helpdesk-dev-db-connection",
+        f"serviceAccount:helpdesk-app-dev@{PROJECT}.iam.gserviceaccount.com",
+    ),
+    "google_secret_manager_secret_iam_member.dev_admin_secret_access[0]": (
+        "helpdesk-dev-db-admin-password",
+        f"principal://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/"
+        f"workloadIdentityPools/{PROJECT}.svc.id.goog/subject/ns/helpdesk-dev/sa/helpdesk-dev-migrate",
+    ),
+    MIGRATION_GSA_SECRET_ACCESS_ADDRESS: (
+        "helpdesk-dev-db-admin-password",
+        f"serviceAccount:helpdesk-migrate-dev@{PROJECT}.iam.gserviceaccount.com",
+    ),
+}
+SECRET_ACCESSOR_ROLE = "roles/secretmanager.secretAccessor"
 PROJECT_IAM_READBACKS = {
     MIGRATION_RUNNER_CLUSTER_VIEWER_ADDRESS: (
         "roles/container.clusterViewer",
@@ -1142,6 +1163,7 @@ def permitted_drift(entry):
         ARTIFACT_READER_IAM_ADDRESS: "google_artifact_registry_repository_iam_member",
         **{address: "google_project_iam_member" for address in PROJECT_IAM_READBACKS},
         **{secret: PHASE7[secret] for secret in SECRET_READBACK_NAMES},
+        **{address: "google_secret_manager_secret_iam_member" for address in SECRET_IAM_READBACKS},
     }.get(address)
     if entry.get("mode") != "managed" or expected_type is None or entry.get("type") != expected_type:
         return False
@@ -1221,6 +1243,28 @@ def permitted_drift(entry):
         # diagnostic classifies the live snapshots without exposing contents.
         return ({key: value for key, value in before.items() if key not in SECRET_EMPTY_MAP_FIELDS}
                 == {key: value for key, value in after.items() if key not in SECRET_EMPTY_MAP_FIELDS})
+
+    if address in SECRET_IAM_READBACKS:
+        secret_id, expected_member = SECRET_IAM_READBACKS[address]
+        expected_secret_path = f"projects/{PROJECT}/secrets/{secret_id}"
+        if any(
+            snapshot.get("secret_id") not in (secret_id, expected_secret_path)
+            or snapshot.get("role") != SECRET_ACCESSOR_ROLE
+            or snapshot.get("member") != expected_member
+            or snapshot.get("project", MISSING) not in (MISSING, PROJECT, PROJECT_NUMBER)
+            for snapshot in (before, after)
+        ):
+            return False
+        before_etag, after_etag = before.get("etag"), after.get("etag")
+        if (not isinstance(before_etag, str) or not before_etag
+                or not isinstance(after_etag, str) or not after_etag
+                or before_etag == after_etag):
+            return False
+        # A Secret Manager IAM member's etag is the shared secret-policy
+        # concurrency token. Permit that field alone; check_drift additionally
+        # requires a live policy snapshot matching all members in Terraform state.
+        return ({key: value for key, value in before.items() if key != "etag"}
+                == {key: value for key, value in after.items() if key != "etag"})
 
     if address == CLUSTER_ADDRESS:
         expected_identity = ("helpdeskcloud-dev-gke", "us-east1")
@@ -1465,13 +1509,85 @@ def permitted_drift(entry):
     return before_copy == after_copy
 
 
-def check_drift(plan, *, allow_migration_runner_iam_replacement=False):
+def check_secret_iam_policy(plan, secret_id, policy):
+    """Require the live secret policy to contain exactly its Terraform-tracked grants."""
+    prior_state = plan.get("prior_state")
+    require(isinstance(prior_state, dict), "Missing Terraform prior state for Secret Manager IAM evidence")
+    root_module = prior_state.get("values", {}).get("root_module")
+    require(isinstance(root_module, dict), "Malformed Terraform prior state for Secret Manager IAM evidence")
+
+    expected_members = []
+    seen_addresses = set()
+    for resource in state_resources(root_module):
+        if not isinstance(resource, dict) or resource.get("mode") != "managed":
+            continue
+        if resource.get("type") != "google_secret_manager_secret_iam_member":
+            continue
+        address = resource.get("address")
+        require(address in SECRET_IAM_READBACKS,
+                "Unrecognized Secret Manager IAM resource in Terraform state requires review")
+        require(address not in seen_addresses, "Duplicate Secret Manager IAM resource in Terraform state")
+        seen_addresses.add(address)
+        expected_secret, expected_member = SECRET_IAM_READBACKS[address]
+        if expected_secret != secret_id:
+            continue
+
+        values = resource.get("values")
+        expected_path = f"projects/{PROJECT}/secrets/{secret_id}"
+        require(isinstance(values, dict)
+                and values.get("secret_id") in (secret_id, expected_path)
+                and values.get("role") == SECRET_ACCESSOR_ROLE
+                and values.get("member") == expected_member
+                and values.get("project", MISSING) in (MISSING, PROJECT, PROJECT_NUMBER),
+                "Terraform state contains an unexpected Secret Manager IAM identity")
+        expected_members.append((SECRET_ACCESSOR_ROLE, expected_member))
+
+    require(bool(expected_members), "No Terraform-managed Secret Manager IAM members found for the affected secret")
+    require(isinstance(policy, dict) and set(policy).issubset({"bindings", "etag", "version", "auditConfigs"})
+            and isinstance(policy.get("bindings"), list),
+            "Invalid live Secret Manager IAM policy evidence")
+    require(policy.get("version", 1) in (1, 3), "Unexpected live Secret Manager IAM policy version")
+
+    actual_members = []
+    for binding in policy["bindings"]:
+        require(isinstance(binding, dict)
+                and set(binding).issubset({"role", "members", "condition"})
+                and binding.get("role") == SECRET_ACCESSOR_ROLE
+                and binding.get("condition") in (None, MISSING)
+                and isinstance(binding.get("members"), list)
+                and all(isinstance(member, str) and member for member in binding["members"]),
+                "Live Secret Manager policy contains an unexpected role or condition")
+        actual_members.extend((binding["role"], member) for member in binding["members"])
+
+    require(len(actual_members) == len(set(actual_members))
+            and set(actual_members) == set(expected_members),
+            "Live Secret Manager policy members differ from Terraform-managed identities")
+
+
+def check_secret_iam_evidence(plan, policies, drift):
+    affected_secrets = {
+        SECRET_IAM_READBACKS[entry["address"]][0]
+        for entry in drift
+        if entry.get("address") in SECRET_IAM_READBACKS
+    }
+    if not affected_secrets:
+        return
+    require(isinstance(policies, dict),
+            "Secret Manager IAM etag drift requires live secret-policy evidence")
+    for secret_id in affected_secrets:
+        require(secret_id in policies,
+                "Secret Manager IAM etag drift requires live secret-policy evidence")
+        check_secret_iam_policy(plan, secret_id, policies[secret_id])
+
+
+def check_drift(plan, *, allow_migration_runner_iam_replacement=False, secret_iam_policies=None):
     drift = plan.get("resource_drift", [])
     require(isinstance(drift, list), "Unexpected resource drift format")
     require(len({entry.get("address") for entry in drift if isinstance(entry, dict)}) == len(drift),
             "Duplicate or malformed resource drift")
     require(all(isinstance(entry, dict) and permitted_drift(entry) for entry in drift),
             "Unexpected resource drift requires review; run the Dev Plan diagnostic")
+    check_secret_iam_evidence(plan, secret_iam_policies, drift)
     # A drift observation never authorizes a requested operation on that resource.
     for entry in drift:
         requested = [change for change in plan.get("resource_changes", [])
@@ -1534,7 +1650,7 @@ def migration_runner_iam_remediation_candidate(plan):
     )
 
 
-def check_plan(plan):
+def check_plan(plan, *, secret_iam_policies=None):
     for name, expected in {"project_id": PROJECT, "region": "us-east1", "environment": "dev"}.items():
         require(plan.get("variables", {}).get(name, {}).get("value") == expected, f"Unexpected {name}")
     # Drift checks run first so their diagnostics remain actionable. The only
@@ -1542,6 +1658,7 @@ def check_plan(plan):
     check_drift(
         plan,
         allow_migration_runner_iam_replacement=migration_runner_iam_remediation_candidate(plan),
+        secret_iam_policies=secret_iam_policies,
     )
     planned = planned_resources(plan.get("planned_values", {}).get("root_module", {}))
     managed = [r for r in planned if r.get("mode") == "managed"]
@@ -2150,6 +2267,21 @@ def diagnose_drift(plan):
             lines.append("  etag representation: before="
                          + etag_readback_status(before.get("etag", MISSING))
                          + "; after=" + etag_readback_status(after.get("etag", MISSING)))
+        if entry.get("address") in SECRET_IAM_READBACKS and isinstance(before, dict) and isinstance(after, dict):
+            secret_id, expected_member = SECRET_IAM_READBACKS[entry["address"]]
+            expected_path = f"projects/{PROJECT}/secrets/{secret_id}"
+            for snapshot_name, snapshot in (("before", before), ("after", after)):
+                identity_matches = (
+                    snapshot.get("secret_id") in (secret_id, expected_path)
+                    and snapshot.get("role") == SECRET_ACCESSOR_ROLE
+                    and snapshot.get("member") == expected_member
+                    and snapshot.get("project", MISSING) in (MISSING, PROJECT, PROJECT_NUMBER)
+                )
+                lines.append("  " + snapshot_name + " secret IAM role, resource and principal: "
+                             + ("expected" if identity_matches else "unexpected (values withheld)"))
+            lines.append("  etag representation: before="
+                         + etag_readback_status(before.get("etag", MISSING))
+                         + "; after=" + etag_readback_status(after.get("etag", MISSING)))
         if entry.get("address") == PSA_ADDRESS and isinstance(before, dict) and isinstance(after, dict):
             lines.append("  labels: before=" + known_value(before.get("labels", MISSING), label=True)
                          + "; after=" + classify_address_labels(after.get("labels", MISSING)))
@@ -2635,6 +2767,12 @@ def main():
     try:
         if len(sys.argv) == 3 and sys.argv[1] == "check-plan":
             print(check_plan(read_json(sys.argv[2])))
+        elif len(sys.argv) == 5 and sys.argv[1] == "check-plan":
+            policies = {
+                "helpdesk-dev-db-connection": read_json(sys.argv[3]),
+                "helpdesk-dev-db-admin-password": read_json(sys.argv[4]),
+            }
+            print(check_plan(read_json(sys.argv[2]), secret_iam_policies=policies))
         elif len(sys.argv) == 3 and sys.argv[1] == "diagnose-drift":
             print("\n".join(diagnose_drift(read_json(sys.argv[2]))))
         elif len(sys.argv) == 3 and sys.argv[1] == "check-project-iam":
@@ -2644,7 +2782,8 @@ def main():
             verify_deployment(sys.argv[2:])
             print("Approved Dev resources, IAM, outputs, and deletion protection verified")
         else:
-            raise ValueError("Usage: dev_infra_guard.py check-plan PLAN_JSON | diagnose-drift PLAN_JSON | "
+            raise ValueError("Usage: dev_infra_guard.py check-plan PLAN_JSON [APP_SECRET_IAM ADMIN_SECRET_IAM] | "
+                             "diagnose-drift PLAN_JSON | "
                              "check-project-iam PROJECT_IAM_JSON | "
                              "verify-deployment VPC SUBNET ADDRESS CONNECTIONS REGISTRY REGISTRY_IAM PROJECT_IAM "
                              "SQL DATABASES OUTPUTS "
