@@ -141,6 +141,49 @@ class DevHttpsGuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             guard.check_foundation(plan, HOST)
 
+    def test_partial_state_accepts_only_confirmed_null_to_empty_provider_readback(self):
+        plan = partial_foundation_plan()
+        plan["resource_drift"] = [
+            {
+                "address": "google_compute_global_address.https", "mode": "managed",
+                "type": "google_compute_global_address",
+                "change": {"actions": ["update"], "before": {"labels": None}, "after": {"labels": {}}},
+            },
+            {
+                "address": "google_compute_ssl_policy.https", "mode": "managed",
+                "type": "google_compute_ssl_policy",
+                "change": {"actions": ["update"], "before": {"custom_features": None},
+                           "after": {"custom_features": []}},
+            },
+        ]
+        guard.check_foundation(plan, HOST)
+
+    def test_foundation_rejects_any_additional_or_material_provider_drift(self):
+        mutations = (
+            ("google_compute_global_address.https", "labels", None, {"unexpected": "label"}),
+            ("google_compute_global_address.https", "address", "34.8.56.208", "34.8.56.209"),
+            ("google_compute_ssl_policy.https", "custom_features", None, ["TLS_RSA_WITH_AES_128_CBC_SHA"]),
+        )
+        for address, field, before_value, after_value in mutations:
+            plan = partial_foundation_plan()
+            plan["resource_drift"] = [{
+                "address": address, "mode": "managed", "type": guard.PROVIDER_READBACK_DRIFT[address][0],
+                "change": {"actions": ["update"], "before": {field: before_value}, "after": {field: after_value}},
+            }]
+            with self.subTest(address=address, field=field), self.assertRaises(ValueError):
+                guard.check_foundation(plan, HOST)
+
+    def test_foundation_rejects_readback_drift_if_retained_resource_would_change(self):
+        plan = partial_foundation_plan()
+        plan["resource_changes"][0]["change"]["actions"] = ["update"]
+        plan["resource_drift"] = [{
+            "address": "google_compute_global_address.https", "mode": "managed",
+            "type": "google_compute_global_address",
+            "change": {"actions": ["update"], "before": {"labels": None}, "after": {"labels": {}}},
+        }]
+        with self.assertRaises(ValueError):
+            guard.check_foundation(plan, HOST)
+
     def test_foundation_rejects_hostname_change(self):
         with self.assertRaises(ValueError):
             guard.check_foundation(foundation_plan(), "other.example.test")

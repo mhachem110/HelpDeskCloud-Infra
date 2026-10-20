@@ -19,6 +19,10 @@ FOUNDATION = {
 ACCESS = {
     "google_iap_web_backend_service_iam_member.helpdesk_user": "google_iap_web_backend_service_iam_member",
 }
+PROVIDER_READBACK_DRIFT = {
+    "google_compute_global_address.https": ("google_compute_global_address", "labels", None, {}),
+    "google_compute_ssl_policy.https": ("google_compute_ssl_policy", "custom_features", None, []),
+}
 
 
 def require(condition, message):
@@ -53,12 +57,46 @@ def check_actions(plan, expected):
         actions = change.get("change", {}).get("actions", [])
         require(actions in (["create"], ["no-op"]),
                 "only an exact create or no-op is allowed; updates, deletes and replacements require review")
-    drift = plan.get("resource_drift", [])
-    require(not drift, "unexpected prior-state drift exists in the HTTPS root")
+    check_provider_readback_drift(plan.get("resource_drift", []), expected)
     prior = plan.get("prior_state", {}).get("values", {}).get("root_module", {}).get("resources", [])
     require(all(item.get("address") in expected for item in prior),
             "prior state contains an unexpected address")
     return by_address
+
+
+def check_provider_readback_drift(drift, expected):
+    """Allow only the two confirmed provider null-to-empty refresh differences.
+
+    Terraform 1.16.2 with google provider 7.8.0 reports labels/custom_features as
+    null in the saved state and empty collection values after refresh. The normal
+    resource-change guard still requires these retained resources to be no-ops.
+    """
+    seen = set()
+    missing = object()
+    for item in drift:
+        address = item.get("address")
+        allowed = PROVIDER_READBACK_DRIFT.get(address)
+        require(address in expected and allowed is not None,
+                "unexpected prior-state drift exists in the HTTPS root")
+        resource_type, field, before_value, after_value = allowed
+        require(item.get("mode", "managed") == "managed" and item.get("type") == resource_type,
+                "provider readback drift is on an unexpected resource type")
+        change = item.get("change", {})
+        require(change.get("actions") == ["update"],
+                "provider readback drift must be a refresh-only update")
+        before = change.get("before")
+        after = change.get("after")
+        require(isinstance(before, dict) and isinstance(after, dict),
+                "provider readback drift is missing its before/after values")
+        changed_fields = {
+            key for key in set(before) | set(after)
+            if before.get(key, missing) != after.get(key, missing)
+        }
+        require(changed_fields == {field} and before.get(field, missing) == before_value and
+                after.get(field, missing) == after_value,
+                "provider readback drift differs from the exact confirmed null-to-empty field")
+        require(address not in seen, "duplicate provider readback drift resource")
+        seen.add(address)
 
 
 def configuration_references(plan, address, expression_path):
