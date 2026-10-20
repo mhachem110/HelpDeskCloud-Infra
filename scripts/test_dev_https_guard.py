@@ -73,6 +73,39 @@ def partial_foundation_plan():
     return plan
 
 
+def certificate_status_drift_plan():
+    """Model only Google-managed Certificate Manager status changing during refresh."""
+    plan = foundation_plan(("no-op",))
+    plan["prior_state"]["values"]["root_module"]["resources"] = deepcopy(
+        plan["planned_values"]["root_module"]["resources"]
+    )
+    certificate_change = next(change for change in plan["resource_changes"]
+                              if change["address"] == "google_certificate_manager_certificate.https")
+    before = deepcopy(certificate_change["change"]["after"])
+    after = deepcopy(before)
+    before["labels"] = None
+    after["labels"] = {}
+    before["managed"][0]["authorization_attempt_info"] = [{
+        "domain": HOST,
+        "state": "FAILED",
+        "failure_reason": "CONFIG",
+        "details": "Expected DNS authorization CNAME is missing.",
+    }]
+    after["managed"][0]["authorization_attempt_info"] = [{
+        "domain": HOST,
+        "state": "AUTHORIZING",
+        "failure_reason": None,
+        "details": "DNS authorization is being checked.",
+    }]
+    plan["resource_drift"] = [{
+        "address": "google_certificate_manager_certificate.https",
+        "mode": "managed",
+        "type": "google_certificate_manager_certificate",
+        "change": {"actions": ["update"], "before": before, "after": after},
+    }]
+    return plan
+
+
 def access_plan(action=("create",)):
     values = {"project": guard.PROJECT, "web_backend_service": BACKEND,
               "role": "roles/iap.httpsResourceAccessor", "member": f"user:{EMAIL}"}
@@ -171,6 +204,58 @@ class DevHttpsGuardTests(unittest.TestCase):
             },
         ]
         guard.check_foundation(plan, HOST)
+
+    def test_certificate_output_only_dns_status_and_labels_readback_are_allowed(self):
+        guard.check_foundation(certificate_status_drift_plan(), HOST)
+
+    def test_certificate_status_readback_rejects_unknown_enums(self):
+        for key, value, expected in (
+            ("state", "UNRECOGNIZED", "unknown state enum"),
+            ("failure_reason", "UNRECOGNIZED", "unknown failure_reason enum"),
+        ):
+            plan = certificate_status_drift_plan()
+            plan["resource_drift"][0]["change"]["after"]["managed"][0][
+                "authorization_attempt_info"][0][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, expected):
+                guard.check_foundation(plan, HOST)
+
+    def test_certificate_status_readback_rejects_malformed_labels_and_unbounded_details(self):
+        plan = certificate_status_drift_plan()
+        plan["resource_drift"][0]["change"]["after"]["labels"] = {"unexpected": "label"}
+        with self.assertRaisesRegex(ValueError, "labels readback drift"):
+            guard.check_foundation(plan, HOST)
+
+        plan = certificate_status_drift_plan()
+        plan["resource_drift"][0]["change"]["after"]["managed"][0][
+            "authorization_attempt_info"][0]["details"] = "x" * 2049
+        with self.assertRaisesRegex(ValueError, "bounded provider status string"):
+            guard.check_foundation(plan, HOST)
+
+    def test_certificate_status_readback_rejects_wrong_domain(self):
+        plan = certificate_status_drift_plan()
+        plan["resource_drift"][0]["change"]["after"]["managed"][0][
+            "authorization_attempt_info"][0]["domain"] = "unrelated.example.test"
+        with self.assertRaisesRegex(ValueError, "configured or unreviewed field"):
+            guard.check_foundation(plan, HOST)
+
+    def test_certificate_status_readback_rejects_configured_field_drift(self):
+        plan = certificate_status_drift_plan()
+        plan["resource_drift"][0]["change"]["after"]["name"] = "different-certificate"
+        with self.assertRaisesRegex(ValueError, "configured or unreviewed field"):
+            guard.check_foundation(plan, HOST)
+
+    def test_certificate_status_readback_rejects_unreviewed_computed_fields(self):
+        plan = certificate_status_drift_plan()
+        plan["resource_drift"][0]["change"]["after"]["managed"][0][
+            "authorization_attempt_info"][0]["troubleshooting"] = {"issue": "CNAME_MISMATCH"}
+        with self.assertRaisesRegex(ValueError, "configured or unreviewed field"):
+            guard.check_foundation(plan, HOST)
+
+    def test_certificate_status_readback_requires_refresh_only_update(self):
+        plan = certificate_status_drift_plan()
+        plan["resource_drift"][0]["change"]["actions"] = ["delete", "create"]
+        with self.assertRaisesRegex(ValueError, "refresh-only update"):
+            guard.check_foundation(plan, HOST)
 
     def test_foundation_rejects_any_additional_or_material_provider_drift(self):
         mutations = (
