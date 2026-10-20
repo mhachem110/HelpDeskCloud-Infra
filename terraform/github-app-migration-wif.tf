@@ -57,9 +57,8 @@ resource "google_service_account_iam_member" "dev_app_migration_runner_wif" {
 }
 
 # gcloud get-credentials needs container.clusters.get and
-# container.clusters.getCredentials. Keep clusterViewer conditionally scoped to
-# the one existing Dev cluster; Kubernetes API verbs remain separately limited
-# by k8s/dev-migration-runner-rbac.yaml in the helpdesk-dev namespace.
+# container.clusters.getCredentials. Keep cluster discovery scoped to the
+# canonical resource for the one existing Dev cluster.
 resource "google_project_iam_member" "dev_app_migration_runner_cluster_viewer" {
   count   = var.environment == "dev" ? 1 : 0
   project = var.project_id
@@ -73,5 +72,22 @@ resource "google_project_iam_member" "dev_app_migration_runner_cluster_viewer" {
       resource.type == "container.googleapis.com/Cluster" &&
       resource.name == "projects/helpdeskcloud-capstone-511905/locations/us-east1/clusters/helpdeskcloud-dev-gke"
     CEL
+  }
+}
+
+# DNS-based GKE API requests are authorized against the control-plane endpoint
+# hostname. Keep the existing canonical cluster binding intact and add a
+# distinct exact-host binding so only this endpoint can satisfy the connect
+# permission check. Kubernetes API verbs remain namespace-scoped in RBAC.
+resource "google_project_iam_member" "dev_app_migration_runner_dns_endpoint" {
+  count   = var.environment == "dev" ? 1 : 0
+  project = var.project_id
+  role    = "roles/container.clusterViewer"
+  member  = google_service_account.dev_app_migration_runner[0].member
+
+  condition {
+    title       = "helpdesk-dev-migration-runner-dns-endpoint"
+    description = "Allow GKE connection only to the existing Dev DNS endpoint"
+    expression  = "resource.name == \"gke-2c60f148ddaa41c880bb7713114c59909a1a-260283083469.us-east1.gke.goog\""
   }
 }

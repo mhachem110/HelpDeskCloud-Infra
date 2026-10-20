@@ -20,6 +20,10 @@ from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_L
                              ARTIFACT_READER_IAM_ADDRESS, PHASE8_COMPLETED,
                              PHASE8_PROVIDER_ADDRESS,
                              MIGRATION_RUNNER_ACCOUNT_ID, MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
+                             MIGRATION_RUNNER_DNS_BINDING_ADDRESS,
+                             MIGRATION_RUNNER_DNS_BINDING_CONDITION,
+                             MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION,
+                             MIGRATION_RUNNER_DNS_BINDING_TITLE, MIGRATION_RUNNER_DNS_ENDPOINT,
                              MIGRATION_RUNNER_CONDITION, MIGRATION_RUNNER_DISPLAY_NAME,
                              MIGRATION_RUNNER_EMAIL, MIGRATION_RUNNER_MEMBER,
                              MIGRATION_RUNNER_PROVIDER_ID,
@@ -61,12 +65,14 @@ def strict_reference_cases(plan):
         ("google_service_account_iam_member.dev_app_support_images_wif", "service_account_id", "google_service_account.dev_app_support_image_publisher[0].name"),
         ("google_service_account_iam_member.dev_app_migration_runner_wif", "service_account_id", "google_service_account.dev_app_migration_runner[0].name"),
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "member", "google_service_account.dev_app_migration_runner[0].member"),
+        ("google_project_iam_member.dev_app_migration_runner_dns_endpoint", "member", "google_service_account.dev_app_migration_runner[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
         ("google_project_iam_member.dev_gke_node_runtime", "member", "google_service_account.dev_gke_nodes[0].member"),
         ("google_project_iam_member.dev_app_cloudsql", "member", "google_service_account.dev_app[0].member"),
         ("google_project_iam_member.dev_migration_cloudsql", "member", "google_service_account.dev_migration[0].member"),
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "project", "var.project_id"),
+        ("google_project_iam_member.dev_app_migration_runner_dns_endpoint", "project", "var.project_id"),
         ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "member", "google_service_account.dev_app_support_image_publisher[0].member"),
         ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "location", "google_artifact_registry_repository.dev_images[0].location"),
         ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "repository", "google_artifact_registry_repository.dev_images[0].repository_id"),
@@ -214,6 +220,12 @@ def fixture():
             "condition": [{"title": "helpdesk-dev-migration-runner-cluster",
                            "description": "Allow cluster discovery only for the existing Dev GKE cluster",
                            "expression": MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION}]},
+        "google_project_iam_member.dev_app_migration_runner_dns_endpoint[0]": {
+            "project": project, "role": "roles/container.clusterViewer",
+            "member": f"serviceAccount:{migration_runner}",
+            "condition": [{"title": MIGRATION_RUNNER_DNS_BINDING_TITLE,
+                           "description": MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION,
+                           "expression": MIGRATION_RUNNER_DNS_BINDING_CONDITION}]},
     }
     config = {
         "root_module": {
@@ -319,6 +331,15 @@ def fixture():
                                      "title": {"constant_value": "helpdesk-dev-migration-runner-cluster"},
                                      "description": {"constant_value": "Allow cluster discovery only for the existing Dev GKE cluster"},
                                      "expression": {"constant_value": MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION}}]}},
+                {"address": "google_project_iam_member.dev_app_migration_runner_dns_endpoint",
+                 "expressions": {"role": {"constant_value": "roles/container.clusterViewer"},
+                                 "project": {"references": ["var.project_id"]},
+                                 "member": {"references": terraform_references(
+                                     "google_service_account.dev_app_migration_runner[0].member")},
+                                 "condition": [{
+                                     "title": {"constant_value": MIGRATION_RUNNER_DNS_BINDING_TITLE},
+                                     "description": {"constant_value": MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION},
+                                     "expression": {"constant_value": MIGRATION_RUNNER_DNS_BINDING_CONDITION}}]}},
             ],
             "module_calls": {"dev_network": {"module": {"resources": [
                 {"address": "google_compute_subnetwork.this", "expressions": {
@@ -430,8 +451,26 @@ def migration_runner_create_plan():
         ("google_service_account.dev_app_migration_runner[0]", "name"),
         ("google_service_account_iam_member.dev_app_migration_runner_wif[0]", "service_account_id"),
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]", "member"),
+        ("google_project_iam_member.dev_app_migration_runner_dns_endpoint[0]", "member"),
     ):
         mark_unknown(plan, address, (field,))
+    return plan
+
+
+def migration_runner_dns_binding_recovery_plan():
+    """Model the exact additive DNS-host binding after the original Phase 9 batch."""
+    plan = fixture()
+    set_prior_phase7(plan, PHASE7)
+    address = MIGRATION_RUNNER_DNS_BINDING_ADDRESS
+    plan["prior_state"]["values"]["root_module"]["resources"] = [
+        item for item in plan["prior_state"]["values"]["root_module"]["resources"]
+        if item["address"] != address
+    ]
+    for change in plan["resource_changes"]:
+        if change["address"] == address:
+            change["change"]["actions"] = ["create"]
+        elif change["address"] in (PHASE7 | PHASE8 | PHASE9):
+            change["change"]["actions"] = ["no-op"]
     return plan
 
 
@@ -741,7 +780,9 @@ def evidence():
                                "servicesSecondaryRangeName": "helpdeskcloud-dev-services"},
         "privateClusterConfig": {"enablePrivateNodes": True},
         "controlPlaneEndpointsConfig": {"ipEndpointsConfig": {"enabled": False},
-                                        "dnsEndpointConfig": {"allowExternalTraffic": True}},
+                                        "dnsEndpointConfig": {
+                                            "allowExternalTraffic": True,
+                                            "endpoint": MIGRATION_RUNNER_DNS_ENDPOINT}},
         "workloadIdentityConfig": {"workloadPool": f"{project}.svc.id.goog"},
         "secretManagerConfig": {"enabled": True}, "releaseChannel": {"channel": "REGULAR"},
         "autoscaling": {"autoprovisioningNodePoolDefaults": {"serviceAccount": node_email}},
@@ -777,7 +818,11 @@ def evidence():
                       {"role": "roles/container.clusterViewer", "members": [migration_runner_member],
                        "condition": {"title": "helpdesk-dev-migration-runner-cluster",
                                      "description": "Allow cluster discovery only for the existing Dev GKE cluster",
-                                     "expression": MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION}}]}, sql,
+                                     "expression": MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION}},
+                      {"role": "roles/container.clusterViewer", "members": [migration_runner_member],
+                       "condition": {"title": MIGRATION_RUNNER_DNS_BINDING_TITLE,
+                                     "description": MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION,
+                                     "expression": MIGRATION_RUNNER_DNS_BINDING_CONDITION}}]}, sql,
         [{"name": "helpdesk", "instance": "helpdeskcloud-dev-postgres"}], outputs,
         cluster,
         {"email": node_email}, {"email": app_email}, {"email": migration_email},
@@ -1200,6 +1245,39 @@ class GuardTests(unittest.TestCase):
         creates = {change["address"] for change in plan["resource_changes"]
                    if change["change"]["actions"] == ["create"]}
         self.assertEqual(creates, set(PHASE9))
+
+    def test_migration_runner_dns_endpoint_binding_is_added_only_for_the_exact_host(self):
+        plan = migration_runner_dns_binding_recovery_plan()
+        self.assertEqual(check_plan(plan), "apply")
+        creates = {change["address"] for change in plan["resource_changes"]
+                   if change["change"]["actions"] == ["create"]}
+        self.assertEqual(creates, {MIGRATION_RUNNER_DNS_BINDING_ADDRESS})
+
+        mutations = (
+            lambda value: value.update(project="another-project"),
+            lambda value: value.update(role="roles/container.admin"),
+            lambda value: value.update(member="allUsers"),
+            lambda value: value["condition"][0].update(
+                expression=value["condition"][0]["expression"].replace(
+                    MIGRATION_RUNNER_DNS_ENDPOINT, "gke-other.us-east1.gke.goog")),
+            lambda value: value["condition"][0].update(title="unrestricted"),
+            lambda value: value["condition"][0].update(description="all clusters"),
+        )
+        for mutate in mutations:
+            plan = migration_runner_dns_binding_recovery_plan()
+            mutate(resource(plan, MIGRATION_RUNNER_DNS_BINDING_ADDRESS)["values"])
+            with self.subTest(mutation=mutate), self.assertRaises(ValueError):
+                check_plan(plan)
+
+        plan = migration_runner_dns_binding_recovery_plan()
+        prior_viewer = next(item for item in plan["prior_state"]["values"]["root_module"]["resources"]
+                            if item["address"] ==
+                            "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]")
+        prior_viewer["values"]["condition"][0]["expression"] = (
+            prior_viewer["values"]["condition"][0]["expression"].replace(
+                "helpdeskcloud-dev-gke", "another-cluster"))
+        with self.assertRaisesRegex(ValueError, "existing Dev GKE cluster"):
+            check_plan(plan)
 
     def test_migration_runner_rejects_partial_state_or_partial_creation(self):
         plan = migration_runner_create_plan()
@@ -2120,6 +2198,8 @@ class GuardTests(unittest.TestCase):
         # The fixture follows GKE, IAM and Secret Manager's documented JSON nesting.
         mutations = (
             (10, lambda v: v["controlPlaneEndpointsConfig"]["ipEndpointsConfig"].update(enabled=True), "endpoints"),
+            (10, lambda v: v["controlPlaneEndpointsConfig"]["dnsEndpointConfig"].update(
+                endpoint="gke-other.us-east1.gke.goog"), "endpoints"),
             (10, lambda v: v["workloadIdentityConfig"].update(workloadPool="wrong.svc.id.goog"), "Workload Identity"),
             (10, lambda v: v.update(network="projects/other/global/networks/helpdeskcloud-dev-vpc"), "VPC"),
             (10, lambda v: v["networkConfig"].update(network="projects/other/global/networks/helpdeskcloud-dev-vpc"), "networkConfig"),
