@@ -10,7 +10,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_LABEL, BASE,
+from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_LABEL, BASE, EXPECTED,
                              DEPLOYMENT_EVIDENCE_PATH_COUNT, PLANNED_EXPECTED,
                              NETWORK, PHASE6, PHASE7, PHASE8, PHASE9, LEGACY_PHASE9,
                              PSA_ADDRESS, REGISTRY_ADDRESS, SQL_ADDRESS,
@@ -1273,6 +1273,10 @@ class GuardTests(unittest.TestCase):
         creates = {change["address"] for change in plan["resource_changes"]
                    if change["change"]["actions"] == ["create"]}
         self.assertEqual(creates, set(PHASE9))
+
+    def test_planned_inventory_excludes_legacy_migration_binding(self):
+        self.assertNotIn(MIGRATION_RUNNER_DNS_BINDING_ADDRESS, PLANNED_EXPECTED)
+        self.assertEqual(set(PLANNED_EXPECTED), set(EXPECTED) - set(LEGACY_PHASE9))
 
     def test_migration_runner_project_connect_grant_replaces_conditional_bindings(self):
         plan = migration_runner_iam_remediation_plan()

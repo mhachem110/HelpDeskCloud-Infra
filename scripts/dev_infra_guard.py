@@ -168,7 +168,8 @@ BASE = NETWORK | PHASE6
 EXPECTED = BASE | PHASE7 | PHASE8 | PHASE9 | LEGACY_PHASE9
 # Legacy addresses may exist in prior state and in the exact IAM remediation
 # delete, but never in the final planned configuration.
-PLANNED_EXPECTED = EXPECTED - LEGACY_PHASE9
+PLANNED_EXPECTED = {address: resource_type for address, resource_type in EXPECTED.items()
+                    if address not in LEGACY_PHASE9}
 VPC_LINK = f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/{VPC}"
 VPC_SELF_LINKS = tuple(
     f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{VPC}"

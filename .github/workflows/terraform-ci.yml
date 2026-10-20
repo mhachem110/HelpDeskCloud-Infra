@@ -18,8 +18,8 @@ jobs:
           TARGET: ${{ github.base_ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          # One-time exception for the already-open PR #35 branch.
-          if [[ "$TARGET" == "dev" && "$SOURCE" == feature/* ]] ||
+          # Dev accepts feature and Codex implementation branches. PR #35 retains its one-time exception.
+          if [[ "$TARGET" == "dev" && ( "$SOURCE" == feature/* || "$SOURCE" == codex/* ) ]] ||
              [[ "$TARGET" == "dev" && "$SOURCE" == "mhachem110-patch-1" && "$PR_NUMBER" == "35" ]] ||
              [[ "$TARGET" == "stage" && "$SOURCE" == "dev" ]] ||
              [[ "$TARGET" == "prod" && "$SOURCE" == "stage" ]]; then
