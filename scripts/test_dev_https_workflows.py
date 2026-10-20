@@ -101,6 +101,26 @@ class DevHttpsWorkflowTests(unittest.TestCase):
                            if step.get("name") == "Display and check review plan")
         self.assertIn("-var-file=environments/dev.tfvars", review_step["run"])
 
+    def test_foundation_post_apply_verification_uses_exact_identity_checker(self):
+        workflow = load_workflow(ROOT / ".github/workflows/terraform-dev-apply.yml")
+        steps = workflow["jobs"]["approved-https-apply"]["steps"]
+        verify = next(step for step in steps
+                      if step.get("name") == "Verify retained HTTPS foundation and report DNS authorization")
+        script = verify["run"]
+        self.assertEqual(verify["if"], "inputs.target == 'https-foundation'")
+        self.assertIn("dev_https_verify_foundation.py", script)
+        self.assertIn("terraform -chdir=https-foundation state pull", script)
+        self.assertIn("gcloud projects describe", script)
+        self.assertIn("while (( attempt <= 3 )); do", script)
+        self.assertIn("grep -Eiq 'NOT_FOUND|not found|404'", script)
+        self.assertIn("sleep 2", script)
+        self.assertIn('"$GITHUB_STEP_SUMMARY"', script)
+        self.assertNotIn("jq -e", script)
+        self.assertNotIn('.ipVersion == "IPV4"', script)
+        self.assertNotIn('.name == "helpdesk-dev-https-map"', script)
+        self.assertNotIn('.name == "helpdesk-dev-https-host"', script)
+        self.assertIn("inputs.target == 'https-access'", str(steps))
+
     def test_core_drift_is_reviewed_against_the_protected_apply_and_still_fails_closed(self):
         workflow = load_workflow(ROOT / ".github/workflows/terraform-dev-apply.yml")
         review = workflow["jobs"]["review-plan"]

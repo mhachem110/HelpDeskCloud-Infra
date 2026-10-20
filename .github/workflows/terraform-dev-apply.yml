@@ -510,27 +510,63 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          gcloud compute addresses describe helpdesk-dev-https-ip --global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-address.json"
-          gcloud compute ssl-policies describe helpdesk-dev-https-tls --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-ssl-policy.json"
-          gcloud certificate-manager dns-authorizations describe helpdesk-dev-https-dns-auth --location=global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-dns-auth.json"
-          gcloud certificate-manager certificates describe helpdesk-dev-https-certificate --location=global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-certificate.json"
-          gcloud certificate-manager maps describe helpdesk-dev-https-map --location=global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-certificate-map.json"
-          gcloud certificate-manager maps entries describe helpdesk-dev-https-host --map=helpdesk-dev-https-map --location=global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-certificate-map-entry.json"
-          jq -e '.name == "helpdesk-dev-https-ip" and .addressType == "EXTERNAL" and .ipVersion == "IPV4" and .status == "RESERVED" and (.address | length) > 0' "$RUNNER_TEMP/https-address.json" >/dev/null
-          jq -e '.name == "helpdesk-dev-https-tls" and .profile == "MODERN" and .minTlsVersion == "TLS_1_2"' "$RUNNER_TEMP/https-ssl-policy.json" >/dev/null
-          jq -e --arg hostname "$HTTPS_HOSTNAME" '.domain == $hostname and .dnsResourceRecord.type == "CNAME" and (.dnsResourceRecord.name | length) > 0 and (.dnsResourceRecord.data | length) > 0' "$RUNNER_TEMP/https-dns-auth.json" >/dev/null
-          jq -e --arg hostname "$HTTPS_HOSTNAME" '.managed.domains == [$hostname] and (.managed.dnsAuthorizations | length == 1)' "$RUNNER_TEMP/https-certificate.json" >/dev/null
-          jq -e '.name == "helpdesk-dev-https-map"' "$RUNNER_TEMP/https-certificate-map.json" >/dev/null
-          jq -e --arg hostname "$HTTPS_HOSTNAME" '.name == "helpdesk-dev-https-host" and .hostname == $hostname and (.certificates | length) == 1' "$RUNNER_TEMP/https-certificate-map-entry.json" >/dev/null
-          outputs_file="$RUNNER_TEMP/https-foundation-outputs.json"
-          terraform -chdir=https-foundation output -json > "$outputs_file"
-          {
-            echo 'HTTPS foundation is created and retained. No DNS record was created and no Gateway is deployed.'
-            echo "Publish this Certificate Manager DNS authorization CNAME through the domain owner's DNS provider:"
-            jq -r '.dns_authorization_record.value | "Name: `\(.name)`  Type: `\(.type)`  Data: `\(.data)`"' "$outputs_file"
-            echo "Reserved IP: $(jq -r '.https_static_ip_address.value' "$outputs_file")"
-            echo "Certificate state: $(jq -r '.managed.state // .state // "unknown"' "$RUNNER_TEMP/https-certificate.json") (it remains pending until the owner publishes the DNS authorization record)."
-          } >> "$GITHUB_STEP_SUMMARY"
+          describe_with_retry() {
+            local label="$1"
+            local output_file="$2"
+            local error_file="${output_file}.stderr"
+            local attempt=1
+            local command_status=1
+            shift 2
+
+            while (( attempt <= 3 )); do
+              if "$@" --format=json > "$output_file" 2> "$error_file"; then
+                rm -f "$error_file"
+                return 0
+              else
+                command_status=$?
+              fi
+
+              if grep -Eiq 'NOT_FOUND|not found|404' "$error_file" && (( attempt < 3 )); then
+                echo "Retrying $label read after propagation delay (attempt $attempt of 3)." >&2
+                sleep 2
+              else
+                echo "::error::$label read failed after attempt $attempt (exit $command_status)." >&2
+                cat "$error_file" >&2
+                return "$command_status"
+              fi
+              attempt=$((attempt + 1))
+            done
+          }
+
+          describe_with_retry 'GCP project identity' "$RUNNER_TEMP/https-project.json" \
+            gcloud projects describe helpdeskcloud-capstone-511905
+          describe_with_retry 'reserved HTTPS address' "$RUNNER_TEMP/https-address.json" \
+            gcloud compute addresses describe helpdesk-dev-https-ip --global --project=helpdeskcloud-capstone-511905
+          describe_with_retry 'HTTPS SSL policy' "$RUNNER_TEMP/https-ssl-policy.json" \
+            gcloud compute ssl-policies describe helpdesk-dev-https-tls --project=helpdeskcloud-capstone-511905
+          describe_with_retry 'Certificate Manager DNS authorization' "$RUNNER_TEMP/https-dns-auth.json" \
+            gcloud certificate-manager dns-authorizations describe helpdesk-dev-https-dns-auth --location=global --project=helpdeskcloud-capstone-511905
+          describe_with_retry 'managed HTTPS certificate' "$RUNNER_TEMP/https-certificate.json" \
+            gcloud certificate-manager certificates describe helpdesk-dev-https-certificate --location=global --project=helpdeskcloud-capstone-511905
+          describe_with_retry 'HTTPS certificate map' "$RUNNER_TEMP/https-certificate-map.json" \
+            gcloud certificate-manager maps describe helpdesk-dev-https-map --location=global --project=helpdeskcloud-capstone-511905
+          describe_with_retry 'HTTPS certificate map entry' "$RUNNER_TEMP/https-certificate-map-entry.json" \
+            gcloud certificate-manager maps entries describe helpdesk-dev-https-host --map=helpdesk-dev-https-map --location=global --project=helpdeskcloud-capstone-511905
+
+          terraform -chdir=https-foundation state pull > "$RUNNER_TEMP/https-foundation-state.json"
+          python ../scripts/dev_https_verify_foundation.py \
+            --project-file "$RUNNER_TEMP/https-project.json" \
+            --address-file "$RUNNER_TEMP/https-address.json" \
+            --ssl-policy-file "$RUNNER_TEMP/https-ssl-policy.json" \
+            --dns-authorization-file "$RUNNER_TEMP/https-dns-auth.json" \
+            --certificate-file "$RUNNER_TEMP/https-certificate.json" \
+            --certificate-map-file "$RUNNER_TEMP/https-certificate-map.json" \
+            --map-entry-file "$RUNNER_TEMP/https-certificate-map-entry.json" \
+            --terraform-state-file "$RUNNER_TEMP/https-foundation-state.json" \
+            --project-id helpdeskcloud-capstone-511905 \
+            --hostname "$HTTPS_HOSTNAME" \
+            --expected-ip 34.8.56.208 \
+            --summary-file "$GITHUB_STEP_SUMMARY"
 
       - name: Verify the exact IAP backend user grant
         if: inputs.target == 'https-access'
