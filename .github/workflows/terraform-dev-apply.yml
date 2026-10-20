@@ -3,6 +3,12 @@ name: Terraform Dev Apply
 on:
   workflow_dispatch:
     inputs:
+      component:
+        description: Select the existing core Dev root or one exact HTTPS Terraform root.
+        required: true
+        type: choice
+        default: core
+        options: [core, https-foundation, https-access]
       operation:
         description: Choose a reviewed Apply or read-only verification
         required: true
@@ -13,6 +19,18 @@ on:
           - verify-only
       acknowledged_drift_fingerprint:
         description: Optional exact fingerprint from Terraform Dev Plan for an intentional managed update
+        required: false
+        type: string
+      https_hostname:
+        description: Owner-controlled hostname (required only for https-foundation).
+        required: false
+        type: string
+      iap_backend_service_name:
+        description: Exact backend name from the HelpDesk Gateway backend-services annotation (required only for https-access).
+        required: false
+        type: string
+      iap_allowed_email:
+        description: One owner-selected Google account (required only for https-access).
         required: false
         type: string
 
@@ -27,7 +45,7 @@ concurrency:
 jobs:
   review-plan:
     name: Show Dev plan
-    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.operation == 'apply'
+    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.component == 'core' && inputs.operation == 'apply'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -111,6 +129,7 @@ jobs:
       always() &&
       github.repository == 'mhachem110/HelpDeskCloud-Infra' &&
       github.ref == 'refs/heads/dev' &&
+      inputs.component == 'core' &&
       ((inputs.operation == 'apply' && needs.review-plan.result == 'success') || inputs.operation == 'verify-only')
     environment: dev-network-apply
     runs-on: ubuntu-latest
@@ -262,3 +281,218 @@ jobs:
             "$RUNNER_TEMP/app-deployer-sa.json" "$RUNNER_TEMP/app-deployer-sa-iam.json" \
             "$RUNNER_TEMP/app-deployer-provider.json" \
             "$RUNNER_TEMP/state-addresses.txt"
+
+  review-https-plan:
+    name: Show isolated Dev HTTPS plan
+    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.operation == 'apply' && inputs.component != 'core'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      TF_IN_AUTOMATION: true
+      COMPONENT: ${{ inputs.component }}
+      HTTPS_HOSTNAME: ${{ inputs.https_hostname }}
+      IAP_BACKEND_SERVICE_NAME: ${{ inputs.iap_backend_service_name }}
+      IAP_ALLOWED_EMAIL: ${{ inputs.iap_allowed_email }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Verify trusted repository and branch
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          test "$REPOSITORY" = "mhachem110/HelpDeskCloud-Infra"
+          test "$REF" = "refs/heads/dev"
+
+      - name: Validate exact component inputs
+        run: |
+          set -euo pipefail
+          case "$COMPONENT" in
+            https-foundation)
+              [[ "$HTTPS_HOSTNAME" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || { echo '::error::Provide the owner-controlled hostname; no domain is assumed.'; exit 1; }
+              ;;
+            https-access)
+              [[ "$IAP_BACKEND_SERVICE_NAME" =~ ^gkegw-[a-z0-9-]{1,50}$ ]] || { echo '::error::Provide the exact generated global backend name from the HelpDesk Gateway annotation.'; exit 1; }
+              [[ "$IAP_ALLOWED_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || { echo '::error::Provide one Google account email; none is inferred.'; exit 1; }
+              ;;
+            *) echo '::error::Unknown HTTPS component.'; exit 1 ;;
+          esac
+
+      - name: Authenticate with the existing Dev OIDC provider
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: helpdeskcloud-capstone-511905
+          workload_identity_provider: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-infra-dev
+          service_account: helpdesk-terraform-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+          create_credentials_file: true
+
+      - name: Install Terraform 1.16.2
+        uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: 1.16.2
+
+      - name: Initialize the selected isolated HTTPS state
+        run: terraform -chdir="$COMPONENT" init -input=false -no-color -lockfile=readonly -backend-config=environments/dev.gcs.tfbackend
+
+      - name: Display and check review plan
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ "$COMPONENT" == 'https-foundation' ]]; then
+            plan_file="$RUNNER_TEMP/dev-https-foundation-review.tfplan"
+            json_file="$RUNNER_TEMP/dev-https-foundation-review.json"
+            terraform -chdir="$COMPONENT" plan -input=false -no-color -lock-timeout=5m -var="hostname=$HTTPS_HOSTNAME" -out="$plan_file"
+            terraform -chdir="$COMPONENT" show -json "$plan_file" > "$json_file"
+            python ../scripts/dev_https_guard.py check-foundation "$json_file" --hostname "$HTTPS_HOSTNAME"
+          else
+            plan_file="$RUNNER_TEMP/dev-https-access-review.tfplan"
+            json_file="$RUNNER_TEMP/dev-https-access-review.json"
+            terraform -chdir="$COMPONENT" plan -input=false -no-color -lock-timeout=5m \
+              -var="backend_service_name=$IAP_BACKEND_SERVICE_NAME" -var="allowed_email=$IAP_ALLOWED_EMAIL" -out="$plan_file"
+            terraform -chdir="$COMPONENT" show -json "$plan_file" > "$json_file"
+            python ../scripts/dev_https_guard.py check-access "$json_file" \
+              --backend-service-name "$IAP_BACKEND_SERVICE_NAME" --allowed-email "$IAP_ALLOWED_EMAIL"
+          fi
+
+  approved-https-apply:
+    name: Approved isolated HTTPS operation
+    needs: review-https-plan
+    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.operation == 'apply' && inputs.component != 'core' && needs.review-https-plan.result == 'success'
+    environment: dev-network-apply
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      TF_IN_AUTOMATION: true
+      COMPONENT: ${{ inputs.component }}
+      HTTPS_HOSTNAME: ${{ inputs.https_hostname }}
+      IAP_BACKEND_SERVICE_NAME: ${{ inputs.iap_backend_service_name }}
+      IAP_ALLOWED_EMAIL: ${{ inputs.iap_allowed_email }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Verify trusted ref and protected environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          test "$REPOSITORY" = "mhachem110/HelpDeskCloud-Infra"
+          test "$REF" = "refs/heads/dev"
+          environment_file="$RUNNER_TEMP/dev-environment.json"
+          branches_file="$RUNNER_TEMP/dev-branches.json"
+          url="https://api.github.com/repos/mhachem110/HelpDeskCloud-Infra/environments/dev-network-apply"
+          curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" "$url" > "$environment_file"
+          curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' -H "Authorization: Bearer $GH_TOKEN" "$url/deployment-branch-policies?per_page=100" > "$branches_file"
+          jq -e '.name == "dev-network-apply" and .deployment_branch_policy.custom_branch_policies == true and ([.protection_rules[]? | select(.type == "required_reviewers" and (.reviewers | length) > 0)] | length) > 0' "$environment_file" >/dev/null
+          jq -e '.total_count == 1 and (.branch_policies | length) == 1 and .branch_policies[0].name == "dev"' "$branches_file" >/dev/null
+          echo 'Protected dev-network-apply environment and dev-only branch policy verified.'
+
+      - name: Reauthenticate with existing Dev OIDC
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: helpdeskcloud-capstone-511905
+          workload_identity_provider: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-infra-dev
+          service_account: helpdesk-terraform-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Install Terraform 1.16.2
+        uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: 1.16.2
+
+      - name: Initialize the selected isolated HTTPS state
+        run: terraform -chdir="$COMPONENT" init -input=false -no-color -lockfile=readonly -backend-config=environments/dev.gcs.tfbackend
+
+      - name: Create a fresh guarded apply plan
+        id: inspect-https
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ "$COMPONENT" == 'https-foundation' ]]; then
+            plan_file="$RUNNER_TEMP/dev-https-foundation-apply.tfplan"
+            json_file="$RUNNER_TEMP/dev-https-foundation-apply.json"
+            terraform -chdir="$COMPONENT" plan -input=false -no-color -lock-timeout=5m -var="hostname=$HTTPS_HOSTNAME" -out="$plan_file"
+            terraform -chdir="$COMPONENT" show -json "$plan_file" > "$json_file"
+            python ../scripts/dev_https_guard.py check-foundation "$json_file" --hostname "$HTTPS_HOSTNAME"
+          else
+            plan_file="$RUNNER_TEMP/dev-https-access-apply.tfplan"
+            json_file="$RUNNER_TEMP/dev-https-access-apply.json"
+            terraform -chdir="$COMPONENT" plan -input=false -no-color -lock-timeout=5m \
+              -var="backend_service_name=$IAP_BACKEND_SERVICE_NAME" -var="allowed_email=$IAP_ALLOWED_EMAIL" -out="$plan_file"
+            terraform -chdir="$COMPONENT" show -json "$plan_file" > "$json_file"
+            python ../scripts/dev_https_guard.py check-access "$json_file" \
+              --backend-service-name "$IAP_BACKEND_SERVICE_NAME" --allowed-email "$IAP_ALLOWED_EMAIL"
+          fi
+          if jq -e '[.resource_changes[]? | select(.mode == "managed") | select(.change.actions != ["no-op"])] | length == 0' "$json_file" >/dev/null; then
+            echo 'decision=no_changes' >> "$GITHUB_OUTPUT"
+          else
+            echo 'decision=apply' >> "$GITHUB_OUTPUT"
+          fi
+          echo "Guarded HTTPS plan decision: $(tail -n 1 "$GITHUB_OUTPUT" | cut -d= -f2)"
+
+      - name: Apply only the fresh guarded plan
+        if: steps.inspect-https.outputs.decision == 'apply'
+        run: terraform -chdir="$COMPONENT" apply -input=false -no-color -lock-timeout=5m "$RUNNER_TEMP/dev-https-${COMPONENT}-apply.tfplan"
+
+      - name: Report unchanged HTTPS resources
+        if: steps.inspect-https.outputs.decision == 'no_changes'
+        run: echo 'The fresh isolated HTTPS plan has no changes; apply was skipped.'
+
+      - name: Verify retained HTTPS foundation and report DNS authorization
+        if: inputs.component == 'https-foundation'
+        env:
+          HTTPS_HOSTNAME: ${{ inputs.https_hostname }}
+        run: |
+          set -euo pipefail
+          umask 077
+          gcloud compute addresses describe helpdesk-dev-https-ip --global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-address.json"
+          gcloud compute ssl-policies describe helpdesk-dev-https-tls --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-ssl-policy.json"
+          gcloud certificate-manager dns-authorizations describe helpdesk-dev-https-dns-auth --location=global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-dns-auth.json"
+          gcloud certificate-manager certificates describe helpdesk-dev-https-certificate --location=global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-certificate.json"
+          gcloud certificate-manager maps describe helpdesk-dev-https-map --location=global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-certificate-map.json"
+          gcloud certificate-manager maps entries describe helpdesk-dev-https-host --map=helpdesk-dev-https-map --location=global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-certificate-map-entry.json"
+          jq -e '.name == "helpdesk-dev-https-ip" and .addressType == "EXTERNAL" and .ipVersion == "IPV4" and .status == "RESERVED" and (.address | length) > 0' "$RUNNER_TEMP/https-address.json" >/dev/null
+          jq -e '.name == "helpdesk-dev-https-tls" and .profile == "MODERN" and .minTlsVersion == "TLS_1_2"' "$RUNNER_TEMP/https-ssl-policy.json" >/dev/null
+          jq -e --arg hostname "$HTTPS_HOSTNAME" '.domain == $hostname and .dnsResourceRecord.type == "CNAME" and (.dnsResourceRecord.name | length) > 0 and (.dnsResourceRecord.data | length) > 0' "$RUNNER_TEMP/https-dns-auth.json" >/dev/null
+          jq -e --arg hostname "$HTTPS_HOSTNAME" '.managed.domains == [$hostname] and (.managed.dnsAuthorizations | length == 1)' "$RUNNER_TEMP/https-certificate.json" >/dev/null
+          jq -e '.name == "helpdesk-dev-https-map"' "$RUNNER_TEMP/https-certificate-map.json" >/dev/null
+          jq -e --arg hostname "$HTTPS_HOSTNAME" '.name == "helpdesk-dev-https-host" and .hostname == $hostname and (.certificates | length) == 1' "$RUNNER_TEMP/https-certificate-map-entry.json" >/dev/null
+          outputs_file="$RUNNER_TEMP/https-foundation-outputs.json"
+          terraform -chdir=https-foundation output -json > "$outputs_file"
+          {
+            echo 'HTTPS foundation is created and retained. No DNS record was created and no Gateway is deployed.'
+            echo "Publish this Certificate Manager DNS authorization CNAME through the domain owner's DNS provider:"
+            jq -r '.dns_authorization_record.value | "Name: `\(.name)`  Type: `\(.type)`  Data: `\(.data)`"' "$outputs_file"
+            echo "Reserved IP: $(jq -r '.https_static_ip_address.value' "$outputs_file")"
+            echo "Certificate state: $(jq -r '.managed.state // .state // "unknown"' "$RUNNER_TEMP/https-certificate.json") (it remains pending until the owner publishes the DNS authorization record)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the exact IAP backend user grant
+        if: inputs.component == 'https-access'
+        env:
+          IAP_BACKEND_SERVICE_NAME: ${{ inputs.iap_backend_service_name }}
+          IAP_ALLOWED_EMAIL: ${{ inputs.iap_allowed_email }}
+        run: |
+          set -euo pipefail
+          umask 077
+          gcloud compute backend-services describe "$IAP_BACKEND_SERVICE_NAME" --global --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-backend.json"
+          gcloud iap web get-iam-policy --resource-type=backend-services --service="$IAP_BACKEND_SERVICE_NAME" --project=helpdeskcloud-capstone-511905 --format=json > "$RUNNER_TEMP/https-iap-policy.json"
+          jq -e '.id | tostring | test("^[0-9]+$")' "$RUNNER_TEMP/https-backend.json" >/dev/null
+          python ../scripts/dev_https_guard.py verify-access-policy "$RUNNER_TEMP/https-iap-policy.json" --allowed-email "$IAP_ALLOWED_EMAIL"
+          backend_id=$(jq -r '.id' "$RUNNER_TEMP/https-backend.json")
+          echo "Exact IAP user grant verified on global backend ${IAP_BACKEND_SERVICE_NAME}." >> "$GITHUB_STEP_SUMMARY"
+          echo "Set App repository variable DEV_IAP_BACKEND_SERVICE_ID=${backend_id} and DEV_IAP_ALLOWED_EMAIL to the same account before a protected app rollout." >> "$GITHUB_STEP_SUMMARY"

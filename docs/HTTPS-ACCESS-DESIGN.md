@@ -66,12 +66,14 @@ account. Those policies were **not freshly verified** in that attempt; repeat
 their metadata-only reads with a valid session before a future deployment.
 OAuth client configuration and IAP effective/inherited IAM also remain unverified.
 
-`dev_infra_guard.py` checks the full planned resource-address set, type, selected
-identity/security values, prior state, actions and drift. It accepts only its
-reviewed create/recovery/no-op cases and narrow provider normalizations. A
-separate drift fingerprint acknowledgement does not authorize arbitrary resource
-changes. HTTPS resources must get an explicit reviewed phase/guard before a
-future Apply; this preparation adds no exception or new allowed type.
+`dev_infra_guard.py` remains unchanged for the existing Dev root. The new
+`dev_https_guard.py` separately allowlists only the exact resources in the two
+isolated HTTPS roots, validates the selected hostname or one backend/email pair,
+and rejects drift, unexpected updates, deletions and replacements. New Plan and
+Apply workflow choices default to the existing `core` component. HTTPS Apply
+uses the existing protected `dev-network-apply` Environment, its `dev` branch
+policy and a fresh checked plan. This does not widen the existing root's guard
+or change the unrelated drift acknowledgement behavior.
 
 ## Recommended architecture and alternatives
 
@@ -143,8 +145,9 @@ checks. Every admitted user can read, create, update and delete all tickets. IAP
 does not implement per-ticket roles or ownership; initial use is restricted to
 the owner with demonstration data.
 
-Before ticket routes are exposed, add opt-in signed IAP assertion validation to
-the .NET app using a maintained JWT library. Validate signature/ES256, issuer,
+Before ticket routes are exposed, use the implemented opt-in signed IAP
+assertion validator in the .NET app, backed by Microsoft's maintained JWT
+library. Validate signature/ES256, issuer,
 expiry/issued-at and the exact generated backend-service audience; reject missing
 or forged assertions on website/API paths. Keep only the exact liveness/readiness
 probe paths exempt. This is validation of Google's login boundary, not a new
@@ -189,47 +192,41 @@ ticket traffic; retain its CNAME for renewals. Wait for certificate ACTIVE and
 DNS propagation rather than promising immediate readiness.
 [DNS-authorized certificate setup](https://docs.cloud.google.com/certificate-manager/docs/deploy-google-managed-dns-auth).
 
-Future required inputs: `https_hostname`, `iap_allowed_email`, OAuth client ID,
-approved OAuth-secret reference/version, static-IP reservation name, certificate
-map name, and discovered backend-service name/ID. All begin unset; enabling
-access with missing inputs must fail. DNS-provider access and domain purchase
-remain separate owner approvals.
+Required owner inputs before any future apply or route: `https_hostname`, one
+`iap_allowed_email`, OAuth client ID and secret, static-IP reservation name,
+certificate-map name, and the discovered exact backend-service name/ID. The
+Terraform workflow requires hostname/email/backend values as dispatch inputs;
+the App workflow requires HTTPS repository variables and the OAuth secret in
+the existing protected deployment Environment. No hostname or personal email
+is hardcoded. DNS-provider access and domain purchase remain separate owner
+decisions. The currently unset values intentionally prevent live rollout.
 
 ## Ownership and future changes
 
-No `.tf` resource is added in this PR. The current exact-address plan guard
-continues to reject unapproved edge resources. Extending it before the final
-domain, account and lifecycle decisions would grant an undefined change scope.
+This preparation adds two independent Terraform roots, each with its own
+existing-bucket GCS backend prefix and a narrowly scoped plan guard. They do not
+import or alter the existing Dev root or its state. The foundation root owns
+project API enablement with `disable_on_destroy = false`, the retained global
+IP, TLS policy, DNS authorization, managed certificate and certificate map.
+The access root owns exactly one backend-specific IAP user member after the
+GKE-generated backend has been discovered. Neither root has been applied.
 
 | Owner | Future resources / configuration | Rebuild handling |
 | --- | --- | --- |
 | Existing Terraform Dev root | Existing VPC, subnet, PSA, SQL, GKE, runtime identities and workload grants | Existing protections retained; no replacements for HTTPS |
-| Proposed retained edge foundation Terraform root, same GCS bucket with a distinct reviewed prefix | `google_compute_global_address` EXTERNAL/PREMIUM, `google_compute_ssl_policy` minimum TLS 1.2/MODERN, Certificate Manager DNS authorization, certificate, map and entry; OAuth secret **metadata** only if needed | Retain across disposable cluster teardown; use `prevent_destroy` and reviewed teardown policy |
-| Explicit API bootstrap ownership | IAP and Certificate Manager enablement; existing Compute/Container/DNS retained | Do not disable APIs on Dev teardown; do not claim they are Terraform-managed today |
+| New isolated HTTPS foundation Terraform root, GCS prefix `helpdeskcloud/dev-https` | IAP and Certificate Manager APIs, `google_compute_global_address` EXTERNAL/IPv4, `google_compute_ssl_policy` TLS 1.2/MODERN, Certificate Manager DNS authorization, managed certificate, map and entry | Retained across cluster teardown; `prevent_destroy` protects address, policy, authorization and certificate resources; API disable-on-destroy is false |
 | DNS owner | Authorization CNAME and public A record; optional future `google_dns_record_set` only with approved zone | Preserve when retaining edge foundation; update A if owner chooses to release the IP |
-| Namespace platform bootstrap, separately reviewed stage behind existing deployment approval | Gateway, GCPGatewayPolicy, GCPBackendPolicy, HealthCheckPolicy, HTTPRoute, OAuth Secret delivery, NetworkPolicy | Recreate declaratively; controller recreates LB and NEGs; never Helm app-release ownership |
-| Backend-specific access Terraform phase after discovery | `google_iap_web_backend_service_iam_member`, one configurable user, exact global backend | Backend ID/name may change on cluster rebuild; rediscover/rebind; no guessed names or project-wide fallback |
-| Existing App Helm release | Existing Deployment and ClusterIP Service; future opt-in signed-assertion config | Two replicas/probes and DB path retained; app deployer needs no new edge permissions in this preparation |
+| New isolated HTTPS access Terraform root, GCS prefix `helpdeskcloud/dev-https-access` | One `google_iap_web_backend_service_iam_member`, configured user only, exact discovered global backend only | Re-discover and rebind after a cluster rebuild; no project-wide grant |
+| New App `helm/https-edge-access` chart and protected `https-edge` workflow stage | Gateway, GCPGatewayPolicy, GCPBackendPolicy, HealthCheckPolicy and HTTPRoute; OAuth secret delivered only at runtime from the protected Environment secret | Recreate through the existing `dev-app-deploy` approval; controller recreates LB and NEGs; never Helm app-release ownership |
+| Existing App Helm release | Existing Deployment and ClusterIP Service; opt-in signed-assertion config | Two replicas/probes and DB path retained; HTTPS enforcement is disabled by default |
 
-The retained edge root is a proposal, not a state migration in this change. Reuse
-the existing GCS bucket with separate locking/prefix; never initialize another
-root against `helpdeskcloud/dev`. Its future guard must validate exact addresses,
-project, EXTERNAL/PREMIUM scope, hostname, cert references and metadata-only
-secret handling, and reject unexpected updates, deletes, replacements and IAM.
-Adding an acknowledgement must not bypass those checks. Test create/no-op,
-unrelated change, broad user grants and teardown attempts. The current Dev root
-needs no new allowed resource types when edge foundation is separate.
-Extend the CI root matrix to validate/scan the new root with the same pinned
-Terraform/provider versions. Existing protected Plan/Apply must select only
-enumerated reviewed roots, with an exact backend prefix and guard per root;
-never accept arbitrary working-directory or state-prefix workflow inputs.
-
-Backend IAM is deliberately a second phase: the backend exists only after GKE
-reconciles routing. Pass its discovered exact name/ID to the access phase after
-validating the Gateway/Service association. Keep the IAP member out of the
-retained certificate/IP root so backend replacement cannot block foundation
-planning. No Terraform dependency may require a not-yet-created backend to
-create its own Gateway or application.
+The roots, workflow selectors, CI validation and guard tests are implemented in
+the Infra PR, but have not been run against live state or applied. Each workflow
+accepts only enumerated component values and uses fixed backend files; it does
+not accept arbitrary working directories or state prefixes. Foundation and
+backend IAM remain separate so an IAP member cannot block foundation planning.
+The backend name is supplied only after verifying the Gateway's generated
+backend association. The current Dev root needs no new resource allowlist.
 
 ## Protected delivery sequence for a later authorization
 
@@ -239,9 +236,10 @@ create its own Gateway or application.
 3. Run reviewed edge Terraform Plan, approve `dev-network-apply`, and Apply only
    the checked plan. Preserve existing remote state and deletion protection.
 4. Publish DNS authorization with approval; wait for the retained certificate.
-5. Through a separately reviewed protected bootstrap stage, create the Gateway,
-   backend/health policies and an **Exact `/health/live`-only** route. No root or
-   ticket route yet. Health checks use app port 8080 and `/health/ready`.
+5. Through the App PR's separately reviewed protected `dev-app-deploy` stage,
+   create the Gateway, backend/health policies and an **Exact `/health/live`-only**
+   route. No root or ticket route yet. Gateway health checks use app port 8080
+   and `/health/live`.
 6. Discover backend identity; verify policy Accepted status and live IAP enabled;
    apply only the backend-specific user grant. An unauthenticated health-route
    request must now encounter IAP. Review inherited IAP grants as well.
@@ -316,23 +314,25 @@ assertion bypass tests, successful approved-account ticket persistence, two read
 replicas, unchanged private SQL, and no alternate exposure path. Do not use the
 public URL, LB or authentication as demonstrated functionality before these tests.
 
-This preparation implements only reviewable documentation and an App manifest
-ownership/exposure check. It deploys none of the proposed HTTPS architecture.
+This preparation implements reviewable, opt-in Terraform, Helm, workflow, guard,
+and application assertion-validation changes. It deploys none of the proposed
+HTTPS architecture; the current application and ClusterIP remain untouched.
 
 ### Preparation validation
 
-- Terraform 1.16.2: recursive formatting, backend-disabled/lockfile-readonly init
-  and validation passed with Google provider 7.8.0. Local PATH had Terraform
-  1.15.8, so the checks used the pinned official 1.16.2 container instead of
-  weakening the version constraint.
-- TFLint 0.64.0 passed; Checkov 3.3.17: 10 passed, zero failed, one existing skip.
-- Existing Terraform guard regression suite: 133 tests passed.
-- App: .NET Release build and 11 validation checks; 34 Python tests; local Linux
-  image build and Trivy 0.75.0 fixable-CRITICAL scan all passed, zero findings at
-  that scan threshold. Nothing was published.
-- Helm lint and all three Dev/bootstrap, migration-render-only and delivery
-  renders passed. Kubeconform 0.8.0 / Kubernetes 1.33.0: 15 valid, zero invalid,
-  zero errors, four SecretProviderClass documents skipped for unavailable CRD
-  schemas. This is offline schema validation, not a live server dry run.
-- The proposed Gateway, certificate, OAuth and JWT enforcement have no deployed
-  implementation in this PR and therefore no live acceptance result.
+- Terraform 1.16.2: formatting, backend-disabled/lockfile-readonly init and
+  validation passed for both isolated roots with locked Google provider 7.8.0.
+  Local Terraform is 1.15.8, so checks used the pinned container.
+- Infra Python suites: 150 tests passed, including 14 HTTPS guard cases and
+  workflow/prefix coverage. Terraform format/init/validate and TFLint passed for
+  the isolated roots; Checkov passed 11 checks with one documented skip.
+  Offline empty-state plans passed both exact HTTPS guards (8 foundation creates
+  and one IAP grant). GitHub PR CI is pending the final push. No live Terraform
+  plan was run because the owner has no hostname.
+- App .NET Release build passed with zero warnings/errors; all 24 validation
+  checks and 42 Python tests passed. Both Helm charts lint; rendered app release
+  and both HTTPS route stages passed their manifest guards using test-only
+  values.
+- No image was published and no cloud resource, DNS record, certificate, IAP
+  policy or Kubernetes object was created. This work has no live HTTPS
+  acceptance result.

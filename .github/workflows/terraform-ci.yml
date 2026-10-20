@@ -48,6 +48,13 @@ jobs:
         run: terraform init -backend=false -input=false -lockfile=readonly
       - name: Validate configuration
         run: terraform validate -no-color
+      - name: Validate isolated HTTPS Terraform roots
+        run: |
+          set -euo pipefail
+          for root in https-foundation https-access; do
+            terraform -chdir="$root" init -backend=false -input=false -lockfile=readonly
+            terraform -chdir="$root" validate -no-color
+          done
 
   tflint:
     name: TFLint
@@ -63,7 +70,12 @@ jobs:
         with:
           tflint_version: v0.64.0
       - name: Lint Terraform
-        run: tflint --format compact
+        run: |
+          set -euo pipefail
+          tflint --format compact
+          for root in https-foundation https-access; do
+            (cd "$root" && tflint --format compact)
+          done
 
   checkov:
     name: Checkov Terraform scan
