@@ -1638,6 +1638,22 @@ def drift_is_acknowledgeable(plan):
     return True
 
 
+def reviewed_drift_fingerprint(plan):
+    """Bind an approved Apply to only known, reviewable drift in the preceding plan."""
+    drift = plan.get("resource_drift", [])
+    require(isinstance(drift, list), "Unexpected resource drift format")
+    require(len({entry.get("address") for entry in drift if isinstance(entry, dict)}) == len(drift),
+            "Duplicate or malformed resource drift")
+    if not drift:
+        return ""
+    if all(isinstance(entry, dict) and permitted_drift(entry) for entry in drift):
+        return drift_fingerprint(plan)
+    require(drift_is_acknowledgeable(plan),
+            "Unexpected drift cannot be approved: deletions, replacements, unknown resources, "
+            "and malformed readbacks remain blocked")
+    return drift_fingerprint(plan)
+
+
 def check_drift(plan, *, allow_migration_runner_iam_replacement=False, secret_iam_policies=None,
                 acknowledged_drift_fingerprint=None, report_only=False):
     drift = plan.get("resource_drift", [])
@@ -2897,6 +2913,8 @@ def main():
             ))
         elif len(sys.argv) == 3 and sys.argv[1] == "diagnose-drift":
             print("\n".join(diagnose_drift(read_json(sys.argv[2]))))
+        elif len(sys.argv) == 3 and sys.argv[1] == "review-drift":
+            print(reviewed_drift_fingerprint(read_json(sys.argv[2])))
         elif len(sys.argv) == 3 and sys.argv[1] == "check-project-iam":
             check_iam(read_json(sys.argv[2]), "project")
             print("No direct public project IAM binding found")
@@ -2906,7 +2924,7 @@ def main():
         else:
             raise ValueError("Usage: dev_infra_guard.py check-plan PLAN_JSON [APP_SECRET_IAM ADMIN_SECRET_IAM] "
                              "[--report-drift] [--acknowledged-drift FINGERPRINT] | "
-                             "diagnose-drift PLAN_JSON | "
+                             "diagnose-drift PLAN_JSON | review-drift PLAN_JSON | "
                              "check-project-iam PROJECT_IAM_JSON | "
                              "verify-deployment VPC SUBNET ADDRESS CONNECTIONS REGISTRY REGISTRY_IAM PROJECT_IAM "
                              "SQL DATABASES OUTPUTS "

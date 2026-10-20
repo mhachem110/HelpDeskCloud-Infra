@@ -94,5 +94,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4.2.2
+      - name: Validate HTTPS target helper shell syntax
+        run: |
+          set -euo pipefail
+          for script in scripts/prepare_dev_https_target.sh scripts/prepare_dev_https_access.sh; do
+            bash -n "$script"
+          done
       - name: Test the Dev infrastructure Apply guard
         run: python -m unittest discover -s scripts -p 'test_*.py' -v
