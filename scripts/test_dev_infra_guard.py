@@ -10,9 +10,10 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_LABEL, BASE,
-                             DEPLOYMENT_EVIDENCE_PATH_COUNT, EXPECTED,
-                             NETWORK, PHASE6, PHASE7, PHASE8, PHASE9, PSA_ADDRESS, REGISTRY_ADDRESS, SQL_ADDRESS,
+from dev_infra_guard import (APPLY12_COMPLETED, APPLY12_REMAINING, ATTRIBUTION_LABEL, BASE, EXPECTED,
+                             DEPLOYMENT_EVIDENCE_PATH_COUNT, PLANNED_EXPECTED,
+                             NETWORK, PHASE6, PHASE7, PHASE8, PHASE9, LEGACY_PHASE9,
+                             PSA_ADDRESS, REGISTRY_ADDRESS, SQL_ADDRESS,
                              SUBNET_ADDRESS, SUBNET_PATHS, SUPPORT_PUBLISHER_ACCOUNT_ID,
                              SUPPORT_PUBLISHER_CONDITION, SUPPORT_PUBLISHER_DISPLAY_NAME,
                              SUPPORT_PUBLISHER_EMAIL, SUPPORT_PUBLISHER_MAPPING,
@@ -66,14 +67,12 @@ def strict_reference_cases(plan):
         ("google_service_account_iam_member.dev_app_support_images_wif", "service_account_id", "google_service_account.dev_app_support_image_publisher[0].name"),
         ("google_service_account_iam_member.dev_app_migration_runner_wif", "service_account_id", "google_service_account.dev_app_migration_runner[0].name"),
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "member", "google_service_account.dev_app_migration_runner[0].member"),
-        ("google_project_iam_member.dev_app_migration_runner_dns_endpoint", "member", "google_service_account.dev_app_migration_runner[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
         ("google_project_iam_member.dev_gke_node_runtime", "member", "google_service_account.dev_gke_nodes[0].member"),
         ("google_project_iam_member.dev_app_cloudsql", "member", "google_service_account.dev_app[0].member"),
         ("google_project_iam_member.dev_migration_cloudsql", "member", "google_service_account.dev_migration[0].member"),
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "project", "var.project_id"),
-        ("google_project_iam_member.dev_app_migration_runner_dns_endpoint", "project", "var.project_id"),
         ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "member", "google_service_account.dev_app_support_image_publisher[0].member"),
         ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "location", "google_artifact_registry_repository.dev_images[0].location"),
         ("google_artifact_registry_repository_iam_member.dev_app_support_images_writer", "repository", "google_artifact_registry_repository.dev_images[0].repository_id"),
@@ -217,16 +216,7 @@ def fixture():
             "member": MIGRATION_RUNNER_MEMBER},
         "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]": {
             "project": project, "role": "roles/container.clusterViewer",
-            "member": f"serviceAccount:{migration_runner}",
-            "condition": [{"title": "helpdesk-dev-migration-runner-cluster",
-                           "description": "Allow cluster discovery only for the existing Dev GKE cluster",
-                           "expression": MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION}]},
-        "google_project_iam_member.dev_app_migration_runner_dns_endpoint[0]": {
-            "project": project, "role": "roles/container.clusterViewer",
-            "member": f"serviceAccount:{migration_runner}",
-            "condition": [{"title": MIGRATION_RUNNER_DNS_BINDING_TITLE,
-                           "description": MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION,
-                           "expression": MIGRATION_RUNNER_DNS_BINDING_CONDITION}]},
+            "member": f"serviceAccount:{migration_runner}"},
     }
     config = {
         "root_module": {
@@ -327,20 +317,7 @@ def fixture():
                  "expressions": {"role": {"constant_value": "roles/container.clusterViewer"},
                                  "project": {"references": ["var.project_id"]},
                                  "member": {"references": terraform_references(
-                                     "google_service_account.dev_app_migration_runner[0].member")},
-                                 "condition": [{
-                                     "title": {"constant_value": "helpdesk-dev-migration-runner-cluster"},
-                                     "description": {"constant_value": "Allow cluster discovery only for the existing Dev GKE cluster"},
-                                     "expression": {"constant_value": MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION}}]}},
-                {"address": "google_project_iam_member.dev_app_migration_runner_dns_endpoint",
-                 "expressions": {"role": {"constant_value": "roles/container.clusterViewer"},
-                                 "project": {"references": ["var.project_id"]},
-                                 "member": {"references": terraform_references(
-                                     "google_service_account.dev_app_migration_runner[0].member")},
-                                 "condition": [{
-                                     "title": {"constant_value": MIGRATION_RUNNER_DNS_BINDING_TITLE},
-                                     "description": {"constant_value": MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION},
-                                     "expression": {"constant_value": MIGRATION_RUNNER_DNS_BINDING_CONDITION}}]}},
+                                     "google_service_account.dev_app_migration_runner[0].member")}}},
             ],
             "module_calls": {"dev_network": {"module": {"resources": [
                 {"address": "google_compute_subnetwork.this", "expressions": {
@@ -353,15 +330,16 @@ def fixture():
             ]}}},
         }
     }
+    current_expected = PLANNED_EXPECTED
     planned = [{"mode": "managed", "address": address, "type": kind,
                 "values": (phase9[address] if address in PHASE9
                            else phase8[address] if address in PHASE8
                            else phase7[address] if address in PHASE7
                            else (network | phase6)[kind])}
-               for address, kind in EXPECTED.items()]
+               for address, kind in PLANNED_EXPECTED.items() if address in current_expected]
     changes = [{"mode": "managed", "address": address, "type": kind,
                 "change": {"actions": ["no-op"] if address in (BASE | PHASE8 | PHASE9) else ["create"]}}
-               for address, kind in EXPECTED.items()]
+               for address, kind in PLANNED_EXPECTED.items() if address in current_expected]
     prior_state = [copy.deepcopy(resource) for resource in planned
                    if resource["address"] in (BASE | PHASE8 | PHASE9)]
     return {
@@ -452,26 +430,50 @@ def migration_runner_create_plan():
         ("google_service_account.dev_app_migration_runner[0]", "name"),
         ("google_service_account_iam_member.dev_app_migration_runner_wif[0]", "service_account_id"),
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]", "member"),
-        ("google_project_iam_member.dev_app_migration_runner_dns_endpoint[0]", "member"),
     ):
         mark_unknown(plan, address, (field,))
     return plan
 
 
-def migration_runner_dns_binding_recovery_plan():
-    """Model the exact additive DNS-host binding after the original Phase 9 batch."""
+def migration_runner_iam_remediation_plan():
+    """Model the exact transition from conditional bindings to project-level connect access."""
     plan = fixture()
     set_prior_phase7(plan, PHASE7)
-    address = MIGRATION_RUNNER_DNS_BINDING_ADDRESS
-    plan["prior_state"]["values"]["root_module"]["resources"] = [
-        item for item in plan["prior_state"]["values"]["root_module"]["resources"]
-        if item["address"] != address
-    ]
+    prior_resources = plan["prior_state"]["values"]["root_module"]["resources"]
+    viewer_address = "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]"
+    legacy_viewer = next(item for item in prior_resources if item["address"] == viewer_address)
+    legacy_viewer["values"]["condition"] = [{
+        "title": "helpdesk-dev-migration-runner-cluster",
+        "description": "Allow cluster discovery only for the existing Dev GKE cluster",
+        "expression": MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
+    }]
+    legacy_dns = {
+        "project": "helpdeskcloud-capstone-511905",
+        "role": "roles/container.clusterViewer",
+        "member": f"serviceAccount:{MIGRATION_RUNNER_EMAIL}",
+        "condition": [{
+            "title": MIGRATION_RUNNER_DNS_BINDING_TITLE,
+            "description": MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION,
+            "expression": MIGRATION_RUNNER_DNS_BINDING_CONDITION,
+        }],
+    }
+    prior_resources.append({"mode": "managed", "address": MIGRATION_RUNNER_DNS_BINDING_ADDRESS,
+                            "type": LEGACY_PHASE9[MIGRATION_RUNNER_DNS_BINDING_ADDRESS],
+                            "values": copy.deepcopy(legacy_dns)})
     for change in plan["resource_changes"]:
-        if change["address"] == address:
-            change["change"]["actions"] = ["create"]
+        if change["address"] == viewer_address:
+            change["change"] = {"actions": ["update"],
+                                 "before": copy.deepcopy(legacy_viewer["values"]),
+                                 "after": copy.deepcopy(resource(plan, viewer_address)["values"]),
+                                 "after_unknown": {}}
         elif change["address"] in (PHASE7 | PHASE8 | PHASE9):
             change["change"]["actions"] = ["no-op"]
+    plan["resource_changes"].append({
+        "mode": "managed", "address": MIGRATION_RUNNER_DNS_BINDING_ADDRESS,
+        "type": LEGACY_PHASE9[MIGRATION_RUNNER_DNS_BINDING_ADDRESS],
+        "change": {"actions": ["delete"], "before": legacy_dns,
+                   "after": None, "after_unknown": None},
+    })
     return plan
 
 
@@ -848,14 +850,7 @@ def evidence():
                         "members": [f"serviceAccount:{SUPPORT_PUBLISHER_EMAIL}"]}]},
         {"bindings": [{"role": "roles/container.defaultNodeServiceAccount", "members": [node_member]},
                       {"role": "roles/cloudsql.client", "members": [app_member, migration_member]},
-                      {"role": "roles/container.clusterViewer", "members": [migration_runner_member],
-                       "condition": {"title": "helpdesk-dev-migration-runner-cluster",
-                                     "description": "Allow cluster discovery only for the existing Dev GKE cluster",
-                                     "expression": MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION}},
-                      {"role": "roles/container.clusterViewer", "members": [migration_runner_member],
-                       "condition": {"title": MIGRATION_RUNNER_DNS_BINDING_TITLE,
-                                     "description": MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION,
-                                     "expression": MIGRATION_RUNNER_DNS_BINDING_CONDITION}}]}, sql,
+                      {"role": "roles/container.clusterViewer", "members": [migration_runner_member]}]}, sql,
         [{"name": "helpdesk", "instance": "helpdeskcloud-dev-postgres"}], outputs,
         cluster,
         {"email": node_email}, {"email": app_email}, {"email": migration_email},
@@ -1279,41 +1274,54 @@ class GuardTests(unittest.TestCase):
                    if change["change"]["actions"] == ["create"]}
         self.assertEqual(creates, set(PHASE9))
 
-    def test_migration_runner_dns_endpoint_binding_is_added_only_for_the_exact_host(self):
-        plan = migration_runner_dns_binding_recovery_plan()
-        self.assertEqual(check_plan(plan), "apply")
-        creates = {change["address"] for change in plan["resource_changes"]
-                   if change["change"]["actions"] == ["create"]}
-        self.assertEqual(creates, {MIGRATION_RUNNER_DNS_BINDING_ADDRESS})
+    def test_planned_inventory_excludes_legacy_migration_binding(self):
+        self.assertNotIn(MIGRATION_RUNNER_DNS_BINDING_ADDRESS, PLANNED_EXPECTED)
+        self.assertEqual(set(PLANNED_EXPECTED), set(EXPECTED) - set(LEGACY_PHASE9))
 
-        mutations = (
+    def test_migration_runner_project_connect_grant_replaces_conditional_bindings(self):
+        plan = migration_runner_iam_remediation_plan()
+        self.assertEqual(check_plan(plan), "apply")
+        actions = {change["address"]: change["change"]["actions"]
+                   for change in plan["resource_changes"]}
+        viewer_address = "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]"
+        self.assertEqual(actions[viewer_address], ["update"])
+        self.assertEqual(actions[MIGRATION_RUNNER_DNS_BINDING_ADDRESS], ["delete"])
+
+        for mutate in (
             lambda value: value.update(project="another-project"),
             lambda value: value.update(role="roles/container.admin"),
             lambda value: value.update(member="allUsers"),
-            lambda value: value["condition"][0].update(
-                expression=value["condition"][0]["expression"].replace(
-                    MIGRATION_RUNNER_DNS_ENDPOINT, "gke-other.us-east1.gke.goog")),
-            lambda value: value["condition"][0].update(title="unrestricted"),
-            lambda value: value["condition"][0].update(description="all clusters"),
-        )
-        for mutate in mutations:
-            plan = migration_runner_dns_binding_recovery_plan()
-            mutate(resource(plan, MIGRATION_RUNNER_DNS_BINDING_ADDRESS)["values"])
+            lambda value: value.update(condition=[{"title": "unexpected"}]),
+        ):
+            plan = migration_runner_iam_remediation_plan()
+            mutate(resource(plan, viewer_address)["values"])
             with self.subTest(mutation=mutate), self.assertRaises(ValueError):
                 check_plan(plan)
 
-        plan = migration_runner_dns_binding_recovery_plan()
+        for mutate in (
+            lambda value: value.update(role="roles/container.admin"),
+            lambda value: value.update(member="allUsers"),
+            lambda value: value["condition"][0].update(title="unexpected"),
+            lambda value: value["condition"][0].update(expression="true"),
+        ):
+            plan = migration_runner_iam_remediation_plan()
+            legacy = next(item for item in plan["prior_state"]["values"]["root_module"]["resources"]
+                          if item["address"] == MIGRATION_RUNNER_DNS_BINDING_ADDRESS)
+            mutate(legacy["values"])
+            with self.subTest(mutation=mutate), self.assertRaises(ValueError):
+                check_plan(plan)
+
+        plan = migration_runner_iam_remediation_plan()
         prior_viewer = next(item for item in plan["prior_state"]["values"]["root_module"]["resources"]
-                            if item["address"] ==
-                            "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]")
+                            if item["address"] == viewer_address)
         prior_viewer["values"]["condition"][0]["expression"] = (
             prior_viewer["values"]["condition"][0]["expression"].replace(
                 "helpdeskcloud-dev-gke", "another-cluster"))
-        with self.assertRaisesRegex(ValueError, "existing Dev GKE cluster"):
+        with self.assertRaises(ValueError):
             check_plan(plan)
 
-    def test_apply28_migration_provider_audience_and_iam_etag_drift_allow_exact_dns_binding_add(self):
-        plan = migration_runner_dns_binding_recovery_plan()
+    def test_apply28_migration_provider_audience_and_iam_etag_drift_allow_exact_connect_remediation(self):
+        plan = migration_runner_iam_remediation_plan()
         provider_drift = migration_provider_audience_drift(None, [])
         iam_drift = [project_iam_etag_drift(address) for address in (
             "google_project_iam_member.dev_app_cloudsql[0]",
@@ -1323,9 +1331,9 @@ class GuardTests(unittest.TestCase):
         plan["resource_drift"] = [provider_drift, *iam_drift]
 
         self.assertEqual(check_plan(plan), "apply")
-        creates = {change["address"] for change in plan["resource_changes"]
-                   if change["change"]["actions"] == ["create"]}
-        self.assertEqual(creates, {MIGRATION_RUNNER_DNS_BINDING_ADDRESS})
+        deletes = {change["address"] for change in plan["resource_changes"]
+                   if change["change"]["actions"] == ["delete"]}
+        self.assertEqual(deletes, {MIGRATION_RUNNER_DNS_BINDING_ADDRESS})
 
         report = "\n".join(diagnose_drift(plan))
         self.assertIn("before migration provider identity: expected", report)
@@ -1347,7 +1355,7 @@ class GuardTests(unittest.TestCase):
             (None, []),
             ([], None),
         ):
-            plan = migration_runner_dns_binding_recovery_plan()
+            plan = migration_runner_iam_remediation_plan()
             plan["resource_drift"] = [migration_provider_audience_drift(before, after)]
             with self.subTest(allowed_audiences_before=before, allowed_audiences_after=after):
                 self.assertEqual(check_plan(plan), "apply")
@@ -1359,7 +1367,7 @@ class GuardTests(unittest.TestCase):
             ([], ["https://unexpected.example"]),
             (["https://first.example"], ["https://second.example"]),
         ):
-            plan = migration_runner_dns_binding_recovery_plan()
+            plan = migration_runner_iam_remediation_plan()
             plan["resource_drift"] = [migration_provider_audience_drift(before, after)]
             with self.subTest(before=before, after=after), self.assertRaisesRegex(ValueError, "drift"):
                 check_plan(plan)
@@ -1376,7 +1384,7 @@ class GuardTests(unittest.TestCase):
                 "helpdesk-github/providers/github-app-migration-dev")),
         )
         for mutate in identity_mutations:
-            plan = migration_runner_dns_binding_recovery_plan()
+            plan = migration_runner_iam_remediation_plan()
             drift = migration_provider_audience_drift(None, [])
             mutate(drift["change"]["before"])
             mutate(drift["change"]["after"])
@@ -1389,14 +1397,14 @@ class GuardTests(unittest.TestCase):
                 issuer_uri="https://attacker.example"),
             lambda snapshot: snapshot.update(display_name="unexpected provider display name"),
         ):
-            plan = migration_runner_dns_binding_recovery_plan()
+            plan = migration_runner_iam_remediation_plan()
             drift = migration_provider_audience_drift(None, [])
             mutate(drift["change"]["after"])
             plan["resource_drift"] = [drift]
             with self.subTest(mutation=mutate), self.assertRaisesRegex(ValueError, "drift"):
                 check_plan(plan)
 
-        plan = migration_runner_dns_binding_recovery_plan()
+        plan = migration_runner_iam_remediation_plan()
         plan["resource_drift"] = [migration_provider_audience_drift(None, [])]
         change = next(item for item in plan["resource_changes"]
                       if item["address"] == MIGRATION_RUNNER_PROVIDER_ADDRESS)
@@ -1449,11 +1457,9 @@ class GuardTests(unittest.TestCase):
             ("google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]",
              lambda value: value.update(role="roles/container.admin")),
             ("google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]",
-             lambda value: value["condition"][0].update(expression=(
-                 'resource.type == "container.googleapis.com/Cluster" && '
-                 'resource.name == "projects/another-project/locations/us-east1/clusters/helpdeskcloud-dev-gke"'))),
+             lambda value: value.update(member="allUsers")),
             ("google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]",
-             lambda value: value["condition"][0].update(title="unrestricted")),
+             lambda value: value.update(condition=[{"title": "unrestricted"}])),
         )
         for address, mutate in mutations:
             plan = migration_runner_create_plan()
@@ -2312,13 +2318,13 @@ class GuardTests(unittest.TestCase):
             for path, value in zip(paths, values):
                 path.write_text(json.dumps(value), encoding="utf-8")
             state = Path(temporary) / "state-addresses.txt"
-            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
             filenames = [str(path) for path in paths] + [str(state)]
             verify_deployment(filenames)
             state.write_text("\n".join(NETWORK), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "approved resources"):
                 verify_deployment(filenames)
-            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
             values[8] = []
             paths[8].write_text(json.dumps(values[8]), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "database"):
@@ -2398,7 +2404,7 @@ class GuardTests(unittest.TestCase):
             values = evidence()
             paths = [Path(temporary) / f"evidence-{i}.json" for i in range(len(values))]
             state_addresses = Path(temporary) / "state-addresses.txt"
-            state_addresses.write_text("\n".join(EXPECTED), encoding="utf-8")
+            state_addresses.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
             filenames = [str(path) for path in paths] + [str(state_addresses)]
             for index, mutate, message in mutations:
                 values = evidence()
@@ -2421,7 +2427,7 @@ class GuardTests(unittest.TestCase):
             for path, value in zip(paths, values):
                 path.write_text(json.dumps(value), encoding="utf-8")
             state = Path(temporary) / "state-addresses.txt"
-            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
             verify_deployment([str(path) for path in paths] + [str(state)])
 
     def test_secret_manager_rejects_unapproved_project_number_resource_names(self):
@@ -2436,7 +2442,7 @@ class GuardTests(unittest.TestCase):
                 for path, value in zip(paths, values):
                     path.write_text(json.dumps(value), encoding="utf-8")
                 state = Path(temporary) / "state-addresses.txt"
-                state.write_text("\n".join(EXPECTED), encoding="utf-8")
+                state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "metadata or replication"):
                     verify_deployment([str(path) for path in paths] + [str(state)])
 
@@ -2447,7 +2453,7 @@ class GuardTests(unittest.TestCase):
             for path, value in zip(paths, values):
                 path.write_text(json.dumps(value), encoding="utf-8")
             state = Path(temporary) / "state-addresses.txt"
-            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
             filenames = [str(path) for path in paths] + [str(state)]
 
             # Apply output is the short repository ID; the GCP API name is a full path.
@@ -2484,7 +2490,7 @@ class GuardTests(unittest.TestCase):
             for path, value in zip(paths, values):
                 path.write_text(json.dumps(value), encoding="utf-8")
             state = Path(temporary) / "state-addresses.txt"
-            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
             filenames = [str(path) for path in paths] + [str(state)]
 
             # The Cloud SQL API response has this flag under settings; no top-level
@@ -2509,7 +2515,7 @@ class GuardTests(unittest.TestCase):
             for path, value in zip(paths, values):
                 path.write_text(json.dumps(value), encoding="utf-8")
             state = Path(temporary) / "state-addresses.txt"
-            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
             filenames = [str(path) for path in paths] + [str(state)]
 
             for network_ref in (VPC_PATH, VPC_LINK):
@@ -2537,7 +2543,7 @@ class GuardTests(unittest.TestCase):
             for path, value in zip(paths, values):
                 path.write_text(json.dumps(value), encoding="utf-8")
             state = Path(temporary) / "state-addresses.txt"
-            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
             filenames = [str(path) for path in paths] + [str(state)]
 
             values[0]["selfLink"] = VPC_LINK.replace("projects/helpdeskcloud-capstone-511905/", "projects/wrong-project/")
@@ -2563,7 +2569,7 @@ class GuardTests(unittest.TestCase):
             for path, value in zip(paths, values):
                 path.write_text(json.dumps(value), encoding="utf-8")
             state = Path(temporary) / "state-addresses.txt"
-            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
             filenames = [str(path) for path in paths] + [str(state)]
 
             values[7]["state"] = "FAILED"
@@ -2585,7 +2591,7 @@ class GuardTests(unittest.TestCase):
             for path, value in zip(paths, values):
                 path.write_text(json.dumps(value), encoding="utf-8")
             state = Path(temporary) / "state-addresses.txt"
-            state.write_text("\n".join(EXPECTED), encoding="utf-8")
+            state.write_text("\n".join(PLANNED_EXPECTED), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "Public"):
                 verify_deployment([str(path) for path in paths] + [str(state)])
 

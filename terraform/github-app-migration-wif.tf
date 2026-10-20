@@ -56,38 +56,23 @@ resource "google_service_account_iam_member" "dev_app_migration_runner_wif" {
   member             = "principal://iam.googleapis.com/projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/subject/repo:mhachem110@150286776/HelpDeskCloud-App@1423008128:environment:dev-db-migration"
 }
 
-# gcloud get-credentials needs container.clusters.get and
-# container.clusters.getCredentials. Keep cluster discovery scoped to the
-# canonical resource for the one existing Dev cluster.
+# The GKE DNS endpoint checks container.clusters.connect against its endpoint
+# host. Resource-name conditions on a clusterViewer binding do not authorize
+# that endpoint request, even though they permit gcloud cluster discovery.
+# GKE documents this connect permission as a project-level grant. Of the
+# predefined roles that include it, clusterViewer is the narrowest: it grants
+# cluster get/list/connect and project get/list, with no Kubernetes API verbs.
+# The dedicated WIF identity and namespace-scoped Kubernetes RBAC still limit
+# who can connect and which Kubernetes objects it can access.
 resource "google_project_iam_member" "dev_app_migration_runner_cluster_viewer" {
   count   = var.environment == "dev" ? 1 : 0
   project = var.project_id
   role    = "roles/container.clusterViewer"
   member  = google_service_account.dev_app_migration_runner[0].member
 
-  condition {
-    title       = "helpdesk-dev-migration-runner-cluster"
-    description = "Allow cluster discovery only for the existing Dev GKE cluster"
-    expression  = <<-CEL
-      resource.type == "container.googleapis.com/Cluster" &&
-      resource.name == "projects/helpdeskcloud-capstone-511905/locations/us-east1/clusters/helpdeskcloud-dev-gke"
-    CEL
-  }
-}
-
-# DNS-based GKE API requests are authorized against the control-plane endpoint
-# hostname. Keep the existing canonical cluster binding intact and add a
-# distinct exact-host binding so only this endpoint can satisfy the connect
-# permission check. Kubernetes API verbs remain namespace-scoped in RBAC.
-resource "google_project_iam_member" "dev_app_migration_runner_dns_endpoint" {
-  count   = var.environment == "dev" ? 1 : 0
-  project = var.project_id
-  role    = "roles/container.clusterViewer"
-  member  = google_service_account.dev_app_migration_runner[0].member
-
-  condition {
-    title       = "helpdesk-dev-migration-runner-dns-endpoint"
-    description = "Allow GKE connection only to the existing Dev DNS endpoint"
-    expression  = "resource.name == \"gke-2c60f148ddaa41c880bb7713114c59909a1a-260283083469.us-east1.gke.goog\""
+  # Add the endpoint-compatible grant before removing the previous conditional
+  # binding so an apply cannot temporarily remove the runner's cluster access.
+  lifecycle {
+    create_before_destroy = true
   }
 }

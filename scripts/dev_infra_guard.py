@@ -62,7 +62,6 @@ PHASE9 = {
     "google_iam_workload_identity_pool_provider.dev_app_migration[0]": "google_iam_workload_identity_pool_provider",
     "google_service_account_iam_member.dev_app_migration_runner_wif[0]": "google_service_account_iam_member",
     "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]": "google_project_iam_member",
-    "google_project_iam_member.dev_app_migration_runner_dns_endpoint[0]": "google_project_iam_member",
 }
 DEPLOYMENT_EVIDENCE_PATH_COUNT = 28
 ARTIFACT_READER_IAM_ADDRESS = "google_artifact_registry_repository_iam_member.dev_gke_image_pull[0]"
@@ -147,6 +146,12 @@ MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION = (
     'resource.type == "container.googleapis.com/Cluster" && '
     f'resource.name == "projects/{PROJECT}/locations/us-east1/clusters/helpdeskcloud-dev-gke"'
 )
+# Previous Phase 9 applied two conditional bindings, neither of which authorized
+# the DNS endpoint connect request. Accept this one legacy address only while
+# the plan removes it as part of the exact project-level grant remediation.
+LEGACY_PHASE9 = {
+    MIGRATION_RUNNER_DNS_BINDING_ADDRESS: "google_project_iam_member",
+}
 # Apply #12 logs confirm that these six Phase 7 resources completed before the
 # remaining operations failed. Recovery is allowed only if the fresh plan's
 # prior state and refresh show precisely this inventory.
@@ -160,7 +165,11 @@ APPLY12_COMPLETED = frozenset({
 })
 APPLY12_REMAINING = frozenset(PHASE7) - APPLY12_COMPLETED
 BASE = NETWORK | PHASE6
-EXPECTED = BASE | PHASE7 | PHASE8 | PHASE9
+EXPECTED = BASE | PHASE7 | PHASE8 | PHASE9 | LEGACY_PHASE9
+# Legacy addresses may exist in prior state and in the exact IAM remediation
+# delete, but never in the final planned configuration.
+PLANNED_EXPECTED = {address: resource_type for address, resource_type in EXPECTED.items()
+                    if address not in LEGACY_PHASE9}
 VPC_LINK = f"https://www.googleapis.com/compute/v1/projects/{PROJECT}/global/networks/{VPC}"
 VPC_SELF_LINKS = tuple(
     f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{VPC}"
@@ -409,8 +418,8 @@ def check_phase8(values, plan, creates, addresses=None):
                             changes, creates, "supporting-image repository writer")
 
 
-def check_phase9(values, plan, creates, validate_dns_binding=True):
-    """Validate the dedicated App migration-runner identity and cluster-only access."""
+def check_phase9(values, plan, creates):
+    """Validate the runner and the project-level GKE DNS endpoint permission."""
     changes = {c.get("address"): c for c in plan.get("resource_changes", [])}
     account_address = "google_service_account.dev_app_migration_runner[0]"
     account = values[account_address]
@@ -454,32 +463,40 @@ def check_phase9(values, plan, creates, validate_dns_binding=True):
     viewer = values[viewer_address]
     require(viewer.get("project") in (PROJECT, PROJECT_NUMBER)
             and viewer.get("role") == "roles/container.clusterViewer",
-            "Migration runner must receive only the reviewed GKE clusterViewer role")
+            "Migration runner must receive the reviewed GKE clusterViewer role")
     expected_or_unknown(viewer, viewer_address, ("member",),
                         f"serviceAccount:{MIGRATION_RUNNER_EMAIL}", changes, creates,
                         "migration-runner GKE cluster identity")
-    condition = only_item(viewer.get("condition"), "Expected one migration-runner cluster IAM condition")
+    require(viewer.get("condition") in (None, []),
+            "GKE DNS endpoint connect grant must be project-level and unconditional")
+
+
+def check_phase9_legacy_bindings(values):
+    """Allow removal only of the exact pre-fix conditional Phase 9 IAM grants."""
+    member = f"serviceAccount:{MIGRATION_RUNNER_EMAIL}"
+    viewer_address = "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]"
+    viewer = values.get(viewer_address, {})
+    require(viewer.get("project") in (PROJECT, PROJECT_NUMBER)
+            and viewer.get("role") == "roles/container.clusterViewer"
+            and viewer.get("member") == member,
+            "Legacy migration-runner clusterViewer binding identity is unexpected")
+    condition = only_item(viewer.get("condition"), "Expected the legacy clusterViewer condition")
     require(condition.get("title") == "helpdesk-dev-migration-runner-cluster"
             and condition.get("description") == "Allow cluster discovery only for the existing Dev GKE cluster"
             and normalize_cel(condition.get("expression")) == MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
-            "Migration-runner clusterViewer condition must match only the existing Dev GKE cluster")
-    if validate_dns_binding:
-        dns_viewer = values[MIGRATION_RUNNER_DNS_BINDING_ADDRESS]
-        require(dns_viewer.get("project") in (PROJECT, PROJECT_NUMBER)
-                and dns_viewer.get("role") == "roles/container.clusterViewer",
-                "Migration runner DNS binding must receive only the reviewed GKE clusterViewer role")
-        expected_or_unknown(dns_viewer, MIGRATION_RUNNER_DNS_BINDING_ADDRESS, ("member",),
-                            f"serviceAccount:{MIGRATION_RUNNER_EMAIL}", changes, creates,
-                            "migration-runner DNS endpoint identity")
-        dns_condition = only_item(dns_viewer.get("condition"),
-                                  "Expected one migration-runner DNS endpoint IAM condition")
-        require(dns_condition.get("title") == MIGRATION_RUNNER_DNS_BINDING_TITLE
-                and dns_condition.get("description") == MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION
-                and normalize_cel(dns_condition.get("expression")) == MIGRATION_RUNNER_DNS_BINDING_CONDITION,
-                "Migration-runner DNS IAM condition must match only the existing Dev endpoint")
-    else:
-        require(MIGRATION_RUNNER_DNS_BINDING_ADDRESS not in values,
-                "The pre-recovery Phase 9 state must not contain the DNS endpoint binding")
+            "Legacy migration-runner clusterViewer condition is unexpected")
+
+    dns_viewer = values.get(MIGRATION_RUNNER_DNS_BINDING_ADDRESS, {})
+    require(dns_viewer.get("project") in (PROJECT, PROJECT_NUMBER)
+            and dns_viewer.get("role") == "roles/container.clusterViewer"
+            and dns_viewer.get("member") == member,
+            "Legacy migration-runner DNS binding identity is unexpected")
+    dns_condition = only_item(dns_viewer.get("condition"),
+                              "Expected the legacy DNS endpoint condition")
+    require(dns_condition.get("title") == MIGRATION_RUNNER_DNS_BINDING_TITLE
+            and dns_condition.get("description") == MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION
+            and normalize_cel(dns_condition.get("expression")) == MIGRATION_RUNNER_DNS_BINDING_CONDITION,
+            "Legacy migration-runner DNS condition is unexpected")
 
 
 def check_references(plan):
@@ -551,7 +568,6 @@ def check_references(plan):
         ("google_service_account_iam_member.dev_app_support_images_wif", "service_account_id", "google_service_account.dev_app_support_image_publisher[0].name"),
         ("google_service_account_iam_member.dev_app_migration_runner_wif", "service_account_id", "google_service_account.dev_app_migration_runner[0].name"),
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "member", "google_service_account.dev_app_migration_runner[0].member"),
-        ("google_project_iam_member.dev_app_migration_runner_dns_endpoint", "member", "google_service_account.dev_app_migration_runner[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
         ("google_secret_manager_secret_iam_member.dev_admin_secret_access", "secret_id", "google_secret_manager_secret.dev_admin_password[0].id"),
     ):
@@ -590,8 +606,6 @@ def check_references(plan):
         ("google_service_account_iam_member.dev_app_migration_runner_wif", "roles/iam.workloadIdentityUser",
          "service_account_id", "google_service_account.dev_app_migration_runner[0].name"),
         ("google_project_iam_member.dev_app_migration_runner_cluster_viewer", "roles/container.clusterViewer",
-         "member", "google_service_account.dev_app_migration_runner[0].member"),
-        ("google_project_iam_member.dev_app_migration_runner_dns_endpoint", "roles/container.clusterViewer",
          "member", "google_service_account.dev_app_migration_runner[0].member"),
         ("google_secret_manager_secret_iam_member.dev_app_secret_access", "roles/secretmanager.secretAccessor",
          "secret_id", "google_secret_manager_secret.dev_app_connection[0].id"),
@@ -646,40 +660,14 @@ def check_references(plan):
     cluster_viewer_expressions = cluster_viewer.get("expressions", {})
     require(cluster_viewer_expressions.get("role", {}).get("constant_value")
             == "roles/container.clusterViewer",
-            "Migration-runner cluster lookup role is not exact")
+            "Migration-runner GKE clusterViewer role is not exact")
     references(cluster_viewer_expressions.get("project", {}), "var.project_id",
                "migration-runner IAM project", exact=True)
     references(cluster_viewer_expressions.get("member", {}),
                "google_service_account.dev_app_migration_runner[0].member",
-               "migration-runner cluster lookup identity", exact=True)
-    viewer_condition = only_item(cluster_viewer_expressions.get("condition"),
-                                 "Missing migration-runner clusterViewer condition")
-    require(viewer_condition.get("title", {}).get("constant_value")
-            == "helpdesk-dev-migration-runner-cluster"
-            and viewer_condition.get("description", {}).get("constant_value")
-            == "Allow cluster discovery only for the existing Dev GKE cluster"
-            and normalize_cel(viewer_condition.get("expression", {}).get("constant_value"))
-            == MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION,
-            "Migration-runner clusterViewer condition must be exactly cluster-scoped")
-
-    dns_viewer = resources.get("google_project_iam_member.dev_app_migration_runner_dns_endpoint", {})
-    dns_viewer_expressions = dns_viewer.get("expressions", {})
-    require(dns_viewer_expressions.get("role", {}).get("constant_value")
-            == "roles/container.clusterViewer",
-            "Migration-runner DNS endpoint role is not exact")
-    references(dns_viewer_expressions.get("project", {}), "var.project_id",
-               "migration-runner DNS endpoint IAM project", exact=True)
-    references(dns_viewer_expressions.get("member", {}),
-               "google_service_account.dev_app_migration_runner[0].member",
-               "migration-runner DNS endpoint IAM identity", exact=True)
-    dns_viewer_condition = only_item(dns_viewer_expressions.get("condition"),
-                                     "Missing migration-runner DNS endpoint condition")
-    require(dns_viewer_condition.get("title", {}).get("constant_value") == MIGRATION_RUNNER_DNS_BINDING_TITLE
-            and dns_viewer_condition.get("description", {}).get("constant_value")
-            == MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION
-            and normalize_cel(dns_viewer_condition.get("expression", {}).get("constant_value"))
-            == MIGRATION_RUNNER_DNS_BINDING_CONDITION,
-            "Migration-runner DNS endpoint condition must match only the existing endpoint")
+               "migration-runner GKE connect identity", exact=True)
+    require(not cluster_viewer_expressions.get("condition"),
+            "Migration-runner DNS endpoint connect grant must not use an IAM condition")
 
     support_binding = resources.get("google_service_account_iam_member.dev_app_support_images_wif", {})
     support_binding_expressions = support_binding.get("expressions", {})
@@ -1205,9 +1193,10 @@ def check_plan(plan):
     check_drift(plan)
     planned = planned_resources(plan.get("planned_values", {}).get("root_module", {}))
     managed = [r for r in planned if r.get("mode") == "managed"]
-    require(len(managed) == len(EXPECTED) and {r.get("address") for r in managed} == set(EXPECTED),
+    require(len(managed) == len(PLANNED_EXPECTED)
+            and {r.get("address") for r in managed} == set(PLANNED_EXPECTED),
             "Planned Dev infrastructure must contain exactly the approved addresses")
-    require(all(r.get("type") == EXPECTED[r["address"]] for r in managed),
+    require(all(r.get("type") == PLANNED_EXPECTED[r["address"]] for r in managed),
             "Unexpected planned resource type")
     changes = [c for c in plan.get("resource_changes", []) if c.get("mode") == "managed"]
     require(len({c.get("address") for c in changes}) == len(changes), "Duplicate resource change")
@@ -1223,8 +1212,17 @@ def check_plan(plan):
     require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"]) for address in PHASE8),
             "Phase 8 update, replacement, or deletion requires review")
     migration_runner_creates = {address for address in PHASE9 if actions.get(address) == ["create"]}
-    require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"]) for address in PHASE9),
+    cluster_viewer_address = "google_project_iam_member.dev_app_migration_runner_cluster_viewer[0]"
+    cluster_viewer_actions = actions.get(cluster_viewer_address, ["no-op"])
+    legacy_dns_actions = actions.get(MIGRATION_RUNNER_DNS_BINDING_ADDRESS, ["no-op"])
+    require(all(actions.get(address, ["no-op"]) in (["create"], ["no-op"])
+                for address in set(PHASE9) - {cluster_viewer_address}),
             "Phase 9 update, replacement, or deletion requires review")
+    require(cluster_viewer_actions in (["create"], ["no-op"], ["update"],
+                                       ["create", "delete"], ["delete", "create"]),
+            "Phase 9 update, replacement, or deletion requires review")
+    require(legacy_dns_actions in (["no-op"], ["delete"]),
+            "Legacy migration-runner DNS binding change requires review")
     prior_state = plan.get("prior_state")
     require(isinstance(prior_state, dict), "Terraform prior state is required to classify the Dev plan")
     prior = prior_state.get("values", {}).get("root_module")
@@ -1243,6 +1241,7 @@ def check_plan(plan):
     prior_phase7 = prior_addresses & set(PHASE7)
     prior_phase8 = prior_addresses & set(PHASE8)
     prior_phase9 = prior_addresses & set(PHASE9)
+    prior_legacy_dns = MIGRATION_RUNNER_DNS_BINDING_ADDRESS in prior_addresses
     full_initial_create = creates == set(PHASE7) and not prior_phase7
     exact_apply12_recovery = creates == APPLY12_REMAINING and prior_phase7 == APPLY12_COMPLETED
     complete_no_changes = not creates and prior_phase7 == set(PHASE7)
@@ -1262,25 +1261,35 @@ def check_plan(plan):
     migration_runner_initial_create = (
         not creates and not support_creates
         and prior_phase7 == set(PHASE7) and prior_phase8 == set(PHASE8)
-        and not prior_phase9 and migration_runner_creates == set(PHASE9)
+        and not prior_phase9 and not prior_legacy_dns
+        and migration_runner_creates == set(PHASE9)
     )
-    migration_runner_dns_binding_recovery = (
+    migration_runner_iam_remediation = (
         not creates and not support_creates
         and prior_phase7 == set(PHASE7) and prior_phase8 == set(PHASE8)
-        and prior_phase9 == set(PHASE9) - {MIGRATION_RUNNER_DNS_BINDING_ADDRESS}
-        and migration_runner_creates == {MIGRATION_RUNNER_DNS_BINDING_ADDRESS}
+        and prior_phase9 == set(PHASE9) and prior_legacy_dns
+        and not migration_runner_creates
+        and cluster_viewer_actions in (["update"], ["create", "delete"], ["delete", "create"])
+        and legacy_dns_actions == ["delete"]
+        and all(actions.get(address, ["no-op"]) == ["no-op"]
+                for address in set(PHASE9) - {cluster_viewer_address})
     )
-    migration_runner_complete = not migration_runner_creates and prior_phase9 == set(PHASE9)
+    migration_runner_complete = (
+        not migration_runner_creates and prior_phase9 == set(PHASE9)
+        and not prior_legacy_dns and cluster_viewer_actions == ["no-op"]
+    )
     require(not prior_phase9 or prior_phase9 == set(PHASE9)
-            or migration_runner_dns_binding_recovery,
+            or migration_runner_iam_remediation,
             "Partial Phase 9 migration-runner state requires review")
+    require(not prior_legacy_dns or migration_runner_iam_remediation,
+            "Legacy Phase 9 state requires the exact GKE IAM remediation")
     require(full_initial_create or exact_apply12_recovery or complete_no_changes
             or exact_phase8_provider_recovery,
             "Partial or inconsistent Phase 7 state/creation batch requires review")
     require(support_images_initial_create or support_images_complete or exact_phase8_provider_recovery,
             "Phase 8 must be created as one exact batch after Phase 7, or already be complete")
     require(migration_runner_initial_create or migration_runner_complete
-            or migration_runner_dns_binding_recovery,
+            or migration_runner_iam_remediation,
             "Phase 9 migration-runner resources must be created as one exact batch after Phase 8, or already be complete")
     if exact_phase8_provider_recovery:
         prior_phase8_values = {
@@ -1288,13 +1297,18 @@ def check_plan(plan):
             for resource in prior_managed if resource.get("address") in PHASE8_COMPLETED
         }
         check_phase8(prior_phase8_values, plan, set(), addresses=PHASE8_COMPLETED)
-    if migration_runner_dns_binding_recovery:
+    if migration_runner_iam_remediation:
         prior_phase9_values = {
             resource["address"]: resource.get("values", {})
             for resource in prior_managed
-            if resource.get("address") in set(PHASE9) - {MIGRATION_RUNNER_DNS_BINDING_ADDRESS}
+            if resource.get("address") in set(PHASE9)
         }
-        check_phase9(prior_phase9_values, plan, set(), validate_dns_binding=False)
+        prior_legacy_dns_values = {
+            resource["address"]: resource.get("values", {})
+            for resource in prior_managed
+            if resource.get("address") == MIGRATION_RUNNER_DNS_BINDING_ADDRESS
+        }
+        check_phase9_legacy_bindings(prior_phase9_values | prior_legacy_dns_values)
     # Check the complete planned values, including no-op resources omitted from resource_changes.
     by_address = {r["address"]: r.get("values", {}) for r in managed}
     by_type = {r["type"]: r.get("values", {}) for r in managed if r["address"] in BASE}
@@ -1304,7 +1318,8 @@ def check_plan(plan):
     check_phase8(by_address, plan, support_creates)
     check_phase9(by_address, plan, migration_runner_creates)
     check_references(plan)
-    return "apply" if creates or support_creates or migration_runner_creates else "no_changes"
+    return "apply" if (creates or support_creates or migration_runner_creates
+                        or migration_runner_iam_remediation) else "no_changes"
 
 
 SENSITIVE_PARTS = {"id", "name", "project", "region", "self_link", "network", "subnetwork", "ip_cidr_range",
@@ -1661,7 +1676,7 @@ def verify_deployment(paths):
             "Expected read-only Phase 7-8 evidence, Terraform state, and addresses")
     network, subnet, address, connections, registry, registry_iam, project_iam, sql, databases, outputs = [read_json(p) for p in paths[:10]]
     state_addresses = set(Path(paths[-1]).read_text(encoding="utf-8").splitlines())
-    require(state_addresses == set(EXPECTED), "Dev state does not contain exactly the approved resources")
+    require(state_addresses == set(PLANNED_EXPECTED), "Dev state does not contain exactly the approved resources")
     require(network.get("name") == VPC and network.get("autoCreateSubnetworks") is False, "VPC verification failed")
     require(network.get("selfLink") == VPC_LINK, "VPC self-link verification failed")
     require(network.get("routingConfig", {}).get("routingMode") == "REGIONAL", "VPC routing verification failed")
@@ -1842,26 +1857,12 @@ def verify_phase9(runner_sa, runner_sa_iam, provider, project_iam, app_secret_ia
     runner_member = f"serviceAccount:{MIGRATION_RUNNER_EMAIL}"
     runner_project_bindings = [binding for binding in project_iam.get("bindings", [])
                                if runner_member in binding.get("members", [])]
-    bindings_by_title = {
-        binding.get("condition", {}).get("title"): binding
-        for binding in runner_project_bindings
-    }
-    require(len(runner_project_bindings) == 2
-            and set(bindings_by_title) == {
-                "helpdesk-dev-migration-runner-cluster", MIGRATION_RUNNER_DNS_BINDING_TITLE,
-            },
-            "Migration runner must have exactly the two reviewed conditional GKE bindings")
-    cluster_binding = bindings_by_title["helpdesk-dev-migration-runner-cluster"]
-    cluster_condition = cluster_binding.get("condition", {})
-    dns_binding = bindings_by_title[MIGRATION_RUNNER_DNS_BINDING_TITLE]
-    dns_condition = dns_binding.get("condition", {})
-    require(cluster_binding.get("role") == "roles/container.clusterViewer"
-            and cluster_condition.get("description") == "Allow cluster discovery only for the existing Dev GKE cluster"
-            and normalize_cel(cluster_condition.get("expression")) == MIGRATION_RUNNER_CLUSTER_VIEWER_CONDITION
-            and dns_binding.get("role") == "roles/container.clusterViewer"
-            and dns_condition.get("description") == MIGRATION_RUNNER_DNS_BINDING_DESCRIPTION
-            and normalize_cel(dns_condition.get("expression")) == MIGRATION_RUNNER_DNS_BINDING_CONDITION,
-            "Migration-runner GKE IAM access is not limited to the existing Dev cluster")
+    cluster_viewer_bindings = [binding for binding in runner_project_bindings
+                               if binding.get("role") == "roles/container.clusterViewer"]
+    require(len(cluster_viewer_bindings) == 1
+            and not cluster_viewer_bindings[0].get("condition")
+            and len(runner_project_bindings) == 1,
+            "Migration runner must have exactly one unconditional project-level GKE clusterViewer grant")
 
     for policy, label in ((app_secret_iam, "application Secret Manager"),
                           (admin_secret_iam, "migration Secret Manager")):
