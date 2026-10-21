@@ -39,7 +39,10 @@ CERTIFICATE_STATUS_FIELDS = {
         "STATE_UNSPECIFIED", "AUTHORIZING", "AUTHORIZED", "FAILED",
     },
     "managed[0].authorization_attempt_info[0].failure_reason": {
-        "FAILURE_REASON_UNSPECIFIED", "CONFIG", "CAA", "RATE_LIMITED",
+        # The provider's computed string can be empty when the API omits the
+        # protobuf enum (for example, state captured before the first failed
+        # authorization attempt). Treat only that empty representation as unset.
+        "", "FAILURE_REASON_UNSPECIFIED", "CONFIG", "CAA", "RATE_LIMITED",
     },
 }
 CERTIFICATE_DETAILS_FIELD = "managed[0].authorization_attempt_info[0].details"

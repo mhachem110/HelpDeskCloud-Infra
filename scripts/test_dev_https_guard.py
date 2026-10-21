@@ -298,6 +298,17 @@ class DevHttpsGuardTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, expected):
                 guard.check_foundation(plan, HOST)
 
+    def test_certificate_status_readback_accepts_empty_failure_reason_as_unset(self):
+        plan = certificate_status_drift_plan()
+        before = plan["resource_drift"][0]["change"]["before"]["managed"][0][
+            "authorization_attempt_info"][0]
+        after = plan["resource_drift"][0]["change"]["after"]["managed"][0][
+            "authorization_attempt_info"][0]
+        before["failure_reason"] = ""
+        after["failure_reason"] = "CONFIG"
+
+        guard.check_foundation(plan, HOST)
+
     def test_certificate_status_readback_rejects_malformed_labels_and_unbounded_details(self):
         plan = certificate_status_drift_plan()
         plan["resource_drift"][0]["change"]["after"]["labels"] = {"unexpected": "label"}
