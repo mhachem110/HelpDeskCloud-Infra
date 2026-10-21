@@ -119,6 +119,11 @@ def certificate_status_drift_plan():
         "failure_reason": None,
         "details": "DNS authorization is being checked.",
     }]
+    before["managed"][0]["provisioning_issue"] = []
+    after["managed"][0]["provisioning_issue"] = [{
+        "reason": "AUTHORIZATION_ISSUE",
+        "details": "",
+    }]
     plan["resource_drift"] = [{
         "address": "google_certificate_manager_certificate.https",
         "mode": "managed",
@@ -143,8 +148,13 @@ def dynv6_certificate_status_drift_plan():
     before["managed"][0]["authorization_attempt_info"] = [{
         "domain": HOST, "state": "AUTHORIZING", "failure_reason": None,
     }]
+    before["managed"][0]["provisioning_issue"] = []
     after["managed"][0]["authorization_attempt_info"] = [{
         "domain": HOST, "state": "AUTHORIZED", "failure_reason": None,
+    }]
+    after["managed"][0]["provisioning_issue"] = [{
+        "reason": "AUTHORIZATION_ISSUE",
+        "details": "DNS authorization is not published yet.",
     }]
     plan["resource_drift"] = [{
         "address": "google_certificate_manager_certificate.dynv6",
@@ -259,6 +269,23 @@ class DevHttpsGuardTests(unittest.TestCase):
 
     def test_dynv6_certificate_output_only_status_readback_is_allowed_for_new_hostname(self):
         guard.check_foundation(dynv6_certificate_status_drift_plan(), HOST)
+
+    def test_certificate_output_only_provisioning_issue_readback_is_allowed_for_both_hostnames(self):
+        guard.check_foundation(certificate_status_drift_plan(), HOST)
+        guard.check_foundation(dynv6_certificate_status_drift_plan(), HOST)
+
+    def test_certificate_provisioning_issue_rejects_unknown_reason_unbounded_details_and_extra_fields(self):
+        mutations = (
+            ("reason", "UNRECOGNIZED", "unknown reason enum"),
+            ("details", "x" * 2049, "bounded provider status string"),
+            ("troubleshooting", {"issue": "CNAME_MISMATCH"}, "unreviewed field"),
+        )
+        for field, value, message in mutations:
+            plan = certificate_status_drift_plan()
+            plan["resource_drift"][0]["change"]["after"]["managed"][0][
+                "provisioning_issue"][0][field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, message):
+                guard.check_foundation(plan, HOST)
 
     def test_certificate_status_readback_rejects_unknown_enums(self):
         for key, value, expected in (

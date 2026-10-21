@@ -43,10 +43,18 @@ CERTIFICATE_STATUS_FIELDS = {
     },
 }
 CERTIFICATE_DETAILS_FIELD = "managed[0].authorization_attempt_info[0].details"
+CERTIFICATE_PROVISIONING_ISSUE_FIELD = "managed[0].provisioning_issue[0]"
+CERTIFICATE_PROVISIONING_ISSUE_FIELDS = {
+    "managed[0].provisioning_issue[0].reason",
+    "managed[0].provisioning_issue[0].details",
+}
+CERTIFICATE_PROVISIONING_ISSUE_REASONS = {
+    "REASON_UNSPECIFIED", "AUTHORIZATION_ISSUE", "RATE_LIMITED",
+}
 CERTIFICATE_STATUS_KEYS = {"domain", "state", "failure_reason", "details"}
 _MISSING = object()
 SENSITIVE_DRIFT_PATH = re.compile(
-    r"(?:secret|password|token|credential|private|oauth|email|member|authorization|signature|key|description)",
+    r"(?:secret|password|token|credential|private|oauth|email|member|authorization|signature|key|description|provisioning_issue)",
     re.IGNORECASE,
 )
 
@@ -178,6 +186,27 @@ def _validate_certificate_status_side(values, hostname):
             "certificate authorization details must be a bounded provider status string")
 
 
+def _validate_certificate_provisioning_issue_side(values, hostname):
+    managed = values.get("managed")
+    require(isinstance(managed, list) and len(managed) == 1 and
+            managed[0].get("domains") == [hostname],
+            "certificate provisioning issue must retain the exact configured hostname")
+    issue = managed[0].get("provisioning_issue", _MISSING)
+    if _is_missing_or_none(issue) or issue == []:
+        return
+    require(isinstance(issue, list) and len(issue) == 1 and isinstance(issue[0], dict),
+            "certificate provisioning issue must contain only one provider status")
+    status = issue[0]
+    require(set(status) <= {"reason", "details"} and "reason" in status,
+            "certificate provisioning issue contains an unreviewed field")
+    reason = status["reason"]
+    require(reason in CERTIFICATE_PROVISIONING_ISSUE_REASONS,
+            "certificate provisioning issue contains an unknown reason enum")
+    details = status.get("details", _MISSING)
+    require(_is_missing_or_none(details) or isinstance(details, str) and len(details) <= 2048,
+            "certificate provisioning issue details must be a bounded provider status string")
+
+
 def check_certificate_status_readback_drift(item, hostname):
     require(item.get("mode", "managed") == "managed" and item.get("type") == CERTIFICATE_READBACK_TYPE,
             f"provider readback drift is on an unexpected certificate resource type: {describe_drift(item)}")
@@ -190,13 +219,18 @@ def check_certificate_status_readback_drift(item, hostname):
             f"certificate provider readback drift is missing before/after values: {describe_drift(item)}")
     differences = list(_drift_differences(before, after))
     require(bool(differences), "certificate provider readback drift has no changed fields")
-    allowed_paths = {"labels", *CERTIFICATE_STATUS_FIELDS, CERTIFICATE_DETAILS_FIELD}
+    allowed_paths = {
+        "labels", *CERTIFICATE_STATUS_FIELDS, CERTIFICATE_DETAILS_FIELD,
+        CERTIFICATE_PROVISIONING_ISSUE_FIELD, *CERTIFICATE_PROVISIONING_ISSUE_FIELDS,
+    }
     for path, _, _ in differences:
         require(path in allowed_paths,
                 f"certificate provider readback drift changed a configured or unreviewed field: "
                 f"{describe_drift(item)}")
     _validate_certificate_status_side(before, hostname)
     _validate_certificate_status_side(after, hostname)
+    _validate_certificate_provisioning_issue_side(before, hostname)
+    _validate_certificate_provisioning_issue_side(after, hostname)
 
     for path, before_value, after_value in differences:
         if path == "labels":
@@ -208,6 +242,16 @@ def check_certificate_status_readback_drift(item, hostname):
                     (before_value is _MISSING or before_value is None or len(before_value) <= 2048) and
                     (after_value is _MISSING or after_value is None or len(after_value) <= 2048),
                     "certificate authorization details drift must be a bounded output-only status string")
+        elif path == CERTIFICATE_PROVISIONING_ISSUE_FIELD:
+            # The API defines provisioningIssue as output-only. Accept its initial
+            # population/removal only after validating the exact enum and shape above.
+            require((_is_missing_or_none(before_value) or isinstance(before_value, dict)) and
+                    (_is_missing_or_none(after_value) or isinstance(after_value, dict)),
+                    "certificate provisioning issue drift must be one bounded output-only status")
+        elif path in CERTIFICATE_PROVISIONING_ISSUE_FIELDS:
+            # reason/details are output-only; side validation bounds details and
+            # restricts the reason to the Certificate Manager API enum.
+            continue
         else:
             allowed_values = CERTIFICATE_STATUS_FIELDS[path]
             require((_is_missing_or_none(before_value) or before_value in allowed_values) and
