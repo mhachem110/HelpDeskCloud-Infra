@@ -28,6 +28,10 @@ ACCESS = {
 PROVIDER_READBACK_DRIFT = {
     "google_compute_global_address.https": ("google_compute_global_address", "labels", None, {}),
     "google_compute_ssl_policy.https": ("google_compute_ssl_policy", "custom_features", None, []),
+    "google_certificate_manager_dns_authorization.https": (
+        "google_certificate_manager_dns_authorization", "labels", None, {}),
+    "google_certificate_manager_dns_authorization.dynv6": (
+        "google_certificate_manager_dns_authorization", "labels", None, {}),
     "google_certificate_manager_certificate_map.https": (
         "google_certificate_manager_certificate_map", "labels", None, {}),
 }

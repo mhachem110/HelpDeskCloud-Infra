@@ -275,6 +275,48 @@ class DevHttpsGuardTests(unittest.TestCase):
 
         guard.check_foundation(plan, HOST)
 
+    def test_dns_authorization_accepts_only_null_to_empty_label_readback(self):
+        for address in ("google_certificate_manager_dns_authorization.https",
+                        "google_certificate_manager_dns_authorization.dynv6"):
+            with self.subTest(address=address):
+                plan = partial_foundation_plan()
+                values = deepcopy(next(resource["values"] for resource in
+                                       plan["planned_values"]["root_module"]["resources"]
+                                       if resource["address"] == address))
+                before = deepcopy(values)
+                after = deepcopy(values)
+                before["labels"] = None
+                after["labels"] = {}
+                plan["resource_drift"] = [{
+                    "address": address,
+                    "mode": "managed",
+                    "type": "google_certificate_manager_dns_authorization",
+                    "change": {"actions": ["update"], "before": before, "after": after},
+                }]
+
+                guard.check_foundation(plan, HOST)
+
+    def test_dns_authorization_readback_rejects_any_change_beyond_null_to_empty_labels(self):
+        plan = partial_foundation_plan()
+        values = deepcopy(next(resource["values"] for resource in
+                               plan["planned_values"]["root_module"]["resources"]
+                               if resource["address"] ==
+                               "google_certificate_manager_dns_authorization.https"))
+        before = deepcopy(values)
+        after = deepcopy(values)
+        before["labels"] = None
+        after["labels"] = {}
+        after["domain"] = "unreviewed.example.test"
+        plan["resource_drift"] = [{
+            "address": "google_certificate_manager_dns_authorization.https",
+            "mode": "managed",
+            "type": "google_certificate_manager_dns_authorization",
+            "change": {"actions": ["update"], "before": before, "after": after},
+        }]
+
+        with self.assertRaisesRegex(ValueError, "exact confirmed null-to-empty field"):
+            guard.check_foundation(plan, HOST)
+
     def test_legacy_certificate_map_entry_accepts_exact_serving_state_readback(self):
         plan = partial_foundation_plan()
         entry = next(resource for resource in plan["planned_values"]["root_module"]["resources"]
