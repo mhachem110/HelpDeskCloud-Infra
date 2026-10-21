@@ -107,6 +107,8 @@ def certificate_status_drift_plan():
     after = deepcopy(before)
     before["labels"] = None
     after["labels"] = {}
+    before["managed"][0]["state"] = "PROVISIONING"
+    after["managed"][0]["state"] = "ACTIVE"
     before["managed"][0]["authorization_attempt_info"] = [{
         "domain": LEGACY_HOST,
         "state": "FAILED",
@@ -145,6 +147,8 @@ def dynv6_certificate_status_drift_plan():
     after = deepcopy(before)
     before["labels"] = None
     after["labels"] = {}
+    before["managed"][0]["state"] = "PROVISIONING"
+    after["managed"][0]["state"] = "ACTIVE"
     before["managed"][0]["authorization_attempt_info"] = [{
         "domain": HOST, "state": "AUTHORIZING", "failure_reason": None,
     }]
@@ -412,6 +416,13 @@ class DevHttpsGuardTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, expected):
                 guard.check_foundation(plan, HOST)
 
+    def test_managed_certificate_state_readback_rejects_unknown_enum(self):
+        plan = dynv6_certificate_status_drift_plan()
+        plan["resource_drift"][0]["change"]["after"]["managed"][0]["state"] = "UNRECOGNIZED"
+
+        with self.assertRaisesRegex(ValueError, "unknown state enum"):
+            guard.check_foundation(plan, HOST)
+
     def test_certificate_status_readback_accepts_empty_failure_reason_as_unset(self):
         plan = certificate_status_drift_plan()
         before = plan["resource_drift"][0]["change"]["before"]["managed"][0][
@@ -593,6 +604,25 @@ class DevHttpsGuardTests(unittest.TestCase):
 
     def test_single_user_backend_grant_is_allowed(self):
         guard.check_access(access_plan(), BACKEND, EMAIL)
+
+    def test_access_accepts_exact_canonical_backend_resource_reference(self):
+        plan = access_plan(("no-op",))
+        canonical = f"projects/{guard.PROJECT}/iap_web/compute/services/{BACKEND}"
+        plan["planned_values"]["root_module"]["resources"][0]["values"]["web_backend_service"] = canonical
+        plan["resource_changes"][0]["change"]["after"]["web_backend_service"] = canonical
+
+        guard.check_access(plan, BACKEND, EMAIL)
+
+    def test_access_rejects_canonical_reference_for_another_backend_or_project(self):
+        for reference in (
+            f"projects/{guard.PROJECT}/iap_web/compute/services/other-backend",
+            f"projects/other-project/iap_web/compute/services/{BACKEND}",
+        ):
+            plan = access_plan(("no-op",))
+            plan["planned_values"]["root_module"]["resources"][0]["values"]["web_backend_service"] = reference
+            plan["resource_changes"][0]["change"]["after"]["web_backend_service"] = reference
+            with self.subTest(reference=reference), self.assertRaisesRegex(ValueError, "one exact user"):
+                guard.check_access(plan, BACKEND, EMAIL)
 
     def test_access_rejects_arbitrary_backend(self):
         with self.assertRaises(ValueError):

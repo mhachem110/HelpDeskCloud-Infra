@@ -40,6 +40,10 @@ CERTIFICATE_READBACK_HOSTNAMES = {
     "google_certificate_manager_certificate.https": LEGACY_HOSTNAME,
     "google_certificate_manager_certificate.dynv6": DYNV6_HOSTNAME,
 }
+CERTIFICATE_MANAGED_STATE_FIELD = "managed[0].state"
+CERTIFICATE_MANAGED_STATES = {
+    "STATE_UNSPECIFIED", "PROVISIONING", "FAILED", "ACTIVE",
+}
 CERTIFICATE_STATUS_FIELDS = {
     "managed[0].authorization_attempt_info[0].state": {
         "STATE_UNSPECIFIED", "AUTHORIZING", "AUTHORIZED", "FAILED",
@@ -220,6 +224,9 @@ def _validate_certificate_status_side(values, hostname):
     require(isinstance(managed, list) and len(managed) == 1 and
             managed[0].get("domains") == [hostname],
             "certificate status readback must retain the exact configured hostname")
+    certificate_state = managed[0].get("state", _MISSING)
+    require(_is_missing_or_none(certificate_state) or certificate_state in CERTIFICATE_MANAGED_STATES,
+            "managed certificate status has an unknown state enum")
     status = managed[0].get("authorization_attempt_info", _MISSING)
     if _is_missing_or_none(status) or status == []:
         return
@@ -272,7 +279,7 @@ def check_certificate_status_readback_drift(item, hostname):
     differences = list(_drift_differences(before, after))
     require(bool(differences), "certificate provider readback drift has no changed fields")
     allowed_paths = {
-        "labels", *CERTIFICATE_STATUS_FIELDS, CERTIFICATE_DETAILS_FIELD,
+        "labels", CERTIFICATE_MANAGED_STATE_FIELD, *CERTIFICATE_STATUS_FIELDS, CERTIFICATE_DETAILS_FIELD,
         CERTIFICATE_PROVISIONING_ISSUE_FIELD, *CERTIFICATE_PROVISIONING_ISSUE_FIELDS,
     }
     for path, _, _ in differences:
@@ -304,6 +311,10 @@ def check_certificate_status_readback_drift(item, hostname):
             # reason/details are output-only; side validation bounds details and
             # restricts the reason to the Certificate Manager API enum.
             continue
+        elif path == CERTIFICATE_MANAGED_STATE_FIELD:
+            require((_is_missing_or_none(before_value) or before_value in CERTIFICATE_MANAGED_STATES) and
+                    (_is_missing_or_none(after_value) or after_value in CERTIFICATE_MANAGED_STATES),
+                    "managed certificate state drift contains an unknown state enum")
         else:
             allowed_values = CERTIFICATE_STATUS_FIELDS[path]
             require((_is_missing_or_none(before_value) or before_value in allowed_values) and
@@ -492,7 +503,12 @@ def check_access(plan, backend_service_name, allowed_email):
     changes = check_actions(plan, ACCESS)
     resource = changes["google_iap_web_backend_service_iam_member.helpdesk_user"].get("change", {}).get("after") or values[
         "google_iap_web_backend_service_iam_member.helpdesk_user"]["values"]
-    require(resource.get("project") == PROJECT and resource.get("web_backend_service") == backend_service_name and
+    expected_backend_references = {
+        backend_service_name,
+        f"projects/{PROJECT}/iap_web/compute/services/{backend_service_name}",
+    }
+    require(resource.get("project") == PROJECT and
+            resource.get("web_backend_service") in expected_backend_references and
             resource.get("role") == "roles/iap.httpsResourceAccessor" and
             resource.get("member") == f"user:{allowed_email}",
             "IAP grant must be one exact user on the supplied backend service")
