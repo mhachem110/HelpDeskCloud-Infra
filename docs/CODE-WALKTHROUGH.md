@@ -21,10 +21,21 @@ Paths are relative to this repository. The App repo has the companion walkthroug
 - .github/workflows/terraform-dev-plan.yml authenticates, initializes one state root and runs a guarded read-only Plan. **Trainer answer:** “Plan reports intended changes and drift without modifying infrastructure.”
 - .github/workflows/terraform-dev-apply.yml creates a fresh plan, validates exact changes and drift, then waits for the protected dev-network-apply Environment before Apply. **Trainer answer:** “A human approves the current plan, and the guard rejects unexpected deletions or replacements before Terraform can change resources.”
 - scripts/dev_infra_guard.py validates plan actions, IAM, state identity, sensitive fields, drift and post-apply evidence. It deliberately has detailed incident regression coverage. **Trainer answer:** “The guard is a policy layer around Terraform's plan JSON; it checks both the proposed change and whether provider readbacks match the known resource.” If an unknown action or identity appears, the job fails closed.
+- `provider_identity_checks` centralizes the exact project, pool, provider, status, attribute mapping, CEL condition and resource ID comparison shared by supporting-image, migration and app delivery providers. The refactor removes repeated comparison code; the historical Apply 12 and later recovery checks remain because current validation and regression tests still use them.
 
 ## HTTPS foundation
 
 - terraform/https-foundation/https.tf reserves the static address and defines TLS policy, Certificate Manager map, active dynv6 resources and protected legacy FreeDNS resources. **Trainer answer:** “The map contains the active certificate and a deprecated entry retained until a separately approved decommission.”
 - terraform/https-access/iam.tf assigns the one approved account access to the exact backend. **Trainer answer:** “IAP is enabled at the backend, and the user role is limited to that backend rather than the whole project.”
+
+## Operations workflow walkthrough
+
+- `.github/workflows/terraform-ci.yml` checks repository configuration offline on pull requests. **Trainer answer:** “CI proves the code and guard checks pass without cloud credentials.”
+- `.github/workflows/terraform-drift.yml` runs scheduled or manually selected read-only Plans for the three roots. `scripts/terraform_plan_summary.py` emits only resource addresses and actions. **Trainer answer:** “Drift detection raises a review signal and never repairs the cloud.” No live drift run is claimed here.
+- `.github/workflows/terraform-state-health.yml` is manual and inspects bucket settings, object metadata and version history without downloading Terraform state. **Trainer answer:** “The audit checks whether recovery metadata is available while keeping state contents private.” No live state-health run is claimed here.
+- `.github/workflows/terraform-dev-destroy.yml` is **implemented for future use — disabled for live destructive execution** and defaults to `plan-only`. It requires stronger gates than Apply because a delete can remove data, network paths and rollback dependencies. SQL deletion protection and certificate `prevent_destroy` stay on; current execution is blocked for those resources. **Trainer answer:** “Destroy needs independent approval, a separate plan review, an exact target and tested recovery evidence.”
+- The new `scripts/verify_dev_environment.sh` shares Apply's pre-OIDC check for a pre-existing reviewer-protected, dev-only Environment. Terraform state remains remote in GCS because it is Terraform's resource map and lock coordination; separate prefixes keep root ownership isolated.
+
+The new operational workflows use the existing WIF provider and identity. Their external workflow-ref and cloud permissions were not inspected or changed in this repository-only assignment; verify those prerequisites before any future operational run.
 
 For the application Deployment, internal Service, Gateway, IAP JWT validation and PostgreSQL proxy, see the App repository's docs/CODE-WALKTHROUGH.md.

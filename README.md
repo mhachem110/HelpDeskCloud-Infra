@@ -26,13 +26,33 @@ The existing bucket is helpdeskcloud-tfstate-511905. State names and resource ad
 
 Terraform manages Secret Manager secret metadata and service-account access, while secret payloads are external inputs. OAuth client secrets and DNS-provider credentials are also external; they do not belong in Git or Terraform outputs.
 
-## Workflow model
+## Six Terraform workflows
 
-- **Terraform CI** runs on pull requests and checks promotion route, formatting, backend-free init and validation across all three roots, TFLint, Checkov, shell syntax and Python guard tests. It does not use Google credentials.
-- **Terraform Dev Plan** is manually dispatched for core, https-foundation or https-access on the protected dev branch. It authenticates through GitHub OIDC to the existing Dev identity, initializes the corresponding GCS prefix, creates a read-only plan and applies strict plan/drift validation. It never applies.
-- **Terraform Dev Apply** is manually dispatched and creates a fresh reviewed plan. The Apply job waits for the protected dev-network-apply Environment, verifies the trusted repository/ref and approval configuration, validates the exact plan and drift fingerprint, then applies and performs read-only resource checks.
+The daily engineering route is **Terraform CI → Terraform Dev Plan → protected Terraform Dev Apply**. Operations add three separate, manually controlled workflows:
 
-OIDC provides short-lived cloud credentials without service-account keys. Plan and Apply workflow filenames and the configured provider/ref conditions are identity-sensitive; preserve them. GitHub branch and Environment protection remain in force. No Stage or Prod apply workflow is enabled.
+| Workflow | Trigger | Effect |
+|---|---|---|
+| Terraform CI | Pull request | Offline configuration, policy and guard checks; no Google credentials |
+| Terraform Dev Plan | Manual | Read-only plan and strict drift validation for one selected root |
+| Terraform Dev Apply | Manual | Fresh guarded plan, protected `dev-network-apply` approval, then infrastructure changes |
+| Terraform Drift Detection | Weekly and manual | Read-only plans and sanitized action summaries; never repairs drift |
+| Terraform State Health | Manual | Checks bucket settings, exact state object metadata and version history; never downloads state |
+| Terraform Dev Destroy | Manual, default `plan-only` | Future teardown review with stronger safeguards; **implemented for future use — disabled for live destructive execution** |
+
+```mermaid
+flowchart LR
+  PR[Infrastructure pull request] --> CI[Terraform CI]
+  CI --> PLAN[Manual Dev Plan]
+  PLAN --> APPLY[Protected Dev Apply]
+  DRIFT[Weekly or manual Drift] -->|read-only plans| STATE[(Three isolated GCS state prefixes)]
+  HEALTH[Manual State Health] -->|bucket and object metadata only| STATE
+  DESTROY[Manual Destroy, plan-only by default] -->|future protected review| STATE
+  APPLY -->|approved changes| GCP[Dev infrastructure]
+  DRIFT -. no repair .-> GCP
+  HEALTH -. no mutation .-> GCP
+```
+
+OIDC provides short-lived cloud credentials without service-account keys. Existing WIF provider trust includes exact workflow identities for the retained workflows; this repository-only change did not inspect or modify the live provider configuration. Before running the new workflows, verify the existing provider permits the new workflow refs and that the existing identity has the required read access. GitHub branch and Environment protection remain in force. No Stage or Prod apply workflow is enabled.
 
 ## Local validation
 
@@ -54,7 +74,12 @@ CI also runs TFLint on each root and Checkov on Terraform. Backend-free init and
 - .github/workflows/terraform-ci.yml — credential-free PR checks across all roots.
 - .github/workflows/terraform-dev-plan.yml — manual read-only plan and safety validation.
 - .github/workflows/terraform-dev-apply.yml — separate protected Dev Apply and verification.
+- .github/workflows/terraform-drift.yml — scheduled/manual read-only drift plans.
+- .github/workflows/terraform-state-health.yml — manual, metadata-only state recovery audit.
+- .github/workflows/terraform-dev-destroy.yml — future-only, strongly gated teardown review.
 - scripts/dev_infra_guard.py — strict core plan, drift, IAM and post-apply evidence checks.
+- scripts/dev_destroy_guard.py — exact target, backup, environment and inventory checks for future teardown.
+- scripts/terraform_state_health.py — bucket, prefix, lifecycle and version-history policy checks.
 - scripts/dev_https_guard.py — HTTPS foundation/access plan safety checks.
 - scripts/prepare_dev_https_target.sh — read-only backend discovery for the isolated HTTPS Plan.
 - terraform/ — core network, data, cluster and identity root.

@@ -1160,6 +1160,35 @@ class GuardTests(unittest.TestCase):
     def test_exact_phase7_creations(self):
         self.assertEqual(check_plan(self.plan), "apply")
 
+    def test_critical_plan_regressions_reject_delete_replacement_wrong_iam_name_and_security_drift(self):
+        cases = []
+
+        unexpected_delete = fixture()
+        next(change for change in unexpected_delete["resource_changes"]
+             if change["address"] == next(iter(NETWORK)))["change"]["actions"] = ["delete"]
+        cases.append(("unexpected delete", unexpected_delete))
+
+        replacement = fixture()
+        next(change for change in replacement["resource_changes"]
+             if change["address"] == SQL_ADDRESS)["change"]["actions"] = ["delete", "create"]
+        cases.append(("replacement", replacement))
+
+        wrong_principal = fixture()
+        resource(wrong_principal, "google_project_iam_member.dev_app_cloudsql[0]")["values"]["member"] = "serviceAccount:allUsers"
+        cases.append(("wrong IAM principal", wrong_principal))
+
+        wrong_name = fixture()
+        resource(wrong_name, next(iter(NETWORK)))["values"]["name"] = "unexpected-vpc"
+        cases.append(("wrong resource name", wrong_name))
+
+        changed_security = fixture()
+        resource(changed_security, SQL_ADDRESS)["values"]["settings"][0]["ip_configuration"][0]["ipv4_enabled"] = True
+        cases.append(("changed security setting", changed_security))
+
+        for label, plan in cases:
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                check_plan(plan)
+
     def test_migration_secret_access_recovery_allows_only_the_exact_missing_grant(self):
         plan = migration_secret_access_recovery_plan()
         self.assertEqual(check_plan(plan), "apply")

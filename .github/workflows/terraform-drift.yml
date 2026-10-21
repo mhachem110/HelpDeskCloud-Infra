@@ -1,0 +1,212 @@
+name: Terraform Dev Drift Detection
+
+on:
+  workflow_dispatch:
+    inputs:
+      root:
+        description: Select exactly one Terraform Dev root to inspect.
+        required: true
+        type: string
+  schedule:
+    - cron: '0 14 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-dev-drift-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: helpdeskcloud-capstone-511905
+  REGION: us-east1
+  STATE_SERVICE_ACCOUNT: helpdesk-terraform-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+  WIF_PROVIDER: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-infra-dev
+
+jobs:
+  preflight:
+    name: Confirm trusted scheduled/manual invocation
+    if: github.repository == 'mhachem110/HelpDeskCloud-Infra'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.roots.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - name: Require the protected Dev branch and select exact roots
+        id: roots
+        env:
+          ROOT_INPUT: ${{ inputs.root }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$REF" == 'refs/heads/dev' ]] || { echo '::error::Drift detection is limited to the protected dev branch.'; exit 1; }
+          case "$EVENT_NAME" in
+            schedule)
+              echo 'matrix={"root":["core","https-foundation","https-access"]}' >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_dispatch)
+              case "$ROOT_INPUT" in core|https-foundation|https-access) ;;
+                *) echo '::error::Select exactly one supported Terraform root.'; exit 1 ;;
+              esac
+              printf 'matrix={"root":["%s"]}\n' "$ROOT_INPUT" >> "$GITHUB_OUTPUT"
+              ;;
+            *) echo '::error::Unsupported drift trigger.'; exit 1 ;;
+          esac
+
+  drift:
+    name: Read-only plan — ${{ matrix.root }}
+    needs: preflight
+    if: needs.preflight.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      ROOT: ${{ matrix.root }}
+      IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
+      TF_IN_AUTOMATION: true
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Authenticate through the existing short-lived Terraform identity
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.STATE_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+
+      - name: Install read-only GKE discovery tools for the HTTPS access root
+        if: env.ROOT == 'https-access'
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          install_components: kubectl,gke-gcloud-auth-plugin
+
+      - name: Resolve only the configured HTTPS plan inputs
+        id: target
+        env:
+          COMPONENT: ${{ matrix.root }}
+          IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
+        run: |
+          set -euo pipefail
+          case "$COMPONENT" in
+            core)
+              echo 'ready=true' >> "$GITHUB_OUTPUT"
+              ;;
+            https-foundation)
+              hostname=$(python ../scripts/dev_https_config.py hostname https-foundation/environments/dev.tfvars)
+              echo 'ready=true' >> "$GITHUB_OUTPUT"
+              echo "hostname=$hostname" >> "$GITHUB_OUTPUT"
+              ;;
+            https-access)
+              [[ -n "$IAP_ALLOWED_EMAIL" ]] || { echo '::error::DEV_IAP_ALLOWED_EMAIL must be configured before an access-root drift plan.'; exit 1; }
+              bash ../scripts/prepare_dev_https_access.sh
+              ;;
+            *) echo '::error::Unknown Terraform root.'; exit 1 ;;
+          esac
+
+      - name: Require successful read-only target discovery
+        env:
+          READY: ${{ steps.target.outputs.ready }}
+        run: test "$READY" = true
+
+      - name: Install Terraform 1.16.2
+        uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: 1.16.2
+
+      - name: Initialize the root's exact existing GCS backend
+        env:
+          COMPONENT: ${{ matrix.root }}
+        run: |
+          set -euo pipefail
+          case "$COMPONENT" in
+            core)
+              terraform init -input=false -no-color -lockfile=readonly -backend-config=environments/dev.gcs.tfbackend
+              ;;
+            https-foundation|https-access)
+              terraform -chdir="$COMPONENT" init -input=false -no-color -lockfile=readonly -backend-config=environments/dev.gcs.tfbackend
+              ;;
+          esac
+
+      # The saved plan and JSON stay on the runner; only action/address summaries are written to GitHub.
+      - name: Create a detailed-exit-code plan and classify its result
+        id: plan
+        env:
+          COMPONENT: ${{ matrix.root }}
+          HOSTNAME: ${{ steps.target.outputs.hostname }}
+          BACKEND_SERVICE_NAME: ${{ steps.target.outputs.backend_service_name }}
+          IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
+        run: |
+          set -euo pipefail
+          umask 077
+          plan_file="$RUNNER_TEMP/dev-drift-$COMPONENT.tfplan"
+          json_file="$RUNNER_TEMP/dev-drift-$COMPONENT.json"
+          plan_log="$RUNNER_TEMP/dev-drift-$COMPONENT.log"
+          case "$COMPONENT" in
+            core)
+              command=(terraform plan -detailed-exitcode -input=false -no-color -lock-timeout=5m -var-file=environments/dev.tfvars -out="$plan_file")
+              ;;
+            https-foundation)
+              command=(terraform -chdir="$COMPONENT" plan -detailed-exitcode -input=false -no-color -lock-timeout=5m -var-file=environments/dev.tfvars -var="hostname=$HOSTNAME" -out="$plan_file")
+              ;;
+            https-access)
+              command=(terraform -chdir="$COMPONENT" plan -detailed-exitcode -input=false -no-color -lock-timeout=5m -var="backend_service_name=$BACKEND_SERVICE_NAME" -var="allowed_email=$IAP_ALLOWED_EMAIL" -out="$plan_file")
+              ;;
+          esac
+          set +e
+          "${command[@]}" >"$plan_log" 2>&1
+          status=$?
+          set -e
+          case "$status" in
+            0) echo 'result=clean' >> "$GITHUB_OUTPUT" ;;
+            2) echo 'result=changes' >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo '::error::Terraform Plan failed due to an API, permission, state, or configuration error. Raw plan output was withheld.'
+              echo "### $COMPONENT drift result" >> "$GITHUB_STEP_SUMMARY"
+              echo 'Plan failed; no change actions can be classified.' >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
+          if [[ "$COMPONENT" == core ]]; then
+            terraform show -json "$plan_file" > "$json_file"
+          else
+            terraform -chdir="$COMPONENT" show -json "$plan_file" > "$json_file"
+          fi
+          python ../scripts/terraform_plan_summary.py "$json_file" "$COMPONENT" --summary-file "$GITHUB_STEP_SUMMARY"
+          if [[ "$COMPONENT" == core ]]; then
+            gcloud secrets get-iam-policy helpdesk-dev-db-connection --project="$PROJECT_ID" --format=json > "$RUNNER_TEMP/app-secret-iam.json"
+            gcloud secrets get-iam-policy helpdesk-dev-db-admin-password --project="$PROJECT_ID" --format=json > "$RUNNER_TEMP/admin-secret-iam.json"
+            python ../scripts/dev_infra_guard.py diagnose-drift "$json_file"
+            python ../scripts/dev_infra_guard.py check-plan "$json_file" \
+              "$RUNNER_TEMP/app-secret-iam.json" "$RUNNER_TEMP/admin-secret-iam.json" --report-drift
+          elif [[ "$COMPONENT" == https-foundation ]]; then
+            python ../scripts/dev_https_guard.py check-foundation "$json_file" --hostname "$HOSTNAME"
+          else
+            python ../scripts/dev_https_guard.py check-access "$json_file" \
+              --backend-service-name "$BACKEND_SERVICE_NAME" --allowed-email "$IAP_ALLOWED_EMAIL"
+          fi
+
+      - name: Record that this workflow is read-only
+        if: always()
+        env:
+          RESULT: ${{ steps.plan.outputs.result }}
+        run: |
+          {
+            echo
+            echo "Drift result: ${RESULT:-not-completed}. This workflow never repairs drift, applies a plan, or destroys resources."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -25,3 +25,16 @@ You need an authorized Google Cloud project administrator, the existing project 
 15. **DNS and verification:** Confirm DNS resolves to the reserved address and use ordinary TLS verification. Test approved login, denial for an unauthorized Google identity, anonymous ticket API denial, app health, ticket creation and persistence. Record run links and image digests, never credentials or ticket contents.
 
 The app repository's [rebuild runbook](https://github.com/mhachem110/HelpDeskCloud-App/blob/dev/docs/REBUILD.md) has the detailed 16-step app and Kubernetes procedure. Stage and Prod remain prepared environments, not live deployments.
+
+## Future teardown order
+
+This is a planning sequence, not authorization to remove the running Dev environment. The future-only Terraform Dev Destroy workflow defaults to a read-only plan and currently cannot delete protected SQL or certificate resources. Any teardown requires a separate owner-reviewed authorization, verified restore-tested backups, a protected `dev-infra-destroy` Environment and an explicit opt-in prepared outside this repository.
+
+1. Stop future application releases and database migrations; record the current image digests and workflow evidence.
+2. Preserve and verify Cloud SQL backups and application data. Complete a restore exercise before database removal.
+3. Remove the application and HTTPS edge Helm releases using a separate authorized App operation; no Terraform workflow removes Kubernetes objects.
+4. Review and remove the exact IAP backend access grant, then review Gateway, DNS, certificate, TLS policy and reserved address dependencies.
+5. Remove core network, cluster, registry and identity resources last, after app, edge and database dependencies are resolved.
+6. Retain all Terraform state and versioned recovery copies. Never destroy the state bucket through a workflow whose state is stored in that bucket.
+
+Rollback requires the state bucket, state generations, image digests, database backup and external DNS/OAuth inputs. Certificate `prevent_destroy` and Cloud SQL deletion protection are deliberate stops until a separate plan demonstrates that data and shared certificate dependencies are safe to remove.

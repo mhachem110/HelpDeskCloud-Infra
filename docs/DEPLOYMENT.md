@@ -23,3 +23,11 @@ The apply workflow has separate core and HTTPS target paths because they have di
 - [Terraform Dev Backend Check #18](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39536157570) is historical validation; the standalone workflow is retired.
 
 Local backend-free validation does not prove live state access. A new read-only Plan requires the existing authorized Google identity and access to the existing GCS bucket. No automated Apply or Stage/Prod deployment is enabled.
+
+## Operations and recovery workflows
+
+- **Terraform Drift Detection** runs weekly or by manual dispatch. It selects all three roots on schedule or one explicit root manually, runs read-only Terraform Plans and writes only sanitized action and address summaries. A detected change is a review signal; the workflow never repairs it. This workflow was added and validated offline; no live drift run was performed.
+- **Terraform State Health** is manual. It checks the committed bucket/prefix map, bucket versioning and access controls, lifecycle rules, exact state object metadata and available object generations using the existing short-lived Terraform identity. It does not initialize Terraform or download state. Its live bucket check has not been run.
+- **Terraform Dev Destroy** is manual and defaults to `plan-only`. It is **implemented for future use — disabled for live destructive execution**. It requires a pre-existing independent `dev-infra-destroy` Environment, a required reviewer, self-review prevention, dev-only branch restrictions, an explicit `DEV_DESTROY_ENABLED=true`, an exact typed target, a separately reviewed plan fingerprint and root-specific recovery evidence. The repository does not create the Environment or turn on the variable. SQL and certificate protections remain enabled and block those resources from execution through the current workflow.
+
+All three new workflows refer to the existing WIF provider and service account. Their external WIF workflow-ref allowlist and effective cloud read permissions were not queried or changed; an administrator must verify those prerequisites before a future run. The manually dispatched operational workflows were not run during this cleanup.

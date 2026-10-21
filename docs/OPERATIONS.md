@@ -32,3 +32,24 @@ Eventual decommission requires a separate review confirming no DNS record, Gatew
 ## Preserved Apply guard complexity
 
 scripts/dev_infra_guard.py and its extensive tests contain exact drift and recovery checks tied to historical provider readbacks and the prior Apply #12 state. They are retained because they still reject unsafe changes and the current suite covers those invariants. Do not delete incident fixtures unless equivalent rejection tests prove the safety intent remains.
+
+## State recovery readiness
+
+The manual Terraform State Health workflow checks the expected bucket, all three root prefixes, versioning, uniform bucket access, public access prevention, lifecycle rules, current object metadata and at least two state generations. Its reads establish bucket/object metadata access for the existing short-lived identity; it does not read state contents or prove write access for a future Apply. The audit was not run against GCP in this repository cleanup.
+
+Keep state recovery independent from Terraform roots. Recommend a separately reviewed recovery bucket or backup process with object versioning, retention that exceeds the recovery window, documented generation references and a tested restore procedure. Do not implement bucket/IAM/lifecycle changes from this repository workflow.
+
+## Future teardown and recovery order
+
+Terraform Dev Destroy is **implemented for future use — disabled for live destructive execution**. Its default is a manual plan-only inventory. The repository did not create `dev-infra-destroy`, set `DEV_DESTROY_ENABLED`, run the workflow or alter lifecycle protection. SQL deletion protection and certificate `prevent_destroy` remain active; the current guard rejects their execution until an owner separately reviews a safe data-retention and certificate decommission procedure.
+
+Any future teardown needs a coordinated, separately authorized sequence:
+
+1. Stop future app releases and migrations; retain image digests and deployment records.
+2. Verify recoverable Cloud SQL backups and application data, and test restoration before removing the database.
+3. Remove app and edge Helm releases through a separate App procedure; the infrastructure Destroy workflow never deletes Kubernetes resources.
+4. Remove the IAP backend grant through its isolated access root, then review HTTPS Gateway dependencies, DNS, address, certificates and TLS foundation.
+5. Remove remaining core infrastructure only after the service dependencies and data are accounted for.
+6. Keep Terraform state and its recovery copies. The state bucket is last-resort infrastructure and must never be destroyed by a state-managed Terraform workflow.
+
+The state bucket, object versions and recovery records must remain available through teardown and rollback. Certificate resources must not be deleted while DNS, a Gateway, a rollback route or a shared certificate map still depends on them. No state entries are removed as a substitute for resource deletion.
