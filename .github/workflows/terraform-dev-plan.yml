@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: Select one isolated Terraform Dev root.
+        description: Platform Infrastructure (core), HTTPS & Certificates (https-foundation), or Identity & Access (https-access). Values are the existing root and state identifiers.
         required: true
         type: choice
         default: core
@@ -16,7 +16,7 @@ permissions:
 jobs:
   # A Plan uses OIDC and the existing GCS state but never runs terraform apply.
   dev-plan:
-    name: Review Dev infrastructure changes
+    name: Plan Platform Infrastructure (core)
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.target == 'core'
     runs-on: ubuntu-latest
     permissions:
@@ -39,6 +39,11 @@ jobs:
         run: |
           test "$REPOSITORY" = "mhachem110/HelpDeskCloud-Infra"
           test "$REF" = "refs/heads/dev"
+
+      - name: Summarize selected Terraform root
+        env:
+          TARGET: ${{ inputs.target }}
+        run: bash ../scripts/terraform_target_summary.sh "$TARGET" Plan
 
       - name: Authenticate through the existing Dev OIDC provider
         uses: google-github-actions/auth@v3
@@ -73,7 +78,7 @@ jobs:
         run: python ../scripts/dev_infra_guard.py check-plan "$RUNNER_TEMP/dev-diagnostic.json" --report-drift
 
   https-plan:
-    name: Review isolated Dev HTTPS infrastructure
+    name: Plan ${{ inputs.target == 'https-foundation' && 'HTTPS & Certificates (https-foundation)' || 'Identity & Access (https-access)' }}
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.target != 'core'
     runs-on: ubuntu-latest
     permissions:
@@ -110,6 +115,11 @@ jobs:
             core) : ;;
             *) echo '::error::Unknown Terraform target.'; exit 1 ;;
           esac
+
+      - name: Summarize selected Terraform root
+        env:
+          TARGET: ${{ inputs.target }}
+        run: bash ../scripts/terraform_target_summary.sh "$TARGET" Plan
 
       - name: Authenticate through the existing Dev OIDC provider
         uses: google-github-actions/auth@v3

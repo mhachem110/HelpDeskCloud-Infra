@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: Select one isolated Terraform Dev root.
+        description: Platform Infrastructure (core), HTTPS & Certificates (https-foundation), or Identity & Access (https-access). Values are the existing root and state identifiers.
         required: true
         type: choice
         default: core
@@ -21,7 +21,7 @@ concurrency:
 jobs:
   # Review a fresh plan first; the separate protected job below applies only after its checks pass.
   review-plan:
-    name: Show Dev plan
+    name: Plan Platform Infrastructure (core)
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.target == 'core'
     outputs:
       drift_fingerprint: ${{ steps.reviewed-drift.outputs.fingerprint }}
@@ -36,6 +36,11 @@ jobs:
       TF_IN_AUTOMATION: true
     steps:
       - uses: actions/checkout@v4.2.2
+
+      - name: Summarize selected Terraform root
+        env:
+          TARGET: ${{ inputs.target }}
+        run: bash ../scripts/terraform_target_summary.sh "$TARGET" Plan
 
       - name: Verify trusted repository and branch
         env:
@@ -114,7 +119,7 @@ jobs:
           fi
 
   approved-apply:
-    name: Apply and verify Dev infrastructure
+    name: Apply Platform Infrastructure (core)
     needs: review-plan
     if: >-
       always() &&
@@ -145,6 +150,11 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           REF: ${{ github.ref }}
         run: bash ../scripts/verify_dev_environment.sh
+
+      - name: Summarize selected Terraform root
+        env:
+          TARGET: ${{ inputs.target }}
+        run: bash ../scripts/terraform_target_summary.sh "$TARGET" Apply
 
       - name: Reauthenticate with existing Dev OIDC
         uses: google-github-actions/auth@v3
@@ -266,7 +276,7 @@ jobs:
             "$RUNNER_TEMP/state-addresses.txt"
 
   review-https-plan:
-    name: Review isolated HTTPS plan
+    name: Plan ${{ inputs.target == 'https-foundation' && 'HTTPS & Certificates (https-foundation)' || 'Identity & Access (https-access)' }}
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.target != 'core'
     outputs:
       ready: ${{ steps.prepare-target.outputs.ready }}
@@ -285,6 +295,11 @@ jobs:
       IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
     steps:
       - uses: actions/checkout@v4.2.2
+
+      - name: Summarize selected Terraform root
+        env:
+          TARGET: ${{ inputs.target }}
+        run: bash ../scripts/terraform_target_summary.sh "$TARGET" Plan
 
       - name: Verify trusted repository and branch
         env:
@@ -365,7 +380,7 @@ jobs:
           fi
 
   approved-https-apply:
-    name: Apply isolated HTTPS changes
+    name: Apply ${{ inputs.target == 'https-foundation' && 'HTTPS & Certificates (https-foundation)' || 'Identity & Access (https-access)' }}
     needs: review-https-plan
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.target != 'core' && needs.review-https-plan.result == 'success' && needs.review-https-plan.outputs.ready == 'true'
     environment: dev-network-apply
@@ -393,6 +408,11 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           REF: ${{ github.ref }}
         run: bash ../scripts/verify_dev_environment.sh
+
+      - name: Summarize selected Terraform root
+        env:
+          TARGET: ${{ inputs.target }}
+        run: bash ../scripts/terraform_target_summary.sh "$TARGET" Apply
 
       - name: Reauthenticate with existing Dev OIDC
         uses: google-github-actions/auth@v3

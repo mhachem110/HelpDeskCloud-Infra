@@ -35,6 +35,36 @@ class TerraformOpsWorkflowTests(unittest.TestCase):
         self.assertNotRegex(text, r"(?i)\b-auto-approve\b|\b-target\s*[= ]")
         self.assertNotIn("upload-artifact", text)
 
+    def test_destroy_inventory_preserves_protected_roots_and_uses_access_variables(self):
+        _, config = workflow("terraform-dev-destroy.yml")
+        jobs = config["jobs"]
+        protected = jobs["plan"]["steps"]
+        inventory = next(step for step in protected
+                         if step.get("name") == "Create inventory-only preview for protected roots")
+        access_plan = next(step for step in protected
+                           if step.get("name") == "Create a local Identity & Access destroy plan")
+        self.assertIn("inputs.root == 'core' || inputs.root == 'https-foundation'", inventory["if"])
+        self.assertIn("inputs.root == 'https-access'", access_plan["if"])
+        self.assertIn("state pull >", Path(ROOT / "scripts/capture_terraform_state_evidence.sh").read_text())
+        self.assertIn("--state-generation", inventory["run"])
+        self.assertIn('-var="backend_service_name=$BACKEND_SERVICE_NAME"', access_plan["run"])
+        self.assertIn('-var="allowed_email=$ALLOWED_EMAIL"', access_plan["run"])
+        self.assertNotIn("-var-file=environments/dev.tfvars", (WORKFLOWS / "terraform-dev-destroy.yml").read_text())
+        self.assertIn("This root contains retained deletion protections",
+                      Path(ROOT / "scripts/dev_destroy_guard.py").read_text())
+
+    def test_plan_and_apply_show_friendly_names_for_existing_root_ids(self):
+        for name in ("terraform-dev-plan.yml", "terraform-dev-apply.yml"):
+            _, config = workflow(name)
+            triggers = config.get("on", config.get(True))
+            description = triggers["workflow_dispatch"]["inputs"]["target"]["description"]
+            for label in ("Platform Infrastructure (core)",
+                          "HTTPS & Certificates (https-foundation)",
+                          "Identity & Access (https-access)"):
+                self.assertIn(label, description)
+            text = (WORKFLOWS / name).read_text(encoding="utf-8")
+            self.assertIn("terraform_target_summary.sh", text)
+
     def test_drift_is_scheduled_or_manual_and_has_no_mutating_command(self):
         triggers, config = workflow("terraform-drift.yml")
         self.assertEqual(set(triggers), {"workflow_dispatch", "schedule"})

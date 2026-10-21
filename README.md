@@ -39,6 +39,8 @@ The daily engineering route is **Terraform CI → Terraform Dev Plan → protect
 | Terraform State Health | Manual | Checks bucket settings, exact state object metadata and version history; never downloads state |
 | Terraform Dev Destroy | Manual, default `plan-only` | Future teardown review with stronger safeguards; **implemented for future use — disabled for live destructive execution** |
 
+Plan and Apply select the existing root identifiers using these labels: Platform Infrastructure (`core`), HTTPS & Certificates (`https-foundation`), and Identity & Access (`https-access`). The labels do not change root paths, GCS state prefixes, resource addresses or WIF configuration.
+
 ```mermaid
 flowchart LR
   PR[Infrastructure pull request] --> CI[Terraform CI]
@@ -76,7 +78,7 @@ CI also runs TFLint on each root and Checkov on Terraform. Backend-free init and
 - .github/workflows/terraform-dev-apply.yml — separate protected Dev Apply and verification.
 - .github/workflows/terraform-drift.yml — scheduled/manual read-only drift plans.
 - .github/workflows/terraform-state-health.yml — manual, metadata-only state recovery audit.
-- .github/workflows/terraform-dev-destroy.yml — future-only, strongly gated teardown review.
+- .github/workflows/terraform-dev-destroy.yml — protected-root inventory preview and gated HTTPS access teardown review.
 - scripts/dev_infra_guard.py — strict core plan, drift, IAM and post-apply evidence checks.
 - scripts/dev_destroy_guard.py — exact target, backup, environment and inventory checks for future teardown.
 - scripts/terraform_state_health.py — bucket, prefix, lifecycle and version-history policy checks.

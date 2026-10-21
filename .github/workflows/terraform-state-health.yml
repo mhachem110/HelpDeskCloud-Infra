@@ -65,5 +65,3 @@ jobs:
           python scripts/terraform_state_health.py inspect \
             --bucket-file "$bucket_file" --versions-dir "$versions_dir" \
             --summary-file "$GITHUB_STEP_SUMMARY"
-
-\n

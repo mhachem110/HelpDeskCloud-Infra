@@ -19,6 +19,7 @@ from dev_destroy_guard import (
     validate_environment,
     validate_protection_configuration,
     validate_selection,
+    validate_state_inventory,
 )
 
 
@@ -62,8 +63,25 @@ def access_destroy_plan(address=None, actions=None):
         "address": address,
         "mode": "managed",
         "type": ACCESS.get(address, "google_iap_web_backend_service_iam_member"),
-        "change": {"actions": actions or ["delete"], "before": {"email": "private"}, "after": None},
+        "change": {
+            "actions": actions or ["delete"],
+            "before": {"id": "backend/roles/iap/user@example.com", "email": "user@example.com"},
+            "after": None,
+        },
     }]}
+
+
+def access_state(identity="backend/roles/iap/user@example.com", email="user@example.com"):
+    return {
+        "serial": 8,
+        "lineage": "terraform-lineage-123",
+        "resources": [{
+            "mode": "managed",
+            "type": "google_iap_web_backend_service_iam_member",
+            "name": "helpdesk_user",
+            "instances": [{"attributes": {"id": identity, "email": email}}],
+        }],
+    }
 
 
 class DestroyGuardTests(unittest.TestCase):
@@ -86,6 +104,12 @@ class DestroyGuardTests(unittest.TestCase):
                         {"reviewed_fingerprint": "not-a-sha256"}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 validate_selection(**selection(**changes))
+
+    def test_protected_roots_can_only_select_inventory_preview(self):
+        for root in ("core", "https-foundation"):
+            with self.subTest(root=root), self.assertRaisesRegex(ValueError, "inventory preview"):
+                validate_selection(**selection(root=root, confirmation=
+                    f"DESTROY dev {PROJECT_ID} {root}"))
 
     def test_wrong_project_environment_root_and_untrusted_ref_are_rejected(self):
         for changes in ({"project_id": "other-project"}, {"ref": "refs/heads/feature/x"},
@@ -217,10 +241,76 @@ class DestroyGuardTests(unittest.TestCase):
             )
 
     def test_exact_iap_grant_delete_is_reviewable(self):
-        fingerprint, summary = validate_destroy_plan(access_destroy_plan(), "https-access")
+        fingerprint, summary = validate_destroy_plan(
+            access_destroy_plan(), "https-access", state=access_state(), state_generation="102"
+        )
         self.assertEqual(len(fingerprint), 64)
         self.assertIn("Planned deletes: 1", summary)
         self.assertIn(next(iter(ACCESS)), summary)
+        self.assertIn("Terraform lineage and serial", summary)
+
+    def test_destroy_fingerprint_covers_identity_and_state_evidence(self):
+        plan = access_destroy_plan()
+        fingerprint, summary = validate_destroy_plan(
+            plan, "https-access", state=access_state(), state_generation="102"
+        )
+        changed_identity = access_state(identity="backend/roles/iap/other@example.com",
+                                        email="other@example.com")
+        changed_plan = access_destroy_plan()
+        changed_plan["resource_changes"][0]["change"]["before"] = {
+            "id": "backend/roles/iap/other@example.com", "email": "other@example.com",
+        }
+        changed_fingerprint, _ = validate_destroy_plan(
+            changed_plan, "https-access", state=changed_identity, state_generation="102"
+        )
+        changed_generation, _ = validate_destroy_plan(
+            plan, "https-access", state=access_state(), state_generation="103"
+        )
+        serial_state = access_state()
+        serial_state["serial"] += 1
+        changed_serial, _ = validate_destroy_plan(
+            plan, "https-access", state=serial_state, state_generation="102"
+        )
+        lineage_state = access_state()
+        lineage_state["lineage"] = "different-lineage"
+        changed_lineage, _ = validate_destroy_plan(
+            plan, "https-access", state=lineage_state, state_generation="102"
+        )
+        self.assertNotEqual(fingerprint, changed_fingerprint)
+        self.assertNotEqual(fingerprint, changed_generation)
+        self.assertNotEqual(fingerprint, changed_serial)
+        self.assertNotEqual(fingerprint, changed_lineage)
+        self.assertNotIn("user@example.com", summary)
+
+    def test_core_inventory_preview_marks_protected_resources_without_destroy_actions(self):
+        state = {
+            "serial": 15,
+            "lineage": "core-lineage-456",
+            "resources": [
+                {"mode": "managed", "type": "google_sql_database_instance",
+                 "name": "dev_postgres", "instances": [{"index_key": 0,
+                 "attributes": {"id": "helpdeskcloud-dev-postgres", "name": "helpdeskcloud-dev-postgres"}}]},
+                {"mode": "managed", "type": "google_sql_database", "name": "dev_helpdesk",
+                 "instances": [{"index_key": 0,
+                 "attributes": {"id": "helpdeskcloud-dev-postgres:helpdesk", "name": "helpdesk"}}]},
+            ],
+        }
+        fingerprint, summary = validate_state_inventory(state, "core", "9001")
+        self.assertEqual(len(fingerprint), 64)
+        self.assertIn("state inventory (no destroy plan)", summary)
+        self.assertIn("resources with retained deletion protection: 2", summary)
+        self.assertIn("Cloud SQL API deletion protection", summary)
+        self.assertIn("prevent_destroy", summary)
+        self.assertNotIn("Planned deletes", summary)
+
+    def test_state_inventory_rejects_unknown_or_identityless_resources(self):
+        state = access_state()
+        with self.assertRaisesRegex(ValueError, "unexpected managed resource"):
+            validate_state_inventory(state, "core", "102")
+        state["resources"][0]["instances"][0]["attributes"] = {}
+        with self.assertRaisesRegex(ValueError, "No stable resource identity"):
+            validate_destroy_plan(access_destroy_plan(), "https-access",
+                                  state=state, state_generation="102")
 
     def test_unknown_resource_wrong_name_and_wrong_type_are_rejected(self):
         cases = [

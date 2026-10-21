@@ -59,13 +59,21 @@ class TerraformStateHealthTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_backend_files(root)
 
-    def test_versioning_access_and_two_generations_are_reported_without_state_contents(self):
+    def test_versioning_access_and_established_recovery_history_are_reported(self):
         report = validate_bucket_metadata(valid_bucket(), valid_versions(), valid_current_objects())
         self.assertIn("Object versioning: enabled", report)
         for root in ROOTS:
             self.assertIn(f"`{root}`", report)
+        self.assertIn("established state; 2 generations provide recovery history", report)
         self.assertIn("Only object metadata was listed", report)
         self.assertNotIn("private", report)
+
+    def test_one_generation_is_valid_new_state_without_recovery_history(self):
+        versions = valid_versions()
+        versions["https-access"] = versions["https-access"][-1:]
+        report = validate_bucket_metadata(valid_bucket(), versions, valid_current_objects())
+        self.assertIn("new state; no recovery history is available yet", report)
+        self.assertIn("established state; 2 generations provide recovery history", report)
 
     def test_missing_versioning_is_reported_as_unsafe(self):
         bucket = valid_bucket()
@@ -99,10 +107,16 @@ class TerraformStateHealthTests(unittest.TestCase):
         report = validate_bucket_metadata(bucket, valid_versions(), valid_current_objects())
         self.assertIn("1 lifecycle rule(s)", report)
 
-    def test_missing_state_history_or_unexpected_object_name_is_rejected(self):
+    def test_missing_current_state_or_unexpected_object_name_is_rejected(self):
+        versions = valid_versions()
+        versions["core"] = []
+        with self.assertRaises(ValueError):
+            validate_bucket_metadata(valid_bucket(), versions, valid_current_objects())
+
+    def test_current_generation_must_appear_in_the_version_listing(self):
         versions = valid_versions()
         versions["core"] = versions["core"][:1]
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "Current state generation is missing"):
             validate_bucket_metadata(valid_bucket(), versions, valid_current_objects())
 
     def test_missing_or_wrong_current_state_metadata_is_rejected(self):

@@ -2,7 +2,8 @@
 
 This module has no cloud client and never executes Terraform. It validates
 operator input, the selected state backend, protected Environment metadata,
-backup evidence metadata, and a sanitized Terraform plan inventory.
+backup evidence metadata, a state-backed inventory preview, and a sanitized
+Terraform destroy plan inventory.
 """
 
 import argparse
@@ -40,7 +41,7 @@ RESOURCE_INVENTORY = {
     "https-access": ACCESS,
 }
 PROTECTED_RESOURCES = {
-    # A full root destroy must stop while these lifecycle protections remain.
+    # A full root destroy must stop while these deletion protections remain.
     # Removing one requires a separate, reviewed recovery decision and code change.
     "core": {
         "google_sql_database_instance.dev_postgres[0]",
@@ -49,6 +50,21 @@ PROTECTED_RESOURCES = {
     "https-foundation": set(FOUNDATION),
     "https-access": set(),
 }
+PROTECTION_METHODS = {
+    "core": {
+        "google_sql_database_instance.dev_postgres[0]": "Cloud SQL API deletion protection",
+        "google_sql_database.dev_helpdesk[0]": "prevent_destroy",
+    },
+    "https-foundation": {
+        address: "prevent_destroy" for address in FOUNDATION
+    },
+    "https-access": {},
+}
+IDENTITY_FIELDS = (
+    "id", "name", "self_link", "project", "region", "zone", "role", "member",
+    "service", "backend_service", "hostname", "network", "database", "instance",
+    "certificate", "map", "location", "email",
+)
 CONFIRMATION_PREFIX = "DESTROY dev helpdeskcloud-capstone-511905"
 SHA256 = re.compile(r"\A[0-9a-f]{64}\Z")
 
@@ -67,6 +83,8 @@ def validate_selection(*, mode, repository, ref, project_id, root,
     require(project_id == PROJECT_ID, "Unexpected GCP project ID")
     require(root in BACKENDS, "Select exactly one supported Terraform root")
     if mode == "destroy":
+        require(not PROTECTED_RESOURCES[root],
+                "This root contains retained deletion protections; use plan-only inventory preview")
         expected_confirmation = f"{CONFIRMATION_PREFIX} {root}"
         require(confirmation == expected_confirmation,
                 "Typed destroy confirmation does not match the selected environment, project, and root")
@@ -200,7 +218,133 @@ def _flatten(module):
     return resources
 
 
-def validate_destroy_plan(plan, root, mode="destroy"):
+def _resource_identity(attributes, address):
+    require(isinstance(attributes, dict), f"Resource identity is unavailable for {address}")
+    identity = {
+        key: attributes[key] for key in IDENTITY_FIELDS
+        if key in attributes and isinstance(attributes[key], (str, int, float))
+        and not isinstance(attributes[key], bool) and str(attributes[key]).strip()
+    }
+    require(bool(identity), f"No stable resource identity fields are available for {address}")
+    return identity
+
+
+def _state_resources(state, root):
+    require(isinstance(state, dict), "Terraform state is malformed")
+    resources = state.get("resources")
+    require(isinstance(resources, list), "Terraform state has no resource inventory")
+    inventory = RESOURCE_INVENTORY[root]
+    found = {}
+    for resource in resources:
+        require(isinstance(resource, dict), "Terraform state contains a malformed resource")
+        if resource.get("mode", "managed") != "managed":
+            continue
+        resource_type = resource.get("type")
+        name = resource.get("name")
+        require(isinstance(resource_type, str) and isinstance(name, str),
+                "Terraform state contains a resource without a type or name")
+        module = resource.get("module", "")
+        require(isinstance(module, str), "Terraform state module path is malformed")
+        base = f"{module + '.' if module else ''}{resource_type}.{name}"
+        instances = resource.get("instances")
+        require(isinstance(instances, list), f"Terraform state instances are malformed for {base}")
+        for instance in instances:
+            require(isinstance(instance, dict), f"Terraform state instance is malformed for {base}")
+            index = instance.get("index_key")
+            address = base
+            if isinstance(index, int) and not isinstance(index, bool):
+                address += f"[{index}]"
+            elif isinstance(index, str):
+                address += f"[{json.dumps(index)}]"
+            elif index is not None:
+                raise ValueError(f"Unsupported Terraform state instance key for {base}")
+            require(address in inventory,
+                    f"Terraform state contains an unexpected managed resource address: {address}")
+            require(resource_type == inventory[address],
+                    f"Terraform state resource type does not match the reviewed address: {address}")
+            attributes = instance.get("attributes")
+            found[address] = {
+                "type": resource_type,
+                "identity": _resource_identity(attributes, address),
+            }
+    require(len(found) == sum(len(resource.get("instances", [])) for resource in resources
+                              if isinstance(resource, dict) and resource.get("mode", "managed") == "managed"),
+            "Terraform state contains duplicate managed resource addresses")
+    return found
+
+
+def _state_evidence(state, state_generation):
+    require(str(state_generation).isdigit(), "Current GCS state object generation is unavailable")
+    serial = state.get("serial") if isinstance(state, dict) else None
+    lineage = state.get("lineage") if isinstance(state, dict) else None
+    require(isinstance(serial, int) and serial >= 0,
+            "Terraform state serial is unavailable")
+    require(isinstance(lineage, str) and lineage.strip(),
+            "Terraform state lineage is unavailable")
+    return {
+        "object_generation": str(state_generation),
+        "serial": serial,
+        "lineage": lineage,
+    }
+
+
+def _fingerprint(root, evidence, resources):
+    fingerprint_data = {
+        "root": root,
+        "bucket": STATE_BUCKET,
+        "prefix": BACKENDS[root][2],
+        "state": evidence,
+        "resources": resources,
+    }
+    encoded = json.dumps(fingerprint_data, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_state_inventory(state, root, state_generation):
+    """Create an inventory-only preview for roots with retained destroy protections."""
+    require(root in RESOURCE_INVENTORY and PROTECTED_RESOURCES[root],
+            "Inventory-only preview is reserved for roots with retained deletion protections")
+    resources = _state_resources(state, root)
+    evidence = _state_evidence(state, state_generation)
+    entries = [
+        {
+            "address": address,
+            "type": item["type"],
+            "identity": item["identity"],
+            "protection": PROTECTION_METHODS[root].get(address, "none"),
+        }
+        for address, item in sorted(resources.items())
+    ]
+    fingerprint = _fingerprint(root, evidence, entries)
+    protected_count = sum(item["protection"] != "none" for item in entries)
+    summary = [
+        "## Terraform state inventory (no destroy plan)",
+        "",
+        f"- Project: `{PROJECT_ID}`",
+        f"- Root: `{root}`",
+        f"- State: `gs://{STATE_BUCKET}/{BACKENDS[root][2]}`",
+        f"- State object generation: `{evidence['object_generation']}`",
+        f"- Terraform lineage and serial: `{evidence['lineage']}` / `{evidence['serial']}`",
+        f"- Resources inventoried: {len(entries)}; resources with retained deletion protection: {protected_count}",
+        "- Preview type: state inventory only. No destroy actions or dependency ordering were calculated.",
+        "- Fingerprint binds resource types, addresses and stable identities to the state object generation, lineage and serial; identity values are not printed.",
+        f"- Review fingerprint: `{fingerprint}`",
+        "",
+        "This inventory fingerprint supports comparison only and cannot authorize a destroy.",
+        "| Resource type | Terraform address | Protection |",
+        "|---|---|---|",
+    ]
+    summary.extend(
+        f"| `{item['type']}` | `{item['address']}` | "
+        f"{item['protection']} |"
+        for item in entries
+    )
+    if not entries:
+        summary.append("| — | No managed resources in this state | — |")
+    return fingerprint, "\n".join(summary) + "\n"
+
+
+def validate_destroy_plan(plan, root, mode="destroy", state=None, state_generation=None):
     """Allow only known, one-way deletes; reject replacements and protected data."""
     require(root in RESOURCE_INVENTORY, "Unknown Terraform root")
     require(mode in {"plan-only", "destroy"}, "Unknown destroy-plan mode")
@@ -226,22 +370,32 @@ def validate_destroy_plan(plan, root, mode="destroy"):
         if mode == "destroy":
             require(address not in PROTECTED_RESOURCES[root],
                     f"Protected data or certificate resource cannot be destroyed by this workflow: {address}")
-    fingerprint_data = {
-        "root": root,
-        "bucket": STATE_BUCKET,
-        "prefix": BACKENDS[root][2],
-        "resources": sorted((address, by_address[address].get("change", {}).get("actions"))
-                             for address in by_address),
-    }
-    encoded = json.dumps(fingerprint_data, separators=(",", ":"), sort_keys=True).encode()
-    fingerprint = hashlib.sha256(encoded).hexdigest()
+    require(isinstance(state, dict), "State evidence is required to fingerprint a destroy plan")
+    state_resources = _state_resources(state, root)
+    evidence = _state_evidence(state, state_generation)
+    entries = []
+    for address, change in sorted(by_address.items()):
+        detail = change["change"]
+        identity = _resource_identity(detail.get("before"), address)
+        require(state_resources.get(address) == {"type": change["type"], "identity": identity},
+                f"Plan identity does not match the selected Terraform state for {address}")
+        entries.append({
+            "address": address,
+            "type": change["type"],
+            "identity": identity,
+            "actions": detail["actions"],
+        })
+    fingerprint = _fingerprint(root, evidence, entries)
     summary = [
         "## Reviewed destroy plan inventory",
         "",
         f"- Project: `{PROJECT_ID}`",
         f"- Root: `{root}`",
         f"- State: `gs://{STATE_BUCKET}/{BACKENDS[root][2]}`",
+        f"- State object generation: `{evidence['object_generation']}`",
+        f"- Terraform lineage and serial: `{evidence['lineage']}` / `{evidence['serial']}`",
         f"- Planned deletes: {len(by_address)}",
+        "- Fingerprint binds resource types, addresses, stable identities and actions to state object generation, lineage and serial; identity values are not printed.",
         f"- Review fingerprint: `{fingerprint}`",
         "",
         "| Action | Terraform address |",
@@ -296,8 +450,17 @@ def main(argv=None):
     inspect.add_argument("--root", required=True)
     inspect.add_argument("--mode", required=True, choices=("plan-only", "destroy"))
     inspect.add_argument("--plan-file", required=True, type=Path)
+    inspect.add_argument("--state-file", required=True, type=Path)
+    inspect.add_argument("--state-generation", required=True)
     inspect.add_argument("--summary-file", type=Path)
     inspect.add_argument("--output-file", type=Path)
+
+    inventory = commands.add_parser("inventory")
+    inventory.add_argument("--root", required=True)
+    inventory.add_argument("--state-file", required=True, type=Path)
+    inventory.add_argument("--state-generation", required=True)
+    inventory.add_argument("--summary-file", type=Path)
+    inventory.add_argument("--output-file", type=Path)
 
     args = parser.parse_args(argv)
     try:
@@ -336,13 +499,24 @@ def main(argv=None):
             print("Required data and certificate deletion protections remain enabled.")
         elif args.command == "inspect-plan":
             fingerprint, summary = validate_destroy_plan(
-                json.loads(args.plan_file.read_text(encoding="utf-8")), args.root, args.mode
+                json.loads(args.plan_file.read_text(encoding="utf-8")), args.root, args.mode,
+                json.loads(args.state_file.read_text(encoding="utf-8")), args.state_generation,
             )
             write_summary(args.summary_file, summary)
             if args.output_file:
                 with args.output_file.open("a", encoding="utf-8") as stream:
                     stream.write(f"fingerprint={fingerprint}\n")
             print(f"Destroy plan fingerprint: {fingerprint}")
+        elif args.command == "inventory":
+            fingerprint, summary = validate_state_inventory(
+                json.loads(args.state_file.read_text(encoding="utf-8")), args.root,
+                args.state_generation,
+            )
+            write_summary(args.summary_file, summary)
+            if args.output_file:
+                with args.output_file.open("a", encoding="utf-8") as stream:
+                    stream.write(f"fingerprint={fingerprint}\n")
+            print(f"State inventory fingerprint: {fingerprint}")
         return 0
     except (OSError, json.JSONDecodeError, ValueError, KeyError) as error:
         print(f"::error::{error}", file=sys.stderr)

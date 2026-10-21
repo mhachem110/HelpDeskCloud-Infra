@@ -35,13 +35,13 @@ scripts/dev_infra_guard.py and its extensive tests contain exact drift and recov
 
 ## State recovery readiness
 
-The manual Terraform State Health workflow checks the expected bucket, all three root prefixes, versioning, uniform bucket access, public access prevention, lifecycle rules, current object metadata and at least two state generations. Its reads establish bucket/object metadata access for the existing short-lived identity; it does not read state contents or prove write access for a future Apply. The audit was not run against GCP in this repository cleanup.
+The manual Terraform State Health workflow checks the expected bucket, all three root prefixes, versioning, uniform bucket access, public access prevention, lifecycle rules and current object metadata. One generation is reported as a valid new state with no recovery history yet; two or more generations are reported as an established state with verified object-version history. Its reads establish bucket/object metadata access for the existing short-lived identity; it does not read state contents or prove write access for a future Apply. The audit was not run against GCP in this repository cleanup.
 
 Keep state recovery independent from Terraform roots. Recommend a separately reviewed recovery bucket or backup process with object versioning, retention that exceeds the recovery window, documented generation references and a tested restore procedure. Do not implement bucket/IAM/lifecycle changes from this repository workflow.
 
 ## Future teardown and recovery order
 
-Terraform Dev Destroy is **implemented for future use — disabled for live destructive execution**. Its default is a manual plan-only inventory. The repository did not create `dev-infra-destroy`, set `DEV_DESTROY_ENABLED`, run the workflow or alter lifecycle protection. SQL deletion protection and certificate `prevent_destroy` remain active; the current guard rejects their execution until an owner separately reviews a safe data-retention and certificate decommission procedure.
+Terraform Dev Destroy is **implemented for future use — disabled for live destructive execution**. Its default is a manual preview. For `core` and `https-foundation`, the preview inventories current Terraform state, stable resource identities and retained protections; it does not run a destroy plan because Terraform's `prevent_destroy` rules can block one. The workflow rejects destroy mode for those roots and keeps SQL deletion protection and certificate `prevent_destroy` active. `https-access` can produce a real destroy plan with its discovered `backend_service_name` and configured `allowed_email`; execution still requires the separate fingerprint, recovery manifest, disabled-by-default opt-in and protected Environment. Fingerprints include resource type, address, stable identity and state object generation, Terraform lineage and serial. The repository did not create `dev-infra-destroy`, set `DEV_DESTROY_ENABLED`, run the workflow or alter lifecycle protection.
 
 Any future teardown needs a coordinated, separately authorized sequence:
 

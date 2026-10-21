@@ -28,7 +28,7 @@ The app repository's [rebuild runbook](https://github.com/mhachem110/HelpDeskClo
 
 ## Future teardown order
 
-This is a planning sequence, not authorization to remove the running Dev environment. The future-only Terraform Dev Destroy workflow defaults to a read-only plan and currently cannot delete protected SQL or certificate resources. Any teardown requires a separate owner-reviewed authorization, verified restore-tested backups, a protected `dev-infra-destroy` Environment and an explicit opt-in prepared outside this repository.
+This is a planning sequence, not authorization to remove the running Dev environment. The future-only Terraform Dev Destroy workflow defaults to an inventory preview for protected `core` and `https-foundation` roots, and a read-only destroy plan for `https-access`. It rejects destroy mode for roots with retained SQL or certificate protections. Any teardown requires a separately reviewed matching fingerprint, verified restore-tested backups, a protected `dev-infra-destroy` Environment and an explicit opt-in prepared outside this repository.
 
 1. Stop future application releases and database migrations; record the current image digests and workflow evidence.
 2. Preserve and verify Cloud SQL backups and application data. Complete a restore exercise before database removal.

@@ -93,16 +93,20 @@ def validate_bucket_metadata(bucket, versions_by_root, current_objects_by_root=N
             str(item.get("generation")) for item in objects
             if isinstance(item, dict) and str(item.get("generation", "")).isdigit()
         }
-        require(len(generations) >= 2,
-                f"Fewer than two state object generations are available for {root}")
+        require(bool(generations),
+                f"No state object generation is available for {root}")
         current_objects = current_objects_by_root or {}
         current = current_objects.get(root)
         require(isinstance(current, dict) and current.get("name") == expected_name
                 and str(current.get("generation", "")).isdigit(),
                 f"Current state object metadata is unreadable or unexpected for {root}")
+        require(str(current["generation"]) in generations,
+                f"Current state generation is missing from the version listing for {root}")
+        history = ("new state; no recovery history is available yet" if len(generations) == 1
+                   else f"established state; {len(generations)} generations provide recovery history")
         root_lines.append(
-            f"- `{root}`: {len(generations)} object generations listed; current generation "
-            f"{current['generation']} metadata readable; state contents not read."
+            f"- `{root}`: {history}; current generation {current['generation']} metadata readable; "
+            "state contents not read."
         )
 
     retention = bucket.get("retentionPolicy")
