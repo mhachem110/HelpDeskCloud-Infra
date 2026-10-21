@@ -107,6 +107,8 @@ def certificate_status_drift_plan():
     after = deepcopy(before)
     before["labels"] = None
     after["labels"] = {}
+    before["managed"][0]["state"] = "PROVISIONING"
+    after["managed"][0]["state"] = "ACTIVE"
     before["managed"][0]["authorization_attempt_info"] = [{
         "domain": LEGACY_HOST,
         "state": "FAILED",
@@ -145,6 +147,8 @@ def dynv6_certificate_status_drift_plan():
     after = deepcopy(before)
     before["labels"] = None
     after["labels"] = {}
+    before["managed"][0]["state"] = "PROVISIONING"
+    after["managed"][0]["state"] = "ACTIVE"
     before["managed"][0]["authorization_attempt_info"] = [{
         "domain": HOST, "state": "AUTHORIZING", "failure_reason": None,
     }]
@@ -411,6 +415,13 @@ class DevHttpsGuardTests(unittest.TestCase):
                 "authorization_attempt_info"][0][key] = value
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, expected):
                 guard.check_foundation(plan, HOST)
+
+    def test_managed_certificate_state_readback_rejects_unknown_enum(self):
+        plan = dynv6_certificate_status_drift_plan()
+        plan["resource_drift"][0]["change"]["after"]["managed"][0]["state"] = "UNRECOGNIZED"
+
+        with self.assertRaisesRegex(ValueError, "unknown state enum"):
+            guard.check_foundation(plan, HOST)
 
     def test_certificate_status_readback_accepts_empty_failure_reason_as_unset(self):
         plan = certificate_status_drift_plan()
