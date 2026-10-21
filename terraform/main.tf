@@ -1,5 +1,6 @@
-# Phase 5 creates the network only for Dev. Stage and Prod keep zero network instances.
-# Future environments can reuse the module with reviewed names and CIDRs.
+# One network module owns the VPC, subnet, secondary ranges and private services access.
+# GKE and private Cloud SQL consume these outputs; retaining its addresses preserves existing state.
+# Stage and Prod have inputs ready but intentionally create no network resources yet.
 module "dev_network" {
   count  = var.environment == "dev" ? 1 : 0
   source = "./modules/network"

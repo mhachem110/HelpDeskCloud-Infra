@@ -1,3 +1,5 @@
+# Grant only the approved account access to this exact backend; this is separate from the
+# Terraform service account's owner-approved project-level roles/iap.admin permission.
 resource "google_iap_web_backend_service_iam_member" "helpdesk_user" {
   project             = var.project_id
   web_backend_service = var.backend_service_name

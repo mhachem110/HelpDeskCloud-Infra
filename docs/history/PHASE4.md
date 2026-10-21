@@ -8,7 +8,9 @@ Phase 4 makes the infrastructure repository ready for reviewed Terraform changes
 
 The project `helpdeskcloud-capstone-511905` (number `260283083469`), state bucket `helpdeskcloud-tfstate-511905`, Workload Identity Pool `helpdesk-github`, provider `github-infra-dev`, and service account `helpdesk-terraform-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com` already exist. The service account has bucket-level Storage Object Admin and a working Workload Identity User binding. The [earlier OIDC test](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39076298011) proved GitHub authentication and bucket access on `dev`. This work does not alter those relationships.
 
-The provider maps GitHub's subject, repository, and ref claims. Its condition accepts only `mhachem110/HelpDeskCloud-Infra` on `refs/heads/dev`. The working immutable-subject identity is `repo:mhachem110@150286776/HelpDeskCloud-Infra@1423008553:ref:refs/heads/dev`. An older non-immutable binding may still exist; its removal needs a separate IAM audit. Phase 4 does not change IAM.
+The provider maps GitHub's subject, repository, and ref claims. Its condition accepts only `mhachem110/HelpDeskCloud-Infra` on `refs/heads/dev`. The working immutable-subject identity is `repo:mhachem110@150286776/HelpDeskCloud-Infra@1423008553:ref:refs/heads/dev`. An older non-immutable binding may still exist; its removal needs a separate IAM audit. Phase 4 did not change IAM.
+
+The standalone `oidc-test.yml` and `terraform-dev-backend.yml` checks described in the original phase were later retired. The retained manual Dev Plan workflow now proves OIDC authentication, initializes the existing state and exercises Terraform validation; Terraform CI validates all three roots without live credentials.
 
 ## Architecture and authentication flow
 

@@ -1,8 +1,9 @@
 # Enable Certificate Manager and IAP once through the project bootstrap identity.
 # The routine Terraform identity intentionally has no serviceusage.services.enable permission.
 
+# The original FreeDNS certificate resources are deprecated but remain state-managed and protected.
+# They share the certificate map with the active dynv6 entry; retire them only in a reviewed change.
 locals {
-  # Keep the already-created FreeDNS foundation intact until the dynv6 certificate is verified.
   legacy_hostname = "helpdeskcloud.chickenkiller.com"
 }
 
@@ -81,6 +82,7 @@ resource "google_certificate_manager_certificate_map_entry" "https" {
   }
 }
 
+# Active hostname resources for helpdeskcloud.dynv6.net. Keep the legacy resources above intact.
 resource "google_certificate_manager_dns_authorization" "dynv6" {
   project     = var.project_id
   name        = "helpdesk-dev-https-dynv6-dns-auth"
