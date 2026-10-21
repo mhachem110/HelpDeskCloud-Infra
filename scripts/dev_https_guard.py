@@ -116,6 +116,13 @@ def check_provider_readback_drift(drift, expected):
     missing = object()
     for item in drift:
         address = item.get("address")
+        if address == "google_certificate_manager_certificate_map_entry.https":
+            require(address in expected and expected[address] == "google_certificate_manager_certificate_map_entry",
+                    f"unexpected prior-state drift exists in the HTTPS root: {describe_drift(item)}")
+            check_certificate_map_entry_readback_drift(item)
+            require(address not in seen, "duplicate provider readback drift resource")
+            seen.add(address)
+            continue
         if address in CERTIFICATE_READBACK_HOSTNAMES:
             require(address in expected and expected[address] == CERTIFICATE_READBACK_TYPE,
                     f"unexpected prior-state drift exists in the HTTPS root: {describe_drift(item)}")
@@ -146,6 +153,36 @@ def check_provider_readback_drift(drift, expected):
                 f"expected only {field}={before_value!r}->{after_value!r}; {describe_drift(item)}")
         require(address not in seen, "duplicate provider readback drift resource")
         seen.add(address)
+
+
+def check_certificate_map_entry_readback_drift(item):
+    """Allow only the observed output-state and labels refresh for the retained legacy entry."""
+    require(item.get("mode", "managed") == "managed" and
+            item.get("type") == "google_certificate_manager_certificate_map_entry",
+            f"provider readback drift is on an unexpected certificate map entry type: {describe_drift(item)}")
+    change = item.get("change", {})
+    require(change.get("actions") == ["update"],
+            f"certificate map entry readback drift must be a refresh-only update: {describe_drift(item)}")
+    before = change.get("before")
+    after = change.get("after")
+    require(isinstance(before, dict) and isinstance(after, dict),
+            f"certificate map entry readback drift is missing before/after values: {describe_drift(item)}")
+    differences = list(_drift_differences(before, after))
+    require({path for path, _, _ in differences} == {"labels", "state"},
+            f"certificate map entry readback may change only labels and serving state: {describe_drift(item)}")
+    for values in (before, after):
+        require(values.get("project") == PROJECT and
+                values.get("name") == "helpdesk-dev-https-host" and
+                values.get("map") == "helpdesk-dev-https-map" and
+                values.get("hostname") == LEGACY_HOSTNAME and
+                values.get("certificates") == [
+                    f"projects/{PROJECT}/locations/global/certificates/helpdesk-dev-https-certificate"],
+                "certificate map entry readback drift must remain on the exact retained legacy entry")
+    values_by_path = {path: (left, right) for path, left, right in differences}
+    require(values_by_path["labels"] == (None, {}),
+            "certificate map entry labels readback must be exactly null-to-empty")
+    require(values_by_path["state"] == ("PENDING", "ACTIVE"),
+            "certificate map entry serving state readback must be exactly PENDING-to-ACTIVE")
 
 
 def _drift_differences(left, right, path=""):

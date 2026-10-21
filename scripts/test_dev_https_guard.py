@@ -275,6 +275,52 @@ class DevHttpsGuardTests(unittest.TestCase):
 
         guard.check_foundation(plan, HOST)
 
+    def test_legacy_certificate_map_entry_accepts_exact_serving_state_readback(self):
+        plan = partial_foundation_plan()
+        values = deepcopy(next(resource["values"] for resource in
+                               plan["planned_values"]["root_module"]["resources"]
+                               if resource["address"] == "google_certificate_manager_certificate_map_entry.https"))
+        before = deepcopy(values)
+        after = deepcopy(values)
+        before.update(labels=None, state="PENDING")
+        after.update(labels={}, state="ACTIVE")
+        plan["resource_drift"] = [{
+            "address": "google_certificate_manager_certificate_map_entry.https",
+            "mode": "managed",
+            "type": "google_certificate_manager_certificate_map_entry",
+            "change": {"actions": ["update"], "before": before, "after": after},
+        }]
+
+        guard.check_foundation(plan, HOST)
+
+    def test_legacy_certificate_map_entry_readback_rejects_unexpected_transitions(self):
+        mutations = (
+            ("state", "FAILED", "PENDING-to-ACTIVE"),
+            ("labels", {"unexpected": "label"}, "labels readback"),
+            ("hostname", "other.example.test", "exact retained legacy entry"),
+        )
+        for field, value, message in mutations:
+            plan = partial_foundation_plan()
+            values = deepcopy(next(resource["values"] for resource in
+                                   plan["planned_values"]["root_module"]["resources"]
+                                   if resource["address"] == "google_certificate_manager_certificate_map_entry.https"))
+            before = deepcopy(values)
+            after = deepcopy(values)
+            before.update(labels=None, state="PENDING")
+            after.update(labels={}, state="ACTIVE")
+            if field == "hostname":
+                before[field] = after[field] = value
+            else:
+                after[field] = value
+            plan["resource_drift"] = [{
+                "address": "google_certificate_manager_certificate_map_entry.https",
+                "mode": "managed",
+                "type": "google_certificate_manager_certificate_map_entry",
+                "change": {"actions": ["update"], "before": before, "after": after},
+            }]
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, message):
+                guard.check_foundation(plan, HOST)
+
     def test_certificate_output_only_dns_status_and_labels_readback_are_allowed(self):
         guard.check_foundation(certificate_status_drift_plan(), HOST)
 
