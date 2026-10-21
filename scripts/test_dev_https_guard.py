@@ -13,6 +13,10 @@ HOST = guard.DYNV6_HOSTNAME
 LEGACY_HOST = guard.LEGACY_HOSTNAME
 EMAIL = "owner@example.test"
 BACKEND = "gkegw1-q0h0-helpdesk-dev-helpdesk-helpdesk-80-3xnr96g2yybt"
+TARGET_PROXY = (
+    f"//compute.googleapis.com/projects/{guard.PROJECT_NUMBER}/global/targetHttpsProxies/"
+    "gkegw1-q0h0-helpdesk-dev-helpdesk-dev-https-abc123xyz789"
+)
 
 
 def foundation_plan(action=("create",)):
@@ -169,6 +173,34 @@ def dynv6_certificate_status_drift_plan():
     return plan
 
 
+def certificate_map_target_drift_plan():
+    """Model Certificate Manager reporting the live HTTPS Gateway attachment."""
+    plan = foundation_plan(("no-op",))
+    plan["prior_state"]["values"]["root_module"]["resources"] = deepcopy(
+        plan["planned_values"]["root_module"]["resources"]
+    )
+    map_change = next(change for change in plan["resource_changes"]
+                      if change["address"] == "google_certificate_manager_certificate_map.https")
+    before = deepcopy(map_change["change"]["after"])
+    after = deepcopy(before)
+    before.update(labels=None, update_time="2026-10-20T23:13:16.622182484Z")
+    after.update(
+        labels={},
+        update_time="2026-10-21T02:22:04.948473077Z",
+        gclb_targets=[{
+            "ip_configs": [{"ip_address": guard.HTTPS_STATIC_IP, "ports": [443]}],
+            "target_https_proxy": TARGET_PROXY,
+        }],
+    )
+    plan["resource_drift"] = [{
+        "address": "google_certificate_manager_certificate_map.https",
+        "mode": "managed",
+        "type": "google_certificate_manager_certificate_map",
+        "change": {"actions": ["update"], "before": before, "after": after},
+    }]
+    return plan
+
+
 def access_plan(action=("create",)):
     values = {"project": guard.PROJECT, "web_backend_service": BACKEND,
               "role": "roles/iap.httpsResourceAccessor", "member": f"user:{EMAIL}"}
@@ -270,11 +302,21 @@ class DevHttpsGuardTests(unittest.TestCase):
 
     def test_certificate_map_accepts_only_null_to_empty_label_readback(self):
         plan = foundation_plan(("no-op",))
+        target = {
+            "ip_configs": [{"ip_address": guard.HTTPS_STATIC_IP, "ports": [443]}],
+            "target_https_proxy": TARGET_PROXY,
+        }
         plan["resource_drift"] = [{
             "address": "google_certificate_manager_certificate_map.https",
             "mode": "managed",
             "type": "google_certificate_manager_certificate_map",
-            "change": {"actions": ["update"], "before": {"labels": None}, "after": {"labels": {}}},
+            "change": {
+                "actions": ["update"],
+                "before": {"project": guard.PROJECT, "name": "helpdesk-dev-https-map",
+                           "labels": None, "gclb_targets": [target]},
+                "after": {"project": guard.PROJECT, "name": "helpdesk-dev-https-map",
+                          "labels": {}, "gclb_targets": [target]},
+            },
         }]
 
         guard.check_foundation(plan, HOST)
@@ -381,6 +423,50 @@ class DevHttpsGuardTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "only an exact create or no-op is allowed"):
             guard.check_foundation(plan, HOST)
+
+    def test_certificate_map_accepts_exact_live_gateway_target_readback(self):
+        guard.check_foundation(certificate_map_target_drift_plan(), HOST)
+
+    def test_certificate_map_readback_rejects_other_targets_or_material_changes(self):
+        def mutate_ip(plan):
+            plan["resource_drift"][0]["change"]["after"]["gclb_targets"][0][
+                "ip_configs"][0]["ip_address"] = "34.8.56.209"
+
+        def mutate_port(plan):
+            plan["resource_drift"][0]["change"]["after"]["gclb_targets"][0][
+                "ip_configs"][0]["ports"] = [80, 443]
+
+        def mutate_proxy_project(plan):
+            plan["resource_drift"][0]["change"]["after"]["gclb_targets"][0][
+                "target_https_proxy"] = TARGET_PROXY.replace(guard.PROJECT_NUMBER, "999999999999")
+
+        def mutate_proxy_gateway(plan):
+            plan["resource_drift"][0]["change"]["after"]["gclb_targets"][0][
+                "target_https_proxy"] = TARGET_PROXY.replace("helpdesk-dev-https", "other-gateway")
+
+        def add_second_target(plan):
+            plan["resource_drift"][0]["change"]["after"]["gclb_targets"].append(
+                deepcopy(plan["resource_drift"][0]["change"]["after"]["gclb_targets"][0]))
+
+        def change_map_description(plan):
+            plan["resource_drift"][0]["change"]["after"]["description"] = "unreviewed"
+
+        for name, mutate in (
+            ("IP", mutate_ip), ("port", mutate_port), ("proxy project", mutate_proxy_project),
+            ("proxy Gateway", mutate_proxy_gateway), ("extra target", add_second_target),
+            ("map description", change_map_description),
+        ):
+            plan = certificate_map_target_drift_plan()
+            mutate(plan)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                guard.check_foundation(plan, HOST)
+
+    def test_certificate_map_readback_rejects_target_removal_or_backward_timestamp(self):
+        for field, value in (("gclb_targets", []), ("update_time", "2026-10-20T20:00:00Z")):
+            plan = certificate_map_target_drift_plan()
+            plan["resource_drift"][0]["change"]["after"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                guard.check_foundation(plan, HOST)
 
     def test_certificate_output_only_dns_status_and_labels_readback_are_allowed(self):
         guard.check_foundation(certificate_status_drift_plan(), HOST)
