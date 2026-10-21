@@ -277,9 +277,15 @@ class DevHttpsGuardTests(unittest.TestCase):
 
     def test_legacy_certificate_map_entry_accepts_exact_serving_state_readback(self):
         plan = partial_foundation_plan()
-        values = deepcopy(next(resource["values"] for resource in
-                               plan["planned_values"]["root_module"]["resources"]
-                               if resource["address"] == "google_certificate_manager_certificate_map_entry.https"))
+        entry = next(resource for resource in plan["planned_values"]["root_module"]["resources"]
+                     if resource["address"] == "google_certificate_manager_certificate_map_entry.https")
+        entry_change = next(change for change in plan["resource_changes"]
+                            if change["address"] == "google_certificate_manager_certificate_map_entry.https")
+        certificate_ref = entry["values"]["certificates"][0]
+        canonical_ref = f"//certificatemanager.googleapis.com/{certificate_ref}"
+        entry["values"]["certificates"] = [canonical_ref]
+        entry_change["change"]["after"]["certificates"] = [canonical_ref]
+        values = deepcopy(entry["values"])
         before = deepcopy(values)
         after = deepcopy(values)
         before.update(labels=None, state="PENDING")
@@ -320,6 +326,15 @@ class DevHttpsGuardTests(unittest.TestCase):
             }]
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, message):
                 guard.check_foundation(plan, HOST)
+
+    def test_legacy_map_entry_readback_does_not_allow_a_resource_update(self):
+        plan = partial_foundation_plan()
+        entry = next(change for change in plan["resource_changes"]
+                     if change["address"] == "google_certificate_manager_certificate_map_entry.https")
+        entry["change"]["actions"] = ["update"]
+
+        with self.assertRaisesRegex(ValueError, "only an exact create or no-op is allowed"):
+            guard.check_foundation(plan, HOST)
 
     def test_certificate_output_only_dns_status_and_labels_readback_are_allowed(self):
         guard.check_foundation(certificate_status_drift_plan(), HOST)
