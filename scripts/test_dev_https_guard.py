@@ -12,7 +12,7 @@ spec.loader.exec_module(guard)
 HOST = guard.DYNV6_HOSTNAME
 LEGACY_HOST = guard.LEGACY_HOSTNAME
 EMAIL = "owner@example.test"
-BACKEND = "gkegw-helpdesk-helpdesk"
+BACKEND = "gkegw1-q0h0-helpdesk-dev-helpdesk-helpdesk-80-3xnr96g2yybt"
 
 
 def foundation_plan(action=("create",)):
