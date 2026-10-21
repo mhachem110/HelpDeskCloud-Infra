@@ -96,14 +96,14 @@ def check_actions(plan, expected):
         actions = change.get("change", {}).get("actions", [])
         require(actions in (["create"], ["no-op"]),
                 "only an exact create or no-op is allowed; updates, deletes and replacements require review")
-    check_provider_readback_drift(plan.get("resource_drift", []), expected)
+    check_provider_readback_drift(plan.get("resource_drift", []), expected, plan)
     prior = plan.get("prior_state", {}).get("values", {}).get("root_module", {}).get("resources", [])
     require(all(item.get("address") in expected for item in prior),
             "prior state contains an unexpected address")
     return by_address
 
 
-def check_provider_readback_drift(drift, expected):
+def check_provider_readback_drift(drift, expected, plan):
     """Allow only confirmed provider readback differences that cannot change config.
 
     Terraform 1.16.2 with google provider 7.8.0 reports labels/custom_features as
@@ -114,12 +114,17 @@ def check_provider_readback_drift(drift, expected):
     """
     seen = set()
     missing = object()
+    planned_resources = {
+        item.get("address"): item.get("values", {})
+        for item in plan.get("planned_values", {}).get("root_module", {}).get("resources", [])
+        if item.get("mode", "managed") == "managed"
+    }
     for item in drift:
         address = item.get("address")
         if address == "google_certificate_manager_certificate_map_entry.https":
             require(address in expected and expected[address] == "google_certificate_manager_certificate_map_entry",
                     f"unexpected prior-state drift exists in the HTTPS root: {describe_drift(item)}")
-            check_certificate_map_entry_readback_drift(item)
+            check_certificate_map_entry_readback_drift(item, planned_resources.get(address, {}))
             require(address not in seen, "duplicate provider readback drift resource")
             seen.add(address)
             continue
@@ -155,7 +160,7 @@ def check_provider_readback_drift(drift, expected):
         seen.add(address)
 
 
-def check_certificate_map_entry_readback_drift(item):
+def check_certificate_map_entry_readback_drift(item, planned_entry):
     """Allow only the observed output-state and labels refresh for the retained legacy entry."""
     require(item.get("mode", "managed") == "managed" and
             item.get("type") == "google_certificate_manager_certificate_map_entry",
@@ -170,16 +175,14 @@ def check_certificate_map_entry_readback_drift(item):
     differences = list(_drift_differences(before, after))
     require({path for path, _, _ in differences} == {"labels", "state"},
             f"certificate map entry readback may change only labels and serving state: {describe_drift(item)}")
+    require(planned_entry.get("project") == PROJECT and
+            planned_entry.get("name") == "helpdesk-dev-https-host" and
+            planned_entry.get("map") == "helpdesk-dev-https-map" and
+            planned_entry.get("hostname") == LEGACY_HOSTNAME,
+            "planned drift target must remain the exact retained legacy entry")
     for values in (before, after):
-        certificates = values.get("certificates")
-        expected_certificate = (
-            f"projects/{PROJECT}/locations/global/certificates/helpdesk-dev-https-certificate")
-        require(values.get("project") == PROJECT and
-                values.get("name") == "helpdesk-dev-https-host" and
-                values.get("map") == "helpdesk-dev-https-map" and
-                values.get("hostname") == LEGACY_HOSTNAME and
-                isinstance(certificates, list) and len(certificates) == 1 and
-                isinstance(certificates[0], str) and expected_certificate in certificates[0],
+        require(all(values.get(field, _MISSING) == planned_entry.get(field, _MISSING)
+                    for field in ("project", "name", "map", "hostname", "certificates")),
                 "certificate map entry readback drift must remain on the exact retained legacy entry")
     values_by_path = {path: (left, right) for path, left, right in differences}
     require(values_by_path["labels"] == (None, {}),
