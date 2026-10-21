@@ -201,7 +201,7 @@ def check_certificate_map_entry_readback_drift(item, planned_entry, expected_nam
             f"certificate map entry readback drift is missing before/after values: {describe_drift(item)}")
     differences = list(_drift_differences(before, after))
     changed_fields = {path for path, _, _ in differences}
-    require(changed_fields in ({"labels", "state"}, {"labels", "state", "update_time"}),
+    require(changed_fields in ({"labels", "state"}, {"labels", "state", "update_time"}, {"update_time"}),
             f"certificate map entry readback may change only labels, serving state, and update_time: "
             f"{describe_drift(item)}")
     require(planned_entry.get("project") == PROJECT and
@@ -213,12 +213,20 @@ def check_certificate_map_entry_readback_drift(item, planned_entry, expected_nam
         require(all(values.get(field, _MISSING) == planned_entry.get(field, _MISSING)
                     for field in ("project", "name", "map", "hostname", "certificates")),
                 "certificate map entry readback drift must remain on the exact reviewed entry")
-    values_by_path = {path: (left, right) for path, left, right in differences}
-    require(values_by_path["labels"] == (None, {}),
-            "certificate map entry labels readback must be exactly null-to-empty")
-    require(values_by_path["state"] == ("PENDING", "ACTIVE"),
-            "certificate map entry serving state readback must be exactly PENDING-to-ACTIVE")
+    if "labels" in changed_fields:
+        values_by_path = {path: (left, right) for path, left, right in differences}
+        require(values_by_path["labels"] == (None, {}),
+                "certificate map entry labels readback must be exactly null-to-empty")
+    before_state = before.get("state", _MISSING)
+    after_state = after.get("state", _MISSING)
+    if "state" in changed_fields:
+        require((before_state, after_state) == ("PENDING", "ACTIVE"),
+                "certificate map entry serving state readback must be exactly PENDING-to-ACTIVE")
+    else:
+        require(before_state == after_state == "ACTIVE",
+                "certificate map entry update_time readback must retain ACTIVE serving state")
     if "update_time" in changed_fields:
+        values_by_path = {path: (left, right) for path, left, right in differences}
         previous_time = _parse_certificate_map_update_time(values_by_path["update_time"][0])
         current_time = _parse_certificate_map_update_time(values_by_path["update_time"][1])
         require(current_time >= previous_time,

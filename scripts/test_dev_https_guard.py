@@ -451,6 +451,24 @@ class DevHttpsGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "move forward"):
             guard.check_foundation(plan, HOST)
 
+    def test_active_map_entries_accept_only_forward_timestamp_readback(self):
+        for address in guard.CERTIFICATE_MAP_ENTRY_READBACKS:
+            plan = certificate_map_entry_status_drift_plan(address)
+            before = plan["resource_drift"][0]["change"]["before"]
+            after = plan["resource_drift"][0]["change"]["after"]
+            before.update(labels={}, state="ACTIVE")
+            after.update(labels={}, state="ACTIVE")
+            with self.subTest(address=address):
+                guard.check_foundation(plan, HOST)
+
+        plan = certificate_map_entry_status_drift_plan()
+        before = plan["resource_drift"][0]["change"]["before"]
+        after = plan["resource_drift"][0]["change"]["after"]
+        before.update(labels={}, state="PENDING")
+        after.update(labels={}, state="PENDING")
+        with self.assertRaisesRegex(ValueError, "retain ACTIVE serving state"):
+            guard.check_foundation(plan, HOST)
+
     def test_legacy_map_entry_readback_does_not_allow_a_resource_update(self):
         plan = partial_foundation_plan()
         entry = next(change for change in plan["resource_changes"]
