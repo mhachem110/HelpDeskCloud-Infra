@@ -544,24 +544,33 @@ jobs:
             gcloud compute addresses describe helpdesk-dev-https-ip --global --project=helpdeskcloud-capstone-511905
           describe_with_retry 'HTTPS SSL policy' "$RUNNER_TEMP/https-ssl-policy.json" \
             gcloud compute ssl-policies describe helpdesk-dev-https-tls --project=helpdeskcloud-capstone-511905
-          describe_with_retry 'Certificate Manager DNS authorization' "$RUNNER_TEMP/https-dns-auth.json" \
+          describe_with_retry 'Retained legacy Certificate Manager DNS authorization' "$RUNNER_TEMP/https-legacy-dns-auth.json" \
             gcloud certificate-manager dns-authorizations describe helpdesk-dev-https-dns-auth --location=global --project=helpdeskcloud-capstone-511905
-          describe_with_retry 'managed HTTPS certificate' "$RUNNER_TEMP/https-certificate.json" \
+          describe_with_retry 'Retained legacy managed HTTPS certificate' "$RUNNER_TEMP/https-legacy-certificate.json" \
             gcloud certificate-manager certificates describe helpdesk-dev-https-certificate --location=global --project=helpdeskcloud-capstone-511905
+          describe_with_retry 'New dynv6 Certificate Manager DNS authorization' "$RUNNER_TEMP/https-dynv6-dns-auth.json" \
+            gcloud certificate-manager dns-authorizations describe helpdesk-dev-https-dynv6-dns-auth --location=global --project=helpdeskcloud-capstone-511905
+          describe_with_retry 'New dynv6 managed HTTPS certificate' "$RUNNER_TEMP/https-dynv6-certificate.json" \
+            gcloud certificate-manager certificates describe helpdesk-dev-https-dynv6-certificate --location=global --project=helpdeskcloud-capstone-511905
           describe_with_retry 'HTTPS certificate map' "$RUNNER_TEMP/https-certificate-map.json" \
             gcloud certificate-manager maps describe helpdesk-dev-https-map --location=global --project=helpdeskcloud-capstone-511905
-          describe_with_retry 'HTTPS certificate map entry' "$RUNNER_TEMP/https-certificate-map-entry.json" \
+          describe_with_retry 'Retained legacy HTTPS certificate map entry' "$RUNNER_TEMP/https-legacy-certificate-map-entry.json" \
             gcloud certificate-manager maps entries describe helpdesk-dev-https-host --map=helpdesk-dev-https-map --location=global --project=helpdeskcloud-capstone-511905
+          describe_with_retry 'New dynv6 HTTPS certificate map entry' "$RUNNER_TEMP/https-dynv6-certificate-map-entry.json" \
+            gcloud certificate-manager maps entries describe helpdesk-dev-https-dynv6-host --map=helpdesk-dev-https-map --location=global --project=helpdeskcloud-capstone-511905
 
           terraform -chdir=https-foundation state pull > "$RUNNER_TEMP/https-foundation-state.json"
           python ../scripts/dev_https_verify_foundation.py \
             --project-file "$RUNNER_TEMP/https-project.json" \
             --address-file "$RUNNER_TEMP/https-address.json" \
             --ssl-policy-file "$RUNNER_TEMP/https-ssl-policy.json" \
-            --dns-authorization-file "$RUNNER_TEMP/https-dns-auth.json" \
-            --certificate-file "$RUNNER_TEMP/https-certificate.json" \
+            --legacy-dns-authorization-file "$RUNNER_TEMP/https-legacy-dns-auth.json" \
+            --legacy-certificate-file "$RUNNER_TEMP/https-legacy-certificate.json" \
+            --legacy-map-entry-file "$RUNNER_TEMP/https-legacy-certificate-map-entry.json" \
+            --dns-authorization-file "$RUNNER_TEMP/https-dynv6-dns-auth.json" \
+            --certificate-file "$RUNNER_TEMP/https-dynv6-certificate.json" \
             --certificate-map-file "$RUNNER_TEMP/https-certificate-map.json" \
-            --map-entry-file "$RUNNER_TEMP/https-certificate-map-entry.json" \
+            --map-entry-file "$RUNNER_TEMP/https-dynv6-certificate-map-entry.json" \
             --terraform-state-file "$RUNNER_TEMP/https-foundation-state.json" \
             --project-id helpdeskcloud-capstone-511905 \
             --hostname "$HTTPS_HOSTNAME" \

@@ -9,6 +9,8 @@ from pathlib import Path
 
 
 PROJECT = "helpdeskcloud-capstone-511905"
+LEGACY_HOSTNAME = "helpdeskcloud.chickenkiller.com"
+DYNV6_HOSTNAME = "helpdeskcloud.dynv6.net"
 FOUNDATION = {
     "google_compute_global_address.https": "google_compute_global_address",
     "google_compute_ssl_policy.https": "google_compute_ssl_policy",
@@ -16,6 +18,9 @@ FOUNDATION = {
     "google_certificate_manager_certificate.https": "google_certificate_manager_certificate",
     "google_certificate_manager_certificate_map.https": "google_certificate_manager_certificate_map",
     "google_certificate_manager_certificate_map_entry.https": "google_certificate_manager_certificate_map_entry",
+    "google_certificate_manager_dns_authorization.dynv6": "google_certificate_manager_dns_authorization",
+    "google_certificate_manager_certificate.dynv6": "google_certificate_manager_certificate",
+    "google_certificate_manager_certificate_map_entry.dynv6": "google_certificate_manager_certificate_map_entry",
 }
 ACCESS = {
     "google_iap_web_backend_service_iam_member.helpdesk_user": "google_iap_web_backend_service_iam_member",
@@ -24,8 +29,11 @@ PROVIDER_READBACK_DRIFT = {
     "google_compute_global_address.https": ("google_compute_global_address", "labels", None, {}),
     "google_compute_ssl_policy.https": ("google_compute_ssl_policy", "custom_features", None, []),
 }
-CERTIFICATE_READBACK_ADDRESS = "google_certificate_manager_certificate.https"
 CERTIFICATE_READBACK_TYPE = "google_certificate_manager_certificate"
+CERTIFICATE_READBACK_HOSTNAMES = {
+    "google_certificate_manager_certificate.https": LEGACY_HOSTNAME,
+    "google_certificate_manager_certificate.dynv6": DYNV6_HOSTNAME,
+}
 CERTIFICATE_STATUS_FIELDS = {
     "managed[0].authorization_attempt_info[0].state": {
         "STATE_UNSPECIFIED", "AUTHORIZING", "AUTHORIZED", "FAILED",
@@ -64,7 +72,7 @@ def resource_values(plan, expected, mode="managed"):
     return by_address
 
 
-def check_actions(plan, expected, certificate_hostname=None):
+def check_actions(plan, expected):
     changes = plan.get("resource_changes", [])
     managed = [item for item in changes if item.get("mode", "managed") == "managed"]
     by_address = {item.get("address"): item for item in managed}
@@ -75,14 +83,14 @@ def check_actions(plan, expected, certificate_hostname=None):
         actions = change.get("change", {}).get("actions", [])
         require(actions in (["create"], ["no-op"]),
                 "only an exact create or no-op is allowed; updates, deletes and replacements require review")
-    check_provider_readback_drift(plan.get("resource_drift", []), expected, certificate_hostname)
+    check_provider_readback_drift(plan.get("resource_drift", []), expected)
     prior = plan.get("prior_state", {}).get("values", {}).get("root_module", {}).get("resources", [])
     require(all(item.get("address") in expected for item in prior),
             "prior state contains an unexpected address")
     return by_address
 
 
-def check_provider_readback_drift(drift, expected, certificate_hostname=None):
+def check_provider_readback_drift(drift, expected):
     """Allow only confirmed provider readback differences that cannot change config.
 
     Terraform 1.16.2 with google provider 7.8.0 reports labels/custom_features as
@@ -95,12 +103,10 @@ def check_provider_readback_drift(drift, expected, certificate_hostname=None):
     missing = object()
     for item in drift:
         address = item.get("address")
-        if address == CERTIFICATE_READBACK_ADDRESS:
+        if address in CERTIFICATE_READBACK_HOSTNAMES:
             require(address in expected and expected[address] == CERTIFICATE_READBACK_TYPE,
                     f"unexpected prior-state drift exists in the HTTPS root: {describe_drift(item)}")
-            require(certificate_hostname is not None,
-                    "certificate status drift requires the exact reviewed hostname")
-            check_certificate_status_readback_drift(item, certificate_hostname)
+            check_certificate_status_readback_drift(item, CERTIFICATE_READBACK_HOSTNAMES[address])
             require(address not in seen, "duplicate provider readback drift resource")
             seen.add(address)
             continue
@@ -284,8 +290,10 @@ def configuration_expressions(plan, address):
 
 
 def check_foundation(plan, hostname):
+    require(hostname == DYNV6_HOSTNAME,
+            "HTTPS foundation migration is scoped only to the reviewed dynv6 hostname")
     values = resource_values(plan, FOUNDATION)
-    changes = check_actions(plan, FOUNDATION, hostname)
+    changes = check_actions(plan, FOUNDATION)
     address = changes["google_compute_global_address.https"].get("change", {}).get("after") or values[
         "google_compute_global_address.https"]["values"]
     # The provider returns an empty ip_version for a global IPv4 reservation.
@@ -317,41 +325,66 @@ def check_foundation(plan, hostname):
             ssl.get("profile") == "MODERN" and ssl.get("min_tls_version") == "TLS_1_2",
             "TLS policy must require TLS 1.2 and the exact MODERN profile")
 
-    dns = changes["google_certificate_manager_dns_authorization.https"].get("change", {}).get("after") or values[
-        "google_certificate_manager_dns_authorization.https"]["values"]
-    require(dns.get("project") == PROJECT and dns.get("name") == "helpdesk-dev-https-dns-auth" and
-            dns.get("location") == "global" and dns.get("domain") == hostname,
-            "DNS authorization must target only the supplied hostname")
+    def resource_after(address):
+        return changes[address].get("change", {}).get("after") or values[address]["values"]
 
-    certificate = changes["google_certificate_manager_certificate.https"].get("change", {}).get("after") or values[
-        "google_certificate_manager_certificate.https"]["values"]
-    managed = certificate.get("managed") or []
-    require(certificate.get("project") == PROJECT and certificate.get("name") ==
-            "helpdesk-dev-https-certificate" and certificate.get("location") == "global" and
-            len(managed) == 1 and managed[0].get("domains") == [hostname],
-            "managed certificate must cover only the supplied hostname")
+    legacy_dns = resource_after("google_certificate_manager_dns_authorization.https")
+    require(legacy_dns.get("project") == PROJECT and
+            legacy_dns.get("name") == "helpdesk-dev-https-dns-auth" and
+            legacy_dns.get("location") == "global" and legacy_dns.get("domain") == LEGACY_HOSTNAME,
+            "legacy DNS authorization must remain unchanged on the existing hostname")
+
+    dynv6_dns = resource_after("google_certificate_manager_dns_authorization.dynv6")
+    require(dynv6_dns.get("project") == PROJECT and
+            dynv6_dns.get("name") == "helpdesk-dev-https-dynv6-dns-auth" and
+            dynv6_dns.get("location") == "global" and dynv6_dns.get("domain") == DYNV6_HOSTNAME,
+            "new DNS authorization must target only helpdeskcloud.dynv6.net")
+
+    legacy_certificate = resource_after("google_certificate_manager_certificate.https")
+    legacy_managed = legacy_certificate.get("managed") or []
+    require(legacy_certificate.get("project") == PROJECT and
+            legacy_certificate.get("name") == "helpdesk-dev-https-certificate" and
+            legacy_certificate.get("location") == "global" and len(legacy_managed) == 1 and
+            legacy_managed[0].get("domains") == [LEGACY_HOSTNAME],
+            "legacy managed certificate must remain unchanged on the existing hostname")
     require("google_certificate_manager_dns_authorization.https.id" in configuration_references(
         plan, "google_certificate_manager_certificate.https", ["managed", 0, "dns_authorizations"]),
-        "managed certificate must reference only the reviewed DNS authorization")
+        "legacy certificate must continue referencing only the retained legacy DNS authorization")
+
+    certificate = resource_after("google_certificate_manager_certificate.dynv6")
+    managed = certificate.get("managed") or []
+    require(certificate.get("project") == PROJECT and
+            certificate.get("name") == "helpdesk-dev-https-dynv6-certificate" and
+            certificate.get("location") == "global" and len(managed) == 1 and
+            managed[0].get("domains") == [DYNV6_HOSTNAME],
+            "new managed certificate must cover only helpdeskcloud.dynv6.net")
+    require("google_certificate_manager_dns_authorization.dynv6.id" in configuration_references(
+        plan, "google_certificate_manager_certificate.dynv6", ["managed", 0, "dns_authorizations"]),
+        "new certificate must reference only the reviewed dynv6 DNS authorization")
 
     cert_map = changes["google_certificate_manager_certificate_map.https"].get("change", {}).get("after") or values[
         "google_certificate_manager_certificate_map.https"]["values"]
     require(cert_map.get("project") == PROJECT and cert_map.get("name") == "helpdesk-dev-https-map",
             "Certificate Manager map is outside the reviewed scope")
 
-    entry = changes["google_certificate_manager_certificate_map_entry.https"].get("change", {}).get("after") or values[
-        "google_certificate_manager_certificate_map_entry.https"]["values"]
-    require(entry.get("project") == PROJECT and entry.get("name") == "helpdesk-dev-https-host" and
-            entry.get("map") == "helpdesk-dev-https-map" and entry.get("hostname") == hostname,
-            "Certificate Manager map entry must match only the supplied hostname")
-    certs = entry.get("certificates") or []
-    if len(certs) == 1 and isinstance(certs[0], str):
-        require("helpdesk-dev-https-certificate" in certs[0],
-                "Certificate Manager map entry must reference the reviewed managed certificate")
-    else:
-        require("google_certificate_manager_certificate.https.id" in configuration_references(
-            plan, "google_certificate_manager_certificate_map_entry.https", ["certificates"]),
-            "Certificate Manager map entry must reference the reviewed managed certificate")
+    for address, name, expected_hostname, certificate_address, certificate_name in (
+        ("google_certificate_manager_certificate_map_entry.https", "helpdesk-dev-https-host",
+         LEGACY_HOSTNAME, "google_certificate_manager_certificate.https", "helpdesk-dev-https-certificate"),
+        ("google_certificate_manager_certificate_map_entry.dynv6", "helpdesk-dev-https-dynv6-host",
+         DYNV6_HOSTNAME, "google_certificate_manager_certificate.dynv6", "helpdesk-dev-https-dynv6-certificate"),
+    ):
+        entry = resource_after(address)
+        require(entry.get("project") == PROJECT and entry.get("name") == name and
+                entry.get("map") == "helpdesk-dev-https-map" and entry.get("hostname") == expected_hostname,
+                f"Certificate Manager map entry {name} must match only its reviewed hostname")
+        certs = entry.get("certificates") or []
+        if len(certs) == 1 and isinstance(certs[0], str):
+            require(certificate_name in certs[0],
+                    f"Certificate Manager map entry {name} must reference its reviewed certificate")
+        else:
+            require(f"{certificate_address}.id" in configuration_references(
+                plan, address, ["certificates"]),
+                f"Certificate Manager map entry {name} must reference its reviewed certificate")
 
 
 def check_access(plan, backend_service_name, allowed_email):

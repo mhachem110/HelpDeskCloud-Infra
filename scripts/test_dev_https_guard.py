@@ -9,7 +9,8 @@ spec = importlib.util.spec_from_file_location("dev_https_guard", SCRIPT)
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 
-HOST = "dev.example.test"
+HOST = guard.DYNV6_HOSTNAME
+LEGACY_HOST = guard.LEGACY_HOSTNAME
 EMAIL = "owner@example.test"
 BACKEND = "gkegw-helpdesk-helpdesk"
 
@@ -17,21 +18,31 @@ BACKEND = "gkegw-helpdesk-helpdesk"
 def foundation_plan(action=("create",)):
     dns_id = "projects/helpdeskcloud-capstone-511905/locations/global/dnsAuthorizations/helpdesk-dev-https-dns-auth"
     cert_id = "projects/helpdeskcloud-capstone-511905/locations/global/certificates/helpdesk-dev-https-certificate"
+    dynv6_dns_id = "projects/helpdeskcloud-capstone-511905/locations/global/dnsAuthorizations/helpdesk-dev-https-dynv6-dns-auth"
+    dynv6_cert_id = "projects/helpdeskcloud-capstone-511905/locations/global/certificates/helpdesk-dev-https-dynv6-certificate"
     items = {
         "google_compute_global_address.https": ("google_compute_global_address", {
             "project": guard.PROJECT, "name": "helpdesk-dev-https-ip", "address_type": "EXTERNAL", "ip_version": "IPV4"}),
         "google_compute_ssl_policy.https": ("google_compute_ssl_policy", {
             "project": guard.PROJECT, "name": "helpdesk-dev-https-tls", "profile": "MODERN", "min_tls_version": "TLS_1_2"}),
         "google_certificate_manager_dns_authorization.https": ("google_certificate_manager_dns_authorization", {
-            "project": guard.PROJECT, "name": "helpdesk-dev-https-dns-auth", "location": "global", "domain": HOST}),
+            "project": guard.PROJECT, "name": "helpdesk-dev-https-dns-auth", "location": "global", "domain": LEGACY_HOST}),
         "google_certificate_manager_certificate.https": ("google_certificate_manager_certificate", {
             "project": guard.PROJECT, "name": "helpdesk-dev-https-certificate", "location": "global",
-            "managed": [{"domains": [HOST], "dns_authorizations": [dns_id]}]}),
+            "managed": [{"domains": [LEGACY_HOST], "dns_authorizations": [dns_id]}]}),
         "google_certificate_manager_certificate_map.https": ("google_certificate_manager_certificate_map", {
             "project": guard.PROJECT, "name": "helpdesk-dev-https-map"}),
         "google_certificate_manager_certificate_map_entry.https": ("google_certificate_manager_certificate_map_entry", {
             "project": guard.PROJECT, "name": "helpdesk-dev-https-host", "map": "helpdesk-dev-https-map",
-            "hostname": HOST, "certificates": [cert_id]}),
+            "hostname": LEGACY_HOST, "certificates": [cert_id]}),
+        "google_certificate_manager_dns_authorization.dynv6": ("google_certificate_manager_dns_authorization", {
+            "project": guard.PROJECT, "name": "helpdesk-dev-https-dynv6-dns-auth", "location": "global", "domain": HOST}),
+        "google_certificate_manager_certificate.dynv6": ("google_certificate_manager_certificate", {
+            "project": guard.PROJECT, "name": "helpdesk-dev-https-dynv6-certificate", "location": "global",
+            "managed": [{"domains": [HOST], "dns_authorizations": [dynv6_dns_id]}]}),
+        "google_certificate_manager_certificate_map_entry.dynv6": ("google_certificate_manager_certificate_map_entry", {
+            "project": guard.PROJECT, "name": "helpdesk-dev-https-dynv6-host", "map": "helpdesk-dev-https-map",
+            "hostname": HOST, "certificates": [dynv6_cert_id]}),
     }
     resources = []
     changes = []
@@ -48,8 +59,13 @@ def foundation_plan(action=("create",)):
                 {"address": "google_certificate_manager_certificate.https", "expressions": {
                     "managed": [{"dns_authorizations": {"references": [
                         "google_certificate_manager_dns_authorization.https.id"]}}]}},
+                {"address": "google_certificate_manager_certificate.dynv6", "expressions": {
+                    "managed": [{"dns_authorizations": {"references": [
+                        "google_certificate_manager_dns_authorization.dynv6.id"]}}]}},
                 {"address": "google_certificate_manager_certificate_map_entry.https", "expressions": {
                     "certificates": {"references": ["google_certificate_manager_certificate.https.id"]}}},
+                {"address": "google_certificate_manager_certificate_map_entry.dynv6", "expressions": {
+                    "certificates": {"references": ["google_certificate_manager_certificate.dynv6.id"]}}},
             ]
         }
     }
@@ -60,9 +76,15 @@ def foundation_plan(action=("create",)):
 
 
 def partial_foundation_plan():
-    """Model the failed Apply: retained IP and TLS policy, with four resources still to add."""
+    """Model the migration: keep six legacy resources and create only the dynv6 resources."""
     plan = foundation_plan()
-    retained = {"google_compute_global_address.https", "google_compute_ssl_policy.https"}
+    retained = {
+        "google_compute_global_address.https", "google_compute_ssl_policy.https",
+        "google_certificate_manager_dns_authorization.https",
+        "google_certificate_manager_certificate.https",
+        "google_certificate_manager_certificate_map.https",
+        "google_certificate_manager_certificate_map_entry.https",
+    }
     resources = plan["planned_values"]["root_module"]["resources"]
     for change in plan["resource_changes"]:
         if change["address"] in retained:
@@ -86,19 +108,46 @@ def certificate_status_drift_plan():
     before["labels"] = None
     after["labels"] = {}
     before["managed"][0]["authorization_attempt_info"] = [{
-        "domain": HOST,
+        "domain": LEGACY_HOST,
         "state": "FAILED",
         "failure_reason": "CONFIG",
         "details": "Expected DNS authorization CNAME is missing.",
     }]
     after["managed"][0]["authorization_attempt_info"] = [{
-        "domain": HOST,
+        "domain": LEGACY_HOST,
         "state": "AUTHORIZING",
         "failure_reason": None,
         "details": "DNS authorization is being checked.",
     }]
     plan["resource_drift"] = [{
         "address": "google_certificate_manager_certificate.https",
+        "mode": "managed",
+        "type": "google_certificate_manager_certificate",
+        "change": {"actions": ["update"], "before": before, "after": after},
+    }]
+    return plan
+
+
+def dynv6_certificate_status_drift_plan():
+    """Model Certificate Manager refreshing output-only status for the new hostname."""
+    plan = foundation_plan(("no-op",))
+    plan["prior_state"]["values"]["root_module"]["resources"] = deepcopy(
+        plan["planned_values"]["root_module"]["resources"]
+    )
+    certificate_change = next(change for change in plan["resource_changes"]
+                              if change["address"] == "google_certificate_manager_certificate.dynv6")
+    before = deepcopy(certificate_change["change"]["after"])
+    after = deepcopy(before)
+    before["labels"] = None
+    after["labels"] = {}
+    before["managed"][0]["authorization_attempt_info"] = [{
+        "domain": HOST, "state": "AUTHORIZING", "failure_reason": None,
+    }]
+    after["managed"][0]["authorization_attempt_info"] = [{
+        "domain": HOST, "state": "AUTHORIZED", "failure_reason": None,
+    }]
+    plan["resource_drift"] = [{
+        "address": "google_certificate_manager_certificate.dynv6",
         "mode": "managed",
         "type": "google_certificate_manager_certificate",
         "change": {"actions": ["update"], "before": before, "after": after},
@@ -133,8 +182,8 @@ class DevHttpsGuardTests(unittest.TestCase):
                    for change in plan["resource_changes"]}
         self.assertEqual(actions["google_compute_global_address.https"], ["no-op"])
         self.assertEqual(actions["google_compute_ssl_policy.https"], ["no-op"])
-        self.assertEqual(sum(action == ["create"] for action in actions.values()), 4)
-        self.assertEqual(sum(action == ["no-op"] for action in actions.values()), 2)
+        self.assertEqual(sum(action == ["create"] for action in actions.values()), 3)
+        self.assertEqual(sum(action == ["no-op"] for action in actions.values()), 6)
 
     def test_foundation_rejects_project_api_enablement_resources(self):
         plan = foundation_plan()
@@ -207,6 +256,9 @@ class DevHttpsGuardTests(unittest.TestCase):
 
     def test_certificate_output_only_dns_status_and_labels_readback_are_allowed(self):
         guard.check_foundation(certificate_status_drift_plan(), HOST)
+
+    def test_dynv6_certificate_output_only_status_readback_is_allowed_for_new_hostname(self):
+        guard.check_foundation(dynv6_certificate_status_drift_plan(), HOST)
 
     def test_certificate_status_readback_rejects_unknown_enums(self):
         for key, value, expected in (
@@ -293,7 +345,7 @@ class DevHttpsGuardTests(unittest.TestCase):
         message = str(error.exception)
         self.assertIn("google_certificate_manager_certificate.https", message)
         self.assertIn("managed[0].domains[0]", message)
-        self.assertIn('"dev.example.test" -> "changed.example.test"', message)
+        self.assertIn(f'"{HOST}" -> "changed.example.test"', message)
         self.assertIn("oauth_client_secret: <redacted> -> <redacted>", message)
         self.assertIn("owner_email: <redacted> -> <redacted>", message)
         self.assertNotIn("sensitive-before", message)
@@ -332,6 +384,48 @@ class DevHttpsGuardTests(unittest.TestCase):
     def test_foundation_rejects_hostname_change(self):
         with self.assertRaises(ValueError):
             guard.check_foundation(foundation_plan(), "other.example.test")
+
+    def test_migration_creates_only_new_dynv6_resources_and_preserves_legacy_resources(self):
+        plan = partial_foundation_plan()
+        guard.check_foundation(plan, HOST)
+        actions = {change["address"]: change["change"]["actions"]
+                   for change in plan["resource_changes"]}
+        legacy = (
+            "google_certificate_manager_dns_authorization.https",
+            "google_certificate_manager_certificate.https",
+            "google_certificate_manager_certificate_map.https",
+            "google_certificate_manager_certificate_map_entry.https",
+        )
+        new = (
+            "google_certificate_manager_dns_authorization.dynv6",
+            "google_certificate_manager_certificate.dynv6",
+            "google_certificate_manager_certificate_map_entry.dynv6",
+        )
+        self.assertTrue(all(actions[address] == ["no-op"] for address in legacy))
+        self.assertTrue(all(actions[address] == ["create"] for address in new))
+
+    def test_migration_rejects_legacy_hostname_reused_by_new_resources(self):
+        for address, field in (
+            ("google_certificate_manager_dns_authorization.dynv6", "domain"),
+            ("google_certificate_manager_certificate_map_entry.dynv6", "hostname"),
+        ):
+            plan = partial_foundation_plan()
+            planned = next(item for item in plan["planned_values"]["root_module"]["resources"]
+                           if item["address"] == address)
+            changed = next(item for item in plan["resource_changes"] if item["address"] == address)
+            planned["values"][field] = LEGACY_HOST
+            changed["change"]["after"][field] = LEGACY_HOST
+            with self.subTest(address=address), self.assertRaises(ValueError):
+                guard.check_foundation(plan, HOST)
+
+    def test_migration_rejects_updates_and_deletes_of_legacy_resources(self):
+        for action in (("update",), ("delete",), ("delete", "create")):
+            plan = partial_foundation_plan()
+            legacy = next(item for item in plan["resource_changes"]
+                          if item["address"] == "google_certificate_manager_certificate.https")
+            legacy["change"]["actions"] = list(action)
+            with self.subTest(action=action), self.assertRaises(ValueError):
+                guard.check_foundation(plan, HOST)
 
     def test_foundation_rejects_weaker_tls(self):
         plan = foundation_plan()

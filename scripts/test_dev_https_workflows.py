@@ -119,6 +119,13 @@ class DevHttpsWorkflowTests(unittest.TestCase):
         self.assertNotIn('.ipVersion == "IPV4"', script)
         self.assertNotIn('.name == "helpdesk-dev-https-map"', script)
         self.assertNotIn('.name == "helpdesk-dev-https-host"', script)
+        self.assertIn("helpdesk-dev-https-dynv6-dns-auth", script)
+        self.assertIn("helpdesk-dev-https-dynv6-certificate", script)
+        self.assertIn("helpdesk-dev-https-dynv6-host", script)
+        self.assertIn("https-legacy-dns-auth.json", script)
+        self.assertIn("https-dynv6-dns-auth.json", script)
+        self.assertIn("--legacy-map-entry-file", script)
+        self.assertNotIn("gcloud dns record-sets transaction", script)
         self.assertIn("inputs.target == 'https-access'", str(steps))
 
     def test_core_drift_is_reviewed_against_the_protected_apply_and_still_fails_closed(self):
@@ -157,9 +164,20 @@ class DevHttpsWorkflowTests(unittest.TestCase):
         self.assertIn('prefix = "helpdeskcloud/dev-https-access"', access)
         self.assertNotEqual(foundation, access)
         self.assertEqual(
-            "helpdeskcloud.chickenkiller.com",
+            "helpdeskcloud.dynv6.net",
             CONFIG.load_hostname(ROOT / "terraform/https-foundation/environments/dev.tfvars"),
         )
+
+    def test_dynv6_migration_preserves_legacy_hostname_and_outputs_new_record_separately(self):
+        config = (ROOT / "terraform/https-foundation/https.tf").read_text()
+        outputs = (ROOT / "terraform/https-foundation/outputs.tf").read_text()
+        self.assertIn('legacy_hostname = "helpdeskcloud.chickenkiller.com"', config)
+        self.assertIn('resource "google_certificate_manager_dns_authorization" "dynv6"', config)
+        self.assertIn('resource "google_certificate_manager_certificate" "dynv6"', config)
+        self.assertIn('resource "google_certificate_manager_certificate_map_entry" "dynv6"', config)
+        self.assertEqual(config.count("prevent_destroy = true"), 9)
+        self.assertIn('output "dynv6_dns_authorization_record"', outputs)
+        self.assertIn('google_certificate_manager_dns_authorization.dynv6.dns_resource_record', outputs)
 
 
 if __name__ == "__main__":
