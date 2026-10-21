@@ -19,7 +19,7 @@ variable "region" {
 }
 
 variable "hostname" {
-  description = "Owner-controlled DNS name for the future HTTPS frontend. No default is provided."
+  description = "Configured DNS name for the future HTTPS frontend. No default is provided."
   type        = string
   validation {
     condition = (
@@ -28,6 +28,6 @@ variable "hostname" {
       alltrue([for label in split(".", var.hostname) : can(regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", label))]) &&
       !can(regex("^[0-9.]+$", var.hostname))
     )
-    error_message = "Provide one lower-case, owner-controlled DNS hostname; IP addresses and wildcards are not accepted."
+    error_message = "Provide one lower-case DNS hostname; IP addresses and wildcards are not accepted."
   }
 }

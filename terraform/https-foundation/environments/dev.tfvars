@@ -1,1 +1,1 @@
-hostname = "helpdeskcloud.chickenkiller.com"
+hostname = "helpdeskcloud.dynv6.net"

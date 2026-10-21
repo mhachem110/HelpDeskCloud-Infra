@@ -19,10 +19,19 @@ output "https_ssl_policy_name" {
 }
 
 output "dns_authorization_record" {
-  description = "CNAME record to publish through the user's chosen DNS provider. This root never edits public DNS."
+  description = "Retained FreeDNS authorization record for the legacy hostname; do not reuse for dynv6."
   value = {
     name = google_certificate_manager_dns_authorization.https.dns_resource_record[0].name
     type = google_certificate_manager_dns_authorization.https.dns_resource_record[0].type
     data = google_certificate_manager_dns_authorization.https.dns_resource_record[0].data
+  }
+}
+
+output "dynv6_dns_authorization_record" {
+  description = "New CNAME record to publish in dynv6 for helpdeskcloud.dynv6.net. This root never edits public DNS."
+  value = {
+    name = google_certificate_manager_dns_authorization.dynv6.dns_resource_record[0].name
+    type = google_certificate_manager_dns_authorization.dynv6.dns_resource_record[0].type
+    data = google_certificate_manager_dns_authorization.dynv6.dns_resource_record[0].data
   }
 }

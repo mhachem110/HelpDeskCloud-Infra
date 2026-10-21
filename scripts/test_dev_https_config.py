@@ -14,7 +14,7 @@ class DevHttpsConfigTests(unittest.TestCase):
     def test_tracked_dev_hostname_is_valid(self):
         self.assertEqual(
             config.load_hostname(ROOT / "terraform/https-foundation/environments/dev.tfvars"),
-            "helpdeskcloud.chickenkiller.com",
+            "helpdeskcloud.dynv6.net",
         )
 
     def test_missing_or_duplicate_hostname_is_rejected(self):
