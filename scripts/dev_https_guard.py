@@ -5,12 +5,18 @@ import ipaddress
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
 PROJECT = "helpdeskcloud-capstone-511905"
+PROJECT_NUMBER = "260283083469"
 LEGACY_HOSTNAME = "helpdeskcloud.chickenkiller.com"
 DYNV6_HOSTNAME = "helpdeskcloud.dynv6.net"
+HTTPS_STATIC_IP = "34.8.56.208"
+HTTPS_GATEWAY_PROXY_NAME = re.compile(
+    r"gkegw1-[a-z0-9]+-helpdesk-dev-helpdesk-dev-https(?:-[a-z0-9]+)*"
+)
 FOUNDATION = {
     "google_compute_global_address.https": "google_compute_global_address",
     "google_compute_ssl_policy.https": "google_compute_ssl_policy",
@@ -129,6 +135,13 @@ def check_provider_readback_drift(drift, expected, plan):
     }
     for item in drift:
         address = item.get("address")
+        if address == "google_certificate_manager_certificate_map.https":
+            require(address in expected and expected[address] == "google_certificate_manager_certificate_map",
+                    f"unexpected prior-state drift exists in the HTTPS root: {describe_drift(item)}")
+            check_certificate_map_target_readback_drift(item)
+            require(address not in seen, "duplicate provider readback drift resource")
+            seen.add(address)
+            continue
         if address == "google_certificate_manager_certificate_map_entry.https":
             require(address in expected and expected[address] == "google_certificate_manager_certificate_map_entry",
                     f"unexpected prior-state drift exists in the HTTPS root: {describe_drift(item)}")
@@ -320,6 +333,80 @@ def check_certificate_status_readback_drift(item, hostname):
             require((_is_missing_or_none(before_value) or before_value in allowed_values) and
                     (_is_missing_or_none(after_value) or after_value in allowed_values),
                     f"certificate authorization status drift contains an unknown value for {path.rsplit('.', 1)[1]}")
+
+
+def check_certificate_map_target_readback_drift(item):
+    """Allow only the live HTTPS Gateway target returned by Certificate Manager."""
+    require(item.get("mode", "managed") == "managed" and
+            item.get("type") == "google_certificate_manager_certificate_map",
+            f"provider readback drift is on an unexpected certificate map type: {describe_drift(item)}")
+    change = item.get("change", {})
+    require(change.get("actions") == ["update"],
+            f"certificate map provider readback drift must be a refresh-only update: {describe_drift(item)}")
+    before = change.get("before")
+    after = change.get("after")
+    require(isinstance(before, dict) and isinstance(after, dict),
+            f"certificate map readback drift is missing before/after values: {describe_drift(item)}")
+    differences = list(_drift_differences(before, after))
+    changed_fields = {path for path, _, _ in differences}
+    allowed_fields = {"labels", "gclb_targets", "gclb_targets[0]", "update_time"}
+    require(bool(changed_fields) and changed_fields <= allowed_fields,
+            f"certificate map readback changed a configured or unreviewed field: {describe_drift(item)}")
+    for values in (before, after):
+        require(values.get("project") == PROJECT and values.get("name") == "helpdesk-dev-https-map",
+                "certificate map readback must retain the exact Dev project and map")
+
+    if "labels" in changed_fields:
+        require(before.get("labels", _MISSING) is None and after.get("labels", _MISSING) == {},
+                "certificate map labels readback must be exactly null-to-empty")
+
+    prior_target = _validate_certificate_map_target(before, allow_empty=True)
+    current_target = _validate_certificate_map_target(after, allow_empty=False)
+    if changed_fields & {"gclb_targets", "gclb_targets[0]"}:
+        require(prior_target is None,
+                "certificate map target readback can only add the reviewed HTTPS Gateway target")
+    else:
+        require(prior_target == current_target,
+                "certificate map target readback changed without a target field diff")
+
+    if "update_time" in changed_fields:
+        previous_time = _parse_certificate_map_update_time(before.get("update_time", _MISSING))
+        current_time = _parse_certificate_map_update_time(after.get("update_time", _MISSING))
+        require(current_time >= previous_time,
+                "certificate map update_time readback must move forward")
+
+
+def _validate_certificate_map_target(values, allow_empty):
+    targets = values.get("gclb_targets", _MISSING)
+    if _is_missing_or_none(targets) or targets == []:
+        require(allow_empty, "certificate map readback must show the live HTTPS Gateway target")
+        return None
+    require(isinstance(targets, list) and len(targets) == 1 and isinstance(targets[0], dict),
+            "certificate map readback must contain only the single reviewed HTTPS Gateway target")
+    target = targets[0]
+    require(set(target) == {"ip_configs", "target_https_proxy"},
+            "certificate map target must use only the reviewed global HTTPS proxy fields")
+    ip_configs = target.get("ip_configs")
+    require(isinstance(ip_configs, list) and len(ip_configs) == 1 and isinstance(ip_configs[0], dict) and
+            set(ip_configs[0]) == {"ip_address", "ports"} and
+            ip_configs[0].get("ip_address") == HTTPS_STATIC_IP and ip_configs[0].get("ports") == [443],
+            "certificate map target must serve only the reserved Dev IP on HTTPS port 443")
+    proxy = target.get("target_https_proxy")
+    proxy_prefix = (f"//compute.googleapis.com/projects/{PROJECT_NUMBER}/global/targetHttpsProxies/")
+    proxy_name = proxy[len(proxy_prefix):] if isinstance(proxy, str) and proxy.startswith(proxy_prefix) else ""
+    require(len(proxy_name) <= 63 and HTTPS_GATEWAY_PROXY_NAME.fullmatch(proxy_name) is not None,
+            "certificate map target must be the helpdesk-dev-https GKE Gateway proxy")
+    return target
+
+
+def _parse_certificate_map_update_time(value):
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        parsed = None
+    require(parsed is not None and parsed.tzinfo is not None,
+            "certificate map update_time readback must be a timezone-aware timestamp")
+    return parsed
 
 
 def describe_drift(item):
