@@ -50,6 +50,10 @@ CERTIFICATE_MANAGED_STATE_FIELD = "managed[0].state"
 CERTIFICATE_MANAGED_STATES = {
     "STATE_UNSPECIFIED", "PROVISIONING", "FAILED", "ACTIVE",
 }
+CERTIFICATE_MAP_ENTRY_READBACKS = {
+    "google_certificate_manager_certificate_map_entry.https": ("helpdesk-dev-https-host", LEGACY_HOSTNAME),
+    "google_certificate_manager_certificate_map_entry.dynv6": ("helpdesk-dev-https-dynv6-host", DYNV6_HOSTNAME),
+}
 CERTIFICATE_STATUS_FIELDS = {
     "managed[0].authorization_attempt_info[0].state": {
         "STATE_UNSPECIFIED", "AUTHORIZING", "AUTHORIZED", "FAILED",
@@ -142,10 +146,12 @@ def check_provider_readback_drift(drift, expected, plan):
             require(address not in seen, "duplicate provider readback drift resource")
             seen.add(address)
             continue
-        if address == "google_certificate_manager_certificate_map_entry.https":
+        if address in CERTIFICATE_MAP_ENTRY_READBACKS:
             require(address in expected and expected[address] == "google_certificate_manager_certificate_map_entry",
                     f"unexpected prior-state drift exists in the HTTPS root: {describe_drift(item)}")
-            check_certificate_map_entry_readback_drift(item, planned_resources.get(address, {}))
+            expected_name, expected_hostname = CERTIFICATE_MAP_ENTRY_READBACKS[address]
+            check_certificate_map_entry_readback_drift(
+                item, planned_resources.get(address, {}), expected_name, expected_hostname)
             require(address not in seen, "duplicate provider readback drift resource")
             seen.add(address)
             continue
@@ -181,8 +187,8 @@ def check_provider_readback_drift(drift, expected, plan):
         seen.add(address)
 
 
-def check_certificate_map_entry_readback_drift(item, planned_entry):
-    """Allow only the observed output-state and labels refresh for the retained legacy entry."""
+def check_certificate_map_entry_readback_drift(item, planned_entry, expected_name, expected_hostname):
+    """Allow only serving-status readback on the exact retained HTTPS map entry."""
     require(item.get("mode", "managed") == "managed" and
             item.get("type") == "google_certificate_manager_certificate_map_entry",
             f"provider readback drift is on an unexpected certificate map entry type: {describe_drift(item)}")
@@ -194,22 +200,29 @@ def check_certificate_map_entry_readback_drift(item, planned_entry):
     require(isinstance(before, dict) and isinstance(after, dict),
             f"certificate map entry readback drift is missing before/after values: {describe_drift(item)}")
     differences = list(_drift_differences(before, after))
-    require({path for path, _, _ in differences} == {"labels", "state"},
-            f"certificate map entry readback may change only labels and serving state: {describe_drift(item)}")
+    changed_fields = {path for path, _, _ in differences}
+    require(changed_fields in ({"labels", "state"}, {"labels", "state", "update_time"}),
+            f"certificate map entry readback may change only labels, serving state, and update_time: "
+            f"{describe_drift(item)}")
     require(planned_entry.get("project") == PROJECT and
-            planned_entry.get("name") == "helpdesk-dev-https-host" and
+            planned_entry.get("name") == expected_name and
             planned_entry.get("map") == "helpdesk-dev-https-map" and
-            planned_entry.get("hostname") == LEGACY_HOSTNAME,
-            "planned drift target must remain the exact retained legacy entry")
+            planned_entry.get("hostname") == expected_hostname,
+            "planned drift target must remain the exact reviewed hostname entry")
     for values in (before, after):
         require(all(values.get(field, _MISSING) == planned_entry.get(field, _MISSING)
                     for field in ("project", "name", "map", "hostname", "certificates")),
-                "certificate map entry readback drift must remain on the exact retained legacy entry")
+                "certificate map entry readback drift must remain on the exact reviewed entry")
     values_by_path = {path: (left, right) for path, left, right in differences}
     require(values_by_path["labels"] == (None, {}),
             "certificate map entry labels readback must be exactly null-to-empty")
     require(values_by_path["state"] == ("PENDING", "ACTIVE"),
             "certificate map entry serving state readback must be exactly PENDING-to-ACTIVE")
+    if "update_time" in changed_fields:
+        previous_time = _parse_certificate_map_update_time(values_by_path["update_time"][0])
+        current_time = _parse_certificate_map_update_time(values_by_path["update_time"][1])
+        require(current_time >= previous_time,
+                "certificate map entry update_time readback must move forward")
 
 
 def _drift_differences(left, right, path=""):

@@ -202,6 +202,26 @@ def certificate_map_target_drift_plan():
     return plan
 
 
+def certificate_map_entry_status_drift_plan(address="google_certificate_manager_certificate_map_entry.dynv6"):
+    """Model a serving map entry reaching ACTIVE with output-only timestamps."""
+    plan = foundation_plan(("no-op",))
+    plan["prior_state"]["values"]["root_module"]["resources"] = deepcopy(
+        plan["planned_values"]["root_module"]["resources"]
+    )
+    entry_change = next(change for change in plan["resource_changes"] if change["address"] == address)
+    before = deepcopy(entry_change["change"]["after"])
+    after = deepcopy(before)
+    before.update(labels=None, state="PENDING", update_time="2026-10-21T01:11:34.384174262Z")
+    after.update(labels={}, state="ACTIVE", update_time="2026-10-21T02:22:05.271194767Z")
+    plan["resource_drift"] = [{
+        "address": address,
+        "mode": "managed",
+        "type": "google_certificate_manager_certificate_map_entry",
+        "change": {"actions": ["update"], "before": before, "after": after},
+    }]
+    return plan
+
+
 def access_plan(action=("create",)):
     values = {"project": guard.PROJECT, "web_backend_service": BACKEND,
               "role": "roles/iap.httpsResourceAccessor", "member": f"user:{EMAIL}"}
@@ -393,7 +413,7 @@ class DevHttpsGuardTests(unittest.TestCase):
         mutations = (
             ("state", "FAILED", "PENDING-to-ACTIVE"),
             ("labels", {"unexpected": "label"}, "labels readback"),
-            ("hostname", "other.example.test", "exact retained legacy entry"),
+            ("hostname", "other.example.test", "exact reviewed entry"),
         )
         for field, value, message in mutations:
             plan = partial_foundation_plan()
@@ -416,6 +436,20 @@ class DevHttpsGuardTests(unittest.TestCase):
             }]
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, message):
                 guard.check_foundation(plan, HOST)
+
+    def test_dynv6_certificate_map_entry_accepts_exact_serving_state_readback(self):
+        guard.check_foundation(certificate_map_entry_status_drift_plan(), HOST)
+
+    def test_dynv6_certificate_map_entry_rejects_wrong_host_and_backward_timestamp(self):
+        plan = certificate_map_entry_status_drift_plan()
+        plan["resource_drift"][0]["change"]["after"]["hostname"] = "other.example.test"
+        with self.assertRaisesRegex(ValueError, "only labels, serving state, and update_time"):
+            guard.check_foundation(plan, HOST)
+
+        plan = certificate_map_entry_status_drift_plan()
+        plan["resource_drift"][0]["change"]["after"]["update_time"] = "2026-10-21T01:00:00Z"
+        with self.assertRaisesRegex(ValueError, "move forward"):
+            guard.check_foundation(plan, HOST)
 
     def test_legacy_map_entry_readback_does_not_allow_a_resource_update(self):
         plan = partial_foundation_plan()
