@@ -190,6 +190,7 @@ def certificate_map_target_drift_plan():
         gclb_targets=[{
             "ip_configs": [{"ip_address": guard.HTTPS_STATIC_IP, "ports": [443]}],
             "target_https_proxy": TARGET_PROXY,
+                "target_ssl_proxy": "",
         }],
     )
     plan["resource_drift"] = [{
@@ -305,6 +306,7 @@ class DevHttpsGuardTests(unittest.TestCase):
         target = {
             "ip_configs": [{"ip_address": guard.HTTPS_STATIC_IP, "ports": [443]}],
             "target_https_proxy": TARGET_PROXY,
+            "target_ssl_proxy": "",
         }
         plan["resource_drift"] = [{
             "address": "google_certificate_manager_certificate_map.https",
@@ -444,6 +446,10 @@ class DevHttpsGuardTests(unittest.TestCase):
             plan["resource_drift"][0]["change"]["after"]["gclb_targets"][0][
                 "target_https_proxy"] = TARGET_PROXY.replace("helpdesk-dev-https", "other-gateway")
 
+        def mutate_ssl_proxy(plan):
+            plan["resource_drift"][0]["change"]["after"]["gclb_targets"][0][
+                "target_ssl_proxy"] = "//compute.googleapis.com/projects/260283083469/global/targetSslProxies/unreviewed"
+
         def add_second_target(plan):
             plan["resource_drift"][0]["change"]["after"]["gclb_targets"].append(
                 deepcopy(plan["resource_drift"][0]["change"]["after"]["gclb_targets"][0]))
@@ -453,7 +459,8 @@ class DevHttpsGuardTests(unittest.TestCase):
 
         for name, mutate in (
             ("IP", mutate_ip), ("port", mutate_port), ("proxy project", mutate_proxy_project),
-            ("proxy Gateway", mutate_proxy_gateway), ("extra target", add_second_target),
+            ("proxy Gateway", mutate_proxy_gateway), ("SSL proxy", mutate_ssl_proxy),
+            ("extra target", add_second_target),
             ("map description", change_map_description),
         ):
             plan = certificate_map_target_drift_plan()
