@@ -1,15 +1,19 @@
 name: Terraform State Health (read-only)
 
+# Manual metadata audit of the existing GCS backends; no Terraform plan or state download occurs.
 on:
   workflow_dispatch:
 
+# Keep the workflow token read-only by default; OIDC is used only to read backend metadata.
 permissions:
   contents: read
 
+# Serialize audits so bucket recovery metadata is reported from one consistent run at a time.
 concurrency:
   group: terraform-state-health
   cancel-in-progress: false
 
+# Shared bucket and short-lived identity values for metadata-only recovery checks.
 env:
   PROJECT_ID: helpdeskcloud-capstone-511905
   STATE_BUCKET: helpdeskcloud-tfstate-511905
@@ -17,6 +21,7 @@ env:
   WIF_PROVIDER: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-infra-dev
 
 jobs:
+  # Confirm committed backend keys, then inspect bucket versioning and current object generations.
   state-health:
     name: Inspect backend and recovery metadata (no state download)
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev'

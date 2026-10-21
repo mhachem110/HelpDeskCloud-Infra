@@ -1,5 +1,6 @@
 name: Terraform Dev Plan
 
+# Manual, read-only planning for the existing Dev state roots; the selected values are root IDs.
 on:
   workflow_dispatch:
     inputs:
@@ -10,9 +11,11 @@ on:
         default: core
         options: [core, https-foundation, https-access]
 
+# Keep the workflow token read-only by default; the planning jobs add OIDC only for GCP reads.
 permissions:
   contents: read
 
+# Plan the core root separately from the two isolated HTTPS roots so each uses its own backend.
 jobs:
   # A Plan uses OIDC and the existing GCS state but never runs terraform apply.
   dev-plan:
@@ -77,6 +80,7 @@ jobs:
       - name: Validate plan safety (drift is informational)
         run: python ../scripts/dev_infra_guard.py check-plan "$RUNNER_TEMP/dev-diagnostic.json" --report-drift
 
+  # HTTPS plans first validate and discover the selected isolated target, then check its plan.
   https-plan:
     name: Plan ${{ inputs.target == 'https-foundation' && 'HTTPS & Certificates (https-foundation)' || 'Identity & Access (https-access)' }}
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.target != 'core'

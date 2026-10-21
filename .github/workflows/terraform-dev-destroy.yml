@@ -1,5 +1,6 @@
 name: Terraform Dev Destroy (future use)
 
+# Manual safety workflow: protected roots get inventory-only previews; only https-access can be destroyed.
 on:
   workflow_dispatch:
     inputs:
@@ -40,6 +41,7 @@ on:
         type: string
         default: ''
 
+# Keep the workflow token read-only by default; the jobs request OIDC only after their dispatch gates pass.
 permissions:
   contents: read
 
@@ -48,6 +50,7 @@ concurrency:
   group: terraform-dev-network-apply
   cancel-in-progress: false
 
+# Shared project and identity constants; root-specific backend paths still come from the checked-in configs.
 env:
   PROJECT_ID: helpdeskcloud-capstone-511905
   REGION: us-east1
@@ -57,6 +60,7 @@ env:
   WIF_PROVIDER: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-infra-dev
 
 jobs:
+  # Reject unsafe dispatches before credentials, and resolve the exact existing root/backend.
   preflight:
     name: Verify exact target and future safeguards
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev'
@@ -143,6 +147,7 @@ jobs:
             echo 'Only https-access can enter the protected execution path. State, root identifiers and WIF configuration remain unchanged.'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Build a state-backed preview and record review evidence; this job never applies a plan.
   plan:
     name: Inventory protected state or plan Identity & Access deletes
     needs: preflight
@@ -321,6 +326,8 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/dev-destroy-state.json" "$RUNNER_TEMP/dev-destroy.tfplan" "$RUNNER_TEMP/dev-destroy.json" "$RUNNER_TEMP/dev-destroy-plan.log"
 
+  # Separately protected execution path. It revalidates state and backup evidence after approval,
+  # compares the reviewed fingerprint, and applies only a newly generated matching saved plan.
   destroy:
     name: Apply the matching, reviewer-approved Identity & Access plan
     needs: [preflight, plan]

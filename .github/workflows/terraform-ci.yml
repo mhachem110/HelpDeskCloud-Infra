@@ -1,13 +1,17 @@
 name: Terraform CI
 
+# Run validation on proposed and promoted changes; this workflow never authenticates to GCP.
 on:
   pull_request:
     branches: [dev, stage, prod]
 
+# CI jobs only need to read the repository; cloud identities are never granted here.
 permissions:
   contents: read
 
+# Each job checks a different repository invariant and runs independently on pull requests.
 jobs:
+  # Enforce feature/Codex -> dev -> stage -> prod promotion before other checks run.
   promotion-route:
     name: Check promotion route
     runs-on: ubuntu-latest
@@ -27,6 +31,7 @@ jobs:
             exit 1
           fi
 
+  # Format and validate the core and isolated HTTPS roots without initializing remote state.
   terraform:
     name: Terraform format and validate
     runs-on: ubuntu-latest
@@ -54,6 +59,7 @@ jobs:
             terraform -chdir="$root" validate -no-color
           done
 
+  # Apply Terraform-specific static analysis to every root.
   tflint:
     name: TFLint
     runs-on: ubuntu-latest
@@ -75,6 +81,7 @@ jobs:
             (cd "$root" && tflint --format compact)
           done
 
+  # Scan Terraform resources for security misconfiguration.
   checkov:
     name: Checkov Terraform scan
     runs-on: ubuntu-latest
@@ -86,6 +93,7 @@ jobs:
       - name: Scan Terraform configuration
         run: checkov --directory terraform --framework terraform --quiet
 
+  # Check helper syntax and the policy tests that protect future Dev Apply runs.
   apply-guard-tests:
     name: Dev Apply guard tests
     runs-on: ubuntu-latest

@@ -1,5 +1,6 @@
 name: Terraform Dev Drift Detection
 
+# Run on demand for one root or weekly for all roots; every plan is diagnostic and read-only.
 on:
   workflow_dispatch:
     inputs:
@@ -10,13 +11,16 @@ on:
   schedule:
     - cron: '0 14 * * 1'
 
+# Keep the workflow token read-only by default; the plan job requests OIDC for remote-state access.
 permissions:
   contents: read
 
+# Keep concurrent drift audits from contending for the same Terraform state locks.
 concurrency:
   group: terraform-dev-drift-${{ github.workflow }}
   cancel-in-progress: false
 
+# Shared project and Terraform identity values used by every selected root.
 env:
   PROJECT_ID: helpdeskcloud-capstone-511905
   REGION: us-east1
@@ -24,6 +28,7 @@ env:
   WIF_PROVIDER: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-infra-dev
 
 jobs:
+  # Validate the trusted Dev ref and turn the selected root into the exact plan matrix.
   preflight:
     name: Confirm trusted scheduled/manual invocation
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra'
@@ -58,6 +63,7 @@ jobs:
             *) echo '::error::Unsupported drift trigger.'; exit 1 ;;
           esac
 
+  # Run one isolated read-only plan per root emitted by preflight.
   drift:
     name: Read-only plan — ${{ matrix.root }}
     needs: preflight

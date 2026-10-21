@@ -1,5 +1,6 @@
 name: Terraform Dev Apply
 
+# Manual plan-then-apply for the existing Dev roots; target values remain the state/root identifiers.
 on:
   workflow_dispatch:
     inputs:
@@ -10,16 +11,17 @@ on:
         default: core
         options: [core, https-foundation, https-access]
 
+# Keep the workflow token read-only by default; only cloud-authenticated jobs request an OIDC token.
 permissions:
   contents: read
 
-# A second dispatch waits rather than overlapping a Dev deployment.
+# Share one lock across Apply runs so concurrent dispatches wait instead of overlapping deployments.
 concurrency:
   group: terraform-dev-network-apply
   cancel-in-progress: false
 
 jobs:
-  # Review a fresh plan first; the separate protected job below applies only after its checks pass.
+  # Core path: inspect a fresh plan, check IAM and APIs, then emit the reviewed drift fingerprint.
   review-plan:
     name: Plan Platform Infrastructure (core)
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.target == 'core'
@@ -118,6 +120,8 @@ jobs:
             echo 'No Terraform resource drift was observed.' >> "$GITHUB_STEP_SUMMARY"
           fi
 
+  # Core apply: require the protected Environment, re-plan, compare the fingerprint, and apply only
+  # the checked saved plan after approval.
   approved-apply:
     name: Apply Platform Infrastructure (core)
     needs: review-plan
@@ -275,6 +279,7 @@ jobs:
             "$RUNNER_TEMP/app-deployer-provider.json" \
             "$RUNNER_TEMP/state-addresses.txt"
 
+  # HTTPS path: validate the selected isolated root and discover its exact dependencies before planning.
   review-https-plan:
     name: Plan ${{ inputs.target == 'https-foundation' && 'HTTPS & Certificates (https-foundation)' || 'Identity & Access (https-access)' }}
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.target != 'core'
@@ -379,6 +384,7 @@ jobs:
               --backend-service-name "$IAP_BACKEND_SERVICE_NAME" --allowed-email "$IAP_ALLOWED_EMAIL"
           fi
 
+  # HTTPS apply: repeat discovery after approval, check a fresh plan against its guard, then apply it.
   approved-https-apply:
     name: Apply ${{ inputs.target == 'https-foundation' && 'HTTPS & Certificates (https-foundation)' || 'Identity & Access (https-access)' }}
     needs: review-https-plan
