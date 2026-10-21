@@ -19,6 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Review a fresh plan first; the separate protected job below applies only after its checks pass.
   review-plan:
     name: Show Dev plan
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.target == 'core'

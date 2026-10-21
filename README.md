@@ -1,87 +1,64 @@
 # HelpDesk Cloud infrastructure
 
-HelpDesk Cloud is an ASP.NET Core .NET 10 ticketing application with PostgreSQL storage. The [application repository](https://github.com/mhachem110/HelpDeskCloud-App) holds its code, container, and Helm chart. This repository holds cloud infrastructure so application changes and infrastructure changes can be reviewed and promoted separately.
+This repository owns the Google Cloud infrastructure for the HelpDesk Cloud capstone. The companion [Application repository](https://github.com/mhachem110/HelpDeskCloud-App) owns .NET, container, Helm, Kubernetes application delivery and the HTTPS Gateway release.
 
-The existing Google Cloud project is `helpdeskcloud-capstone-511905`; the target region is `us-east1`. Phase 4 established Terraform and the Dev GCS backend. The [Phase 5 Dev network](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39146464396) and [Phase 6 private PostgreSQL and Docker repository](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39162768905) were deployed and verified. Phase 7 code defines a Dev GKE Autopilot platform and application handoff; its cluster and new identities are **not deployed yet**.
+## Deployed Dev infrastructure
 
-## Repository map
+The Dev environment is in project helpdeskcloud-capstone-511905 (project number 260283083469), region us-east1. Terraform manages the VPC and subnet, GKE Autopilot cluster, Artifact Registry, private Cloud SQL PostgreSQL, IAM identities and grants, Secret Manager metadata, and the HTTPS certificate foundation. The deployed application uses cluster helpdeskcloud-dev-gke, namespace helpdesk-dev and private Cloud SQL instance helpdeskcloud-dev-postgres.
 
-```text
-.github/workflows/
-  oidc-test.yml              Existing successful OIDC smoke test
-  terraform-ci.yml           Credential-free PR checks
-  terraform-dev-backend.yml  Dev-only authenticated backend check
-  terraform-dev-plan.yml     Manual Dev plan with value-free drift diagnostics
-  terraform-dev-apply.yml    Protected Dev Apply and read-only resource verification
-scripts/
-  dev_infra_guard.py         Checks plan JSON, drift paths, and post-apply evidence
-  test_dev_infra_guard.py    Offline tests for the Apply safety gate
-terraform/
-  backend.tf                 Partial GCS backend declaration
-  versions.tf                Terraform and Google provider versions
-  providers.tf               Google project and region settings
-  variables.tf               Three required input values
-  locals.tf                  Reusable environment identifier
-  main.tf                    Deployed Dev network module call; unchanged state addresses
-  artifact-registry.tf       Dev-only Docker repository definition
-  cloud-sql.tf               Dev-only PostgreSQL instance and helpdesk database
-  gke.tf                     Dev-only Autopilot cluster on the existing network
-  gke-iam.tf                 Separate node, app and migration identities and grants
-  secret-manager.tf          Dev secret metadata and KSA-scoped access, no versions
-  outputs.tf                 Safe configuration, network, SQL and GKE handoff values
-  .terraform.lock.hcl        Locked provider checksums
-  environments/
-    dev.tfvars               Dev project, environment, and region
-    stage.tfvars             Stage project, environment, and region
-    prod.tfvars              Prod project, environment, and region
-    dev.gcs.tfbackend        Existing state bucket; Dev prefix
-    stage.gcs.tfbackend      Existing state bucket; Stage prefix
-    prod.gcs.tfbackend       Existing state bucket; Prod prefix
-  modules/network/           Reusable VPC, subnet, and private services access
-  modules/README.md          Module inventory
-docs/PHASE4.md               Commands, verification, and Phase 5 prerequisites
-docs/PHASE5.md               Network plan, IAM, inventory, costs, verification
-docs/PHASE6.md               Registry and SQL design, credentials, costs, rollout gates
-docs/PHASE7.md               GKE design, IAM preflight, cost and deployment checkpoints
-```
+The project-level Terraform service account intentionally retains roles/iap.admin at the owner's request after prior IAM access failures. Preserve this grant. End-user IAP access is a separate exact backend grant for one approved Google account in the https-access root. Stage and Prod variables and state prefixes are prepared, but those environments are not represented as deployed.
 
-## Terraform and state
+Known deployment evidence: [Dev Terraform Apply #45](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39543113140), [Dev Terraform Plan #42](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39540729992), and [Dev backend initialization #18](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39536157570).
 
-All environments use the same root configuration. A `.tfvars` file selects project, region, and environment. A `.gcs.tfbackend` file selects the existing bucket and an environment-specific prefix. `terraform init -backend-config=...` reads the backend file. The prefixes are `helpdeskcloud/dev`, `helpdeskcloud/stage`, and `helpdeskcloud/prod`. We do not use Terraform workspaces for environment separation.
+Read [Architecture](docs/ARCHITECTURE.md), [Deployment](docs/DEPLOYMENT.md), [Rebuild](docs/REBUILD.md), [Operations](docs/OPERATIONS.md), and [Code Walkthrough](docs/CODE-WALKTHROUGH.md). Historical phase and incident notes live in [docs/history](docs/history/README.md); their old status claims are historical.
 
-GCS stores Terraform state remotely and supports locking. State may contain sensitive infrastructure data, so `.gitignore` excludes local state, plans, Terraform downloads, and generated GitHub OIDC credential files. Commit the provider lock file; do not commit state. The Dev service account currently has **bucket-level** Storage Object Admin. Separate prefixes do **not** provide IAM isolation. Stage and Prod backend files are prepared, but authenticated access for them is deliberately not enabled. Before real Stage or Prod use, review separate state buckets or another enforceable IAM boundary.
+## Terraform roots and state
 
-GitHub Actions authenticates to Google Cloud through the existing Workload Identity Federation provider and Dev service account, using short-lived credentials rather than service account keys. The provider admits this repository on `refs/heads/dev`. The existing `oidc-test.yml` remains intact. PR validation uses no GCP credentials. The new Dev backend workflow runs on trusted `dev` and can be dispatched only into its Dev job when the selected ref is `dev`.
+Three roots have separate GCS state prefixes and ownership boundaries:
+
+| Root | State prefix | Responsibility |
+|---|---|---|
+| terraform/ | helpdeskcloud/dev | VPC, Artifact Registry, Cloud SQL, GKE, Workload Identity, service accounts and Secret Manager metadata |
+| terraform/https-foundation/ | helpdeskcloud/dev-https | Reserved HTTPS address, TLS policy, Certificate Manager map and certificates |
+| terraform/https-access/ | helpdeskcloud/dev-https-access | The single approved-user IAP grant on the selected backend |
+
+The existing bucket is helpdeskcloud-tfstate-511905. State names and resource addresses are established; do not rename roots, bucket or prefixes, edit state by hand, or use workspaces as substitutes. The VPC module provides the VPC, subnet, GKE Pod and Service ranges, and private services access range used by both GKE and Cloud SQL. PostgreSQL has no public IPv4. GKE Autopilot nodes are private and Pods use Workload Identity.
+
+Terraform manages Secret Manager secret metadata and service-account access, while secret payloads are external inputs. OAuth client secrets and DNS-provider credentials are also external; they do not belong in Git or Terraform outputs.
+
+## Workflow model
+
+- **Terraform CI** runs on pull requests and checks promotion route, formatting, backend-free init and validation across all three roots, TFLint, Checkov, shell syntax and Python guard tests. It does not use Google credentials.
+- **Terraform Dev Plan** is manually dispatched for core, https-foundation or https-access on the protected dev branch. It authenticates through GitHub OIDC to the existing Dev identity, initializes the corresponding GCS prefix, creates a read-only plan and applies strict plan/drift validation. It never applies.
+- **Terraform Dev Apply** is manually dispatched and creates a fresh reviewed plan. The Apply job waits for the protected dev-network-apply Environment, verifies the trusted repository/ref and approval configuration, validates the exact plan and drift fingerprint, then applies and performs read-only resource checks.
+
+OIDC provides short-lived cloud credentials without service-account keys. Plan and Apply workflow filenames and the configured provider/ref conditions are identity-sensitive; preserve them. GitHub branch and Environment protection remain in force. No Stage or Prod apply workflow is enabled.
 
 ## Local validation
 
-Install Terraform 1.16.2 and run these commands from `terraform/`:
+Install Terraform 1.16.2, TFLint and Checkov. From the repository root:
 
-```sh
-terraform fmt -check -recursive
-terraform init -backend=false -input=false -lockfile=readonly
-terraform validate
-tflint --format compact
-checkov --directory . --framework terraform --quiet
-```
+    terraform -chdir=terraform fmt -check -recursive
+    terraform -chdir=terraform init -backend=false -input=false -lockfile=readonly
+    terraform -chdir=terraform validate -no-color
+    terraform -chdir=terraform/https-foundation init -backend=false -input=false -lockfile=readonly
+    terraform -chdir=terraform/https-foundation validate -no-color
+    terraform -chdir=terraform/https-access init -backend=false -input=false -lockfile=readonly
+    terraform -chdir=terraform/https-access validate -no-color
+    python -m unittest discover -s scripts -p 'test_*.py' -v
 
-These commands do not connect to GCS. For a real Dev backend initialization, authenticate locally with an approved Google Cloud identity that can access the state bucket, then run:
+CI also runs TFLint on each root and Checkov on Terraform. Backend-free init and validate do not contact GCS. A real read-only Plan needs the existing authorized identity and state access; use the manual workflow and selected root. Do not run apply, destroy, state migration or resource-changing commands as repository cleanup.
 
-```sh
-terraform init -input=false -backend-config=environments/dev.gcs.tfbackend
-terraform validate
-```
+## Repository map
 
-Local Application Default Credentials can be used; no key file is required. A local `terraform init` can replace the cached backend settings in `.terraform/`, so use `-reconfigure` when deliberately switching backend configuration. Do not initialize Stage or Prod with the Dev identity.
-
-`terraform fmt -check`, `terraform init -backend=false`, `terraform validate`, TFLint, and Checkov are safe validation commands. Run `python -m unittest discover -s scripts -p 'test_*.py' -v` from the repository root to test the Dev Apply guard. The manual Dev Plan workflow uses the existing OIDC identity, classifies approved non-secret drift attributes, and runs the same strict plan guard as Apply. The protected Apply workflow keeps all seven deployed Phase 5–6 resources unchanged and allows the initial Phase 7 creation batch, a complete no-change plan, or only the exact state-bound Apply #12 recovery batch. Drift allowances match only exact provider readbacks for network and resource labels, logging metadata, SQL bookkeeping, Secret Manager metadata maps, the GKE attribution label, empty-map normalization on the GKE `resource_labels` field, and `etag` readbacks on the three named project IAM bindings, and only missing/null/empty-list readbacks for the Phase 8 provider's unset `allowed_audiences`. The GKE cluster and those IAM bindings may read back the exact project ID or project number. For GKE network fields, only the exact configured VPC and subnet as either a Compute self-link or GKE's canonical relative resource path are accepted. The IAM allowance removes only the concurrency token from comparison; role, member, and every other field must still match. Diagnostics classify these identities and token shapes without printing resource or secret values. A readback allowance never authorizes a proposed resource change. The Phase 8 provider allowance removes only `oidc[0].allowed_audiences` before comparing complete before/after snapshots, and rejects all non-empty audiences or any other provider change. The test suite also checks that the Apply workflow's ordered post-apply evidence paths match the guard's CLI contract. Unknown computed identity fields are accepted only with an exact `after_unknown` marker, a null or omitted planned value, and matching resource references and IAM configuration. Workload Identity and Secret Manager principal grants must wait for GKE to create their pool. All other drift and partial states remain blocked. A plan summary with zero requested changes does not resolve drift recorded separately in Terraform's `resource_drift`. See [Phase 7 notes](docs/PHASE7.md). Do **not** run `terraform apply`, `terraform destroy`, state migration, or any resource-changing command without explicit owner approval and a reviewed phase plan.
-
-## Branch flow
-
-See [HTTPS access preparation](docs/HTTPS-ACCESS-DESIGN.md) for the verified Dev
-baseline, proposed IAP-protected URL, resource ownership, cost and rebuild plan.
-That document does not authorize or enable a public endpoint.
-
-Changes move through protected branches: `feature/*` → `dev` → `stage` → `prod`. The PR workflow checks those source and target pairs. Merging to `dev` triggers the Dev backend check when Terraform or that workflow changes. It does not apply resources. Stage and Prod deployment identities, permissions, approvals, and pipelines are future work.
-
-See [Phase 4 notes](docs/PHASE4.md) for the established foundation, [Phase 5 notes](docs/PHASE5.md) for the network design and IAM limits, and [Phase 6 notes](docs/PHASE6.md) for database and registry settings, cost estimates, and deployment prerequisites.
+- .github/workflows/terraform-ci.yml — credential-free PR checks across all roots.
+- .github/workflows/terraform-dev-plan.yml — manual read-only plan and safety validation.
+- .github/workflows/terraform-dev-apply.yml — separate protected Dev Apply and verification.
+- scripts/dev_infra_guard.py — strict core plan, drift, IAM and post-apply evidence checks.
+- scripts/dev_https_guard.py — HTTPS foundation/access plan safety checks.
+- scripts/prepare_dev_https_target.sh — read-only backend discovery for the isolated HTTPS Plan.
+- terraform/ — core network, data, cluster and identity root.
+- terraform/https-foundation/ — certificate, address, map and TLS policy root.
+- terraform/https-access/ — narrowly scoped IAP access root.
+- terraform/modules/network/ — reusable VPC and private services networking.
+- docs/history/ — retained implementation history and incident records.

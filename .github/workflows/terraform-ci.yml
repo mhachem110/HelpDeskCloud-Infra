@@ -16,11 +16,9 @@ jobs:
         env:
           SOURCE: ${{ github.head_ref }}
           TARGET: ${{ github.base_ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          # Dev accepts feature and Codex implementation branches. PR #35 retains its one-time exception.
+          # Dev accepts maintained feature and Codex branches; Stage and Prod follow the release chain.
           if [[ "$TARGET" == "dev" && ( "$SOURCE" == feature/* || "$SOURCE" == codex/* ) ]] ||
-             [[ "$TARGET" == "dev" && "$SOURCE" == "mhachem110-patch-1" && "$PR_NUMBER" == "35" ]] ||
              [[ "$TARGET" == "stage" && "$SOURCE" == "dev" ]] ||
              [[ "$TARGET" == "prod" && "$SOURCE" == "stage" ]]; then
             echo "Allowed promotion route: $SOURCE -> $TARGET"

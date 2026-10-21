@@ -14,6 +14,7 @@ permissions:
   contents: read
 
 jobs:
+  # A Plan uses OIDC and the existing GCS state but never runs terraform apply.
   dev-plan:
     name: Review Dev infrastructure changes
     if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev' && inputs.target == 'core'
