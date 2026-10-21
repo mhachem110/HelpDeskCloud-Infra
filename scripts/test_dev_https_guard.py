@@ -264,6 +264,17 @@ class DevHttpsGuardTests(unittest.TestCase):
         ]
         guard.check_foundation(plan, HOST)
 
+    def test_certificate_map_accepts_only_null_to_empty_label_readback(self):
+        plan = foundation_plan(("no-op",))
+        plan["resource_drift"] = [{
+            "address": "google_certificate_manager_certificate_map.https",
+            "mode": "managed",
+            "type": "google_certificate_manager_certificate_map",
+            "change": {"actions": ["update"], "before": {"labels": None}, "after": {"labels": {}}},
+        }]
+
+        guard.check_foundation(plan, HOST)
+
     def test_certificate_output_only_dns_status_and_labels_readback_are_allowed(self):
         guard.check_foundation(certificate_status_drift_plan(), HOST)
 
