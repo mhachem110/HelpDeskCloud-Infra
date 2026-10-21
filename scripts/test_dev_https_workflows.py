@@ -59,9 +59,10 @@ class DevHttpsWorkflowTests(unittest.TestCase):
         self.assertEqual(steps[apply]["run"].count("$PLAN_FILE"), 1)
         self.assertNotIn("dev-https-https-foundation-apply.tfplan", str(workflow))
         self.assertNotIn("dev-https-${COMPONENT}-apply.tfplan", str(workflow))
-        environment_checks = workflow["jobs"]["approved-https-apply"]["steps"]
-        self.assertIn("required_reviewers", str(environment_checks))
-        self.assertIn("deployment_branch_policy", str(environment_checks))
+        environment_check = (ROOT / "scripts/verify_dev_environment.sh").read_text(encoding="utf-8")
+        self.assertIn("required_reviewers", environment_check)
+        self.assertIn("custom_branch_policies", environment_check)
+        self.assertIn('name == "dev"', environment_check)
         self.assertNotIn("gcloud dns record-sets transaction", str(workflow))
         self.assertNotIn("inputs.operation", str(workflow))
         self.assertNotIn("inputs.acknowledged_drift_fingerprint", str(workflow))

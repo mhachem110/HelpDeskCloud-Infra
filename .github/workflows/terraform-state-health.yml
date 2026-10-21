@@ -1,0 +1,67 @@
+name: Terraform State Health (read-only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-state-health
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: helpdeskcloud-capstone-511905
+  STATE_BUCKET: helpdeskcloud-tfstate-511905
+  STATE_SERVICE_ACCOUNT: helpdesk-terraform-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+  WIF_PROVIDER: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-infra-dev
+
+jobs:
+  state-health:
+    name: Inspect backend and recovery metadata (no state download)
+    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Confirm all three committed backend definitions
+        run: python scripts/terraform_state_health.py check-backends --repository-root .
+
+      # Remote state is the source of truth; this audit lists object versions but never reads state contents.
+      - name: Authenticate through the existing short-lived Terraform identity
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.STATE_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Read bucket recovery settings and each exact state-object metadata record
+        run: |
+          set -euo pipefail
+          umask 077
+          bucket_file="$RUNNER_TEMP/state-bucket.json"
+          versions_dir="$RUNNER_TEMP/state-versions"
+          mkdir -p "$versions_dir"
+          gcloud storage buckets describe "gs://$STATE_BUCKET" --project="$PROJECT_ID" --format=json > "$bucket_file"
+          for item in \
+            'core helpdeskcloud/dev' \
+            'https-foundation helpdeskcloud/dev-https' \
+            'https-access helpdeskcloud/dev-https-access'; do
+            read -r root prefix <<< "$item"
+            object="gs://$STATE_BUCKET/$prefix/default.tfstate"
+            gcloud storage ls --all-versions --json "$object" > "$versions_dir/$root.json"
+            gcloud storage objects describe "$object" --project="$PROJECT_ID" --format=json \
+              > "$versions_dir/$root-current.json"
+          done
+          python scripts/terraform_state_health.py inspect \
+            --bucket-file "$bucket_file" --versions-dir "$versions_dir" \
+            --summary-file "$GITHUB_STEP_SUMMARY"

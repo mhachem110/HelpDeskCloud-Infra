@@ -26,12 +26,23 @@ terraform/https-foundation/ owns the reserved static address, TLS policy, Certif
 
 The Terraform service account keeps project-level roles/iap.admin at the owner's explicit request. This administrative grant is separate from the narrow application-user grant and must remain.
 
-## Terraform delivery
+## Six workflow entry points
 
-    Infrastructure PR → Terraform CI
-    Manual Plan (core | https-foundation | https-access)
-      → GitHub OIDC → matching GCS state prefix → strict plan and drift checks
-    Manual Apply (core or selected HTTPS root)
-      → fresh plan → protected GitHub Environment → safety guard → apply → read-only checks
+```mermaid
+flowchart TD
+  PR[Infrastructure pull request] --> CI[Terraform CI, offline]
+  CI --> PLAN[Manual Dev Plan, one selected root]
+  PLAN --> APPLY[Protected Dev Apply, fresh plan and reviewer]
+  DRIFT[Weekly or manual Drift Detection] -->|read-only plan| STATE[(GCS state roots)]
+  HEALTH[Manual State Health] -->|bucket, object and version metadata| STATE
+  DESTROY[Manual Destroy, plan-only default] -->|future independent approval| STATE
+  APPLY -->|reviewed mutation| CLOUD[Dev cloud resources]
+  DRIFT -. report only .-> CLOUD
+  HEALTH -. read only .-> CLOUD
+```
 
-The state bucket is helpdeskcloud-tfstate-511905 with independent prefixes helpdeskcloud/dev, helpdeskcloud/dev-https and helpdeskcloud/dev-https-access. Stage and Prod prefixes are prepared but are not deployments. Never rename the bucket or prefixes or move resources between roots without a separate state migration plan.
+Terraform CI has no Google credentials and validates repository changes. Dev Plan authenticates through OIDC, reads one selected state root and validates the plan. Dev Apply repeats a fresh plan, requires the protected `dev-network-apply` Environment and then may change resources. Drift Detection uses normal read-only plans and reports action/address summaries without repair. State Health is manual and checks bucket configuration, exact object metadata and version history without reading state contents. Neither operational audit has been run against live GCP as part of this repository assignment.
+
+Terraform Dev Destroy is a manual future-use workflow with a safe preview as its default. For `core` and `https-foundation`, it reports state identities and retained deletion protections without requesting a destroy plan; destroy mode is rejected for those roots. For `https-access`, it creates a real plan using the discovered backend and configured allowed email. Fingerprints include resource type, address, stable identity, state object generation, lineage and serial. Any future execution requires the exact Dev project/ref/root, a separately reviewed matching fingerprint, an independent required reviewer with self-review blocked, dev-only Environment rules, a disabled-by-default opt-in, typed confirmation and verified restore-tested backups. It is **implemented for future use — disabled for live destructive execution**. It does not create the Environment or enable the opt-in. SQL deletion protection and certificate `prevent_destroy` remain enabled.
+
+The state bucket is helpdeskcloud-tfstate-511905 with independent prefixes helpdeskcloud/dev, helpdeskcloud/dev-https and helpdeskcloud/dev-https-access. Separate roots keep unrelated resource ownership and plans isolated. Stage and Prod prefixes are prepared but are not deployments. Never rename the bucket or prefixes or move resources between roots without a separate state migration plan.

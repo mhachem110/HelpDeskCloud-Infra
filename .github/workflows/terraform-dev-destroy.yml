@@ -1,0 +1,511 @@
+name: Terraform Dev Destroy (future use)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Inventory protected roots, review an https-access destroy plan, or request its separately reviewed execution.
+        required: true
+        type: choice
+        default: plan-only
+        options: [plan-only, destroy]
+      project_id:
+        description: Type the exact approved GCP project ID.
+        required: true
+        type: string
+      root:
+        description: "Select one existing state root: Platform Infrastructure (core), HTTPS & Certificates (https-foundation), or Identity & Access (https-access)."
+        required: true
+        type: choice
+        default: core
+        options: [core, https-foundation, https-access]
+      confirmation:
+        description: For https-access destroy mode, type DESTROY dev helpdeskcloud-capstone-511905 https-access.
+        required: true
+        type: string
+        default: DO NOT RUN
+      reviewed_fingerprint:
+        description: For https-access destroy mode, copy the SHA-256 fingerprint from a separate plan-only run.
+        required: false
+        type: string
+        default: ''
+      backup_manifest:
+        description: Root-specific GCS recovery manifest verified by a separate restore exercise.
+        required: false
+        type: string
+        default: ''
+      backup_confirmation:
+        description: Type BACKUP VERIFIED, the selected root, and the manifest object generation.
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+# Share the Apply lock so reviews and future destructive execution never overlap an Apply run.
+concurrency:
+  group: terraform-dev-network-apply
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: helpdeskcloud-capstone-511905
+  REGION: us-east1
+  TERRAFORM_VERSION: 1.16.2
+  STATE_BUCKET: helpdeskcloud-tfstate-511905
+  STATE_SERVICE_ACCOUNT: helpdesk-terraform-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+  WIF_PROVIDER: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-infra-dev
+
+jobs:
+  preflight:
+    name: Verify exact target and future safeguards
+    if: github.repository == 'mhachem110/HelpDeskCloud-Infra' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      target_dir: ${{ steps.selection.outputs.target_dir }}
+      backend_file: ${{ steps.selection.outputs.backend_file }}
+      state_prefix: ${{ steps.selection.outputs.state_prefix }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Validate repository, branch, project, root and explicit gates
+        id: selection
+        env:
+          MODE: ${{ inputs.mode }}
+          PROJECT_INPUT: ${{ inputs.project_id }}
+          ROOT_INPUT: ${{ inputs.root }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          OPT_IN: ${{ vars.DEV_DESTROY_ENABLED }}
+          REVIEWED_FINGERPRINT: ${{ inputs.reviewed_fingerprint }}
+        run: |
+          set -euo pipefail
+          target=$(python scripts/dev_destroy_guard.py selection \
+            --mode "$MODE" --repository "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" \
+            --project-id "$PROJECT_INPUT" --root "$ROOT_INPUT" \
+            --confirmation "$CONFIRMATION" --opt-in "${OPT_IN:-false}" \
+            --reviewed-fingerprint "$REVIEWED_FINGERPRINT")
+          TARGET="$target" python -c 'import json,os; x=json.loads(os.environ["TARGET"]); print("target_dir="+x["directory"]); print("backend_file="+x["backend"]); print("state_prefix="+x["prefix"])' \
+            >> "$GITHUB_OUTPUT" <<<"$target"
+
+      - name: Verify exact backend configuration and retained protections
+        env:
+          ROOT_INPUT: ${{ inputs.root }}
+          TARGET_DIR: ${{ steps.selection.outputs.target_dir }}
+          BACKEND_FILE: ${{ steps.selection.outputs.backend_file }}
+        run: |
+          set -euo pipefail
+          python scripts/dev_destroy_guard.py backend --root "$ROOT_INPUT" --file "$TARGET_DIR/$BACKEND_FILE"
+          python scripts/dev_destroy_guard.py protection --root "$ROOT_INPUT" \
+            --terraform-root "$GITHUB_WORKSPACE/$TARGET_DIR"
+
+      # GitHub can create an Environment when a job references an unknown name.
+      # Check the pre-existing protection before the protected job is eligible to start.
+      - name: Require the already protected destroy Environment for https-access execution
+        if: inputs.mode == 'destroy'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          environment_file="$RUNNER_TEMP/destroy-environment.json"
+          branches_file="$RUNNER_TEMP/destroy-branches.json"
+          base='https://api.github.com/repos/mhachem110/HelpDeskCloud-Infra/environments/dev-infra-destroy'
+          curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" "$base" > "$environment_file"
+          curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" "$base/deployment-branch-policies?per_page=100" > "$branches_file"
+          python scripts/dev_destroy_guard.py environment \
+            --environment-file "$environment_file" --branches-file "$branches_file"
+
+      - name: Explain selected root and safe preview mode
+        env:
+          ROOT_INPUT: ${{ inputs.root }}
+        run: |
+          set -euo pipefail
+          case "$ROOT_INPUT" in
+            core) label='Platform Infrastructure (core)' ;;
+            https-foundation) label='HTTPS & Certificates (https-foundation)' ;;
+            https-access) label='Identity & Access (https-access)' ;;
+            *) echo '::error::Unknown Terraform state root.'; exit 1 ;;
+          esac
+          {
+            echo "## Selected target: $label"
+            echo
+            if [[ "$ROOT_INPUT" == 'https-access' ]]; then
+              echo 'This unprotected state root can produce a Terraform destroy plan for review.'
+            else
+              echo 'This root retains prevent_destroy resources. The workflow reports a state inventory only and never requests a destroy plan for this root.'
+            fi
+            echo 'Only https-access can enter the protected execution path. State, root identifiers and WIF configuration remain unchanged.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  plan:
+    name: Inventory protected state or plan Identity & Access deletes
+    needs: preflight
+    if: needs.preflight.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      fingerprint: ${{ steps.review.outputs.fingerprint || steps.protected-inventory.outputs.fingerprint }}
+      backend_service_name: ${{ steps.prepare-access.outputs.backend_service_name }}
+      allowed_email: ${{ steps.prepare-access.outputs.allowed_email }}
+    env:
+      MODE: ${{ inputs.mode }}
+      ROOT_INPUT: ${{ inputs.root }}
+      TARGET_DIR: ${{ needs.preflight.outputs.target_dir }}
+      BACKEND_FILE: ${{ needs.preflight.outputs.backend_file }}
+      STATE_PREFIX: ${{ needs.preflight.outputs.state_prefix }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+
+      # OIDC gives this runner short-lived access to the existing remote state identity.
+      - name: Authenticate through the existing Terraform WIF provider
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.STATE_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Install GKE access tools for backend discovery
+        if: inputs.root == 'https-access'
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          install_components: kubectl,gke-gcloud-auth-plugin
+
+      - name: Verify separately prepared backup evidence for destroy mode
+        id: backup-evidence
+        if: inputs.mode == 'destroy'
+        env:
+          BACKUP_URI: ${{ inputs.backup_manifest }}
+          BACKUP_CONFIRMATION: ${{ inputs.backup_confirmation }}
+          BACKUP_BUCKET: ${{ vars.DEV_DESTROY_BACKUP_BUCKET }}
+        run: |
+          set -euo pipefail
+          [[ -n "$BACKUP_BUCKET" ]] || { echo '::error::Configure and review DEV_DESTROY_BACKUP_BUCKET separately before any destroy request.'; exit 1; }
+          python scripts/dev_destroy_guard.py backup-uri --uri "$BACKUP_URI" \
+            --expected-bucket "$BACKUP_BUCKET" --root "$ROOT_INPUT"
+          state_generation=$(gcloud storage objects describe \
+            "gs://$STATE_BUCKET/$STATE_PREFIX/default.tfstate" --project="$PROJECT_ID" --format='value(generation)')
+          [[ "$state_generation" =~ ^[0-9]+$ ]] || { echo '::error::Could not verify the selected current state generation.'; exit 1; }
+          metadata="$RUNNER_TEMP/backup-manifest-metadata.json"
+          gcloud storage objects describe "$BACKUP_URI" --project="$PROJECT_ID" --format=json > "$metadata"
+          python scripts/dev_destroy_guard.py backup --uri "$BACKUP_URI" \
+            --confirmation "$BACKUP_CONFIRMATION" --expected-bucket "$BACKUP_BUCKET" \
+            --expected-state-generation "$state_generation" --root "$ROOT_INPUT" \
+            --metadata-file "$metadata"
+          echo "state_generation=$state_generation" >> "$GITHUB_OUTPUT"
+
+      - name: Install Terraform 1.16.2
+        uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Initialize only the exact reviewed state backend
+        run: |
+          set -euo pipefail
+          terraform -chdir="$TARGET_DIR" init -input=false -no-color -lockfile=readonly \
+            -backend-config="$BACKEND_FILE"
+
+      - name: Discover and validate the exact HTTPS access target
+        id: prepare-access
+        if: inputs.root == 'https-access'
+        working-directory: terraform
+        env:
+          COMPONENT: ${{ inputs.root }}
+          IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
+        run: |
+          set -euo pipefail
+          bash ../scripts/prepare_dev_https_target.sh
+          ready=$(sed -n 's/^ready=//p' "$GITHUB_OUTPUT" | tail -n 1)
+          [[ "$ready" == 'true' ]] || { echo '::error::The exact IAP backend is not ready; no destroy plan fingerprint was produced.'; exit 1; }
+          echo "allowed_email=$IAP_ALLOWED_EMAIL" >> "$GITHUB_OUTPUT"
+
+      - name: Capture stable state identity and object generation
+        id: state-evidence
+        env:
+          PROJECT_ID: ${{ env.PROJECT_ID }}
+          STATE_BUCKET: ${{ env.STATE_BUCKET }}
+          STATE_PREFIX: ${{ needs.preflight.outputs.state_prefix }}
+          TARGET_DIR: ${{ needs.preflight.outputs.target_dir }}
+        run: bash scripts/capture_terraform_state_evidence.sh
+
+      - name: Match backup evidence to the captured state generation
+        if: inputs.mode == 'destroy'
+        env:
+          BACKUP_STATE_GENERATION: ${{ steps.backup-evidence.outputs.state_generation }}
+          CURRENT_STATE_GENERATION: ${{ steps.state-evidence.outputs.state_generation }}
+        run: |
+          set -euo pipefail
+          [[ "$BACKUP_STATE_GENERATION" == "$CURRENT_STATE_GENERATION" ]] || {
+            echo '::error::The state changed after backup verification. Rerun the backup review.'
+            exit 1
+          }
+
+      - name: Create a local Identity & Access destroy plan
+        id: access-plan
+        if: inputs.root == 'https-access'
+        env:
+          BACKEND_SERVICE_NAME: ${{ steps.prepare-access.outputs.backend_service_name }}
+          ALLOWED_EMAIL: ${{ steps.prepare-access.outputs.allowed_email }}
+          PRE_PLAN_STATE_GENERATION: ${{ steps.state-evidence.outputs.state_generation }}
+        run: |
+          set -euo pipefail
+          umask 077
+          plan_file="$RUNNER_TEMP/dev-destroy.tfplan"
+          plan_json="$RUNNER_TEMP/dev-destroy.json"
+          plan_log="$RUNNER_TEMP/dev-destroy-plan.log"
+          if ! terraform -chdir="$TARGET_DIR" plan -destroy -input=false -no-color \
+              -lock-timeout=5m -var="backend_service_name=$BACKEND_SERVICE_NAME" \
+              -var="allowed_email=$ALLOWED_EMAIL" -out="$plan_file" >"$plan_log" 2>&1; then
+            echo '::error::Terraform could not create an Identity & Access destroy plan. Review the protected plan output without exposing raw state or values.'
+            exit 1
+          fi
+          terraform -chdir="$TARGET_DIR" show -json "$plan_file" > "$plan_json"
+          bash scripts/capture_terraform_state_evidence.sh
+          post_plan_generation=$(sed -n 's/^state_generation=//p' "$GITHUB_OUTPUT" | tail -n 1)
+          [[ "$post_plan_generation" == "$PRE_PLAN_STATE_GENERATION" ]] || {
+            echo '::error::Terraform state changed during plan review; rerun the review.'
+            exit 1
+          }
+
+      - name: Create inventory-only preview for protected roots
+        id: protected-inventory
+        if: inputs.root == 'core' || inputs.root == 'https-foundation'
+        run: |
+          set -euo pipefail
+          python scripts/dev_destroy_guard.py inventory --root "$ROOT_INPUT" \
+            --state-file "$RUNNER_TEMP/dev-destroy-state.json" \
+            --state-generation "${{ steps.state-evidence.outputs.state_generation }}" \
+            --summary-file "$GITHUB_STEP_SUMMARY" --output-file "$GITHUB_OUTPUT"
+
+      - name: Review Identity & Access plan and record its fingerprint
+        id: review
+        if: inputs.root == 'https-access'
+        run: |
+          set -euo pipefail
+          python scripts/dev_destroy_guard.py inspect-plan --root "$ROOT_INPUT" --mode "$MODE" \
+            --plan-file "$RUNNER_TEMP/dev-destroy.json" \
+            --state-file "$RUNNER_TEMP/dev-destroy-state.json" \
+            --state-generation "${{ steps.access-plan.outputs.state_generation }}" \
+            --summary-file "$GITHUB_STEP_SUMMARY" --output-file "$GITHUB_OUTPUT"
+
+      - name: Match the prior operator-reviewed fingerprint before requesting Environment approval
+        if: inputs.mode == 'destroy'
+        env:
+          REVIEWED_FINGERPRINT: ${{ inputs.reviewed_fingerprint }}
+          CURRENT_FINGERPRINT: ${{ steps.review.outputs.fingerprint }}
+        run: |
+          set -euo pipefail
+          [[ "$CURRENT_FINGERPRINT" == "$REVIEWED_FINGERPRINT" ]] || {
+            echo '::error::The fresh destroy plan differs from the separately reviewed plan. Rerun plan-only and review the new inventory.'
+            exit 1
+          }
+
+      - name: State that this job never applies its plan
+        if: inputs.mode == 'plan-only' && inputs.root == 'https-access'
+        run: echo 'Plan-only completed. The saved Identity & Access plan stayed on this runner and was not applied or uploaded.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove local state and plan files
+        if: always()
+        run: rm -f "$RUNNER_TEMP/dev-destroy-state.json" "$RUNNER_TEMP/dev-destroy.tfplan" "$RUNNER_TEMP/dev-destroy.json" "$RUNNER_TEMP/dev-destroy-plan.log"
+
+  destroy:
+    name: Apply the matching, reviewer-approved Identity & Access plan
+    needs: [preflight, plan]
+    if: inputs.mode == 'destroy' && inputs.root == 'https-access' && needs.preflight.result == 'success' && needs.plan.result == 'success'
+    environment: dev-infra-destroy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    env:
+      ROOT_INPUT: ${{ inputs.root }}
+      TARGET_DIR: ${{ needs.preflight.outputs.target_dir }}
+      BACKEND_FILE: ${{ needs.preflight.outputs.backend_file }}
+      STATE_PREFIX: ${{ needs.preflight.outputs.state_prefix }}
+      REVIEWED_FINGERPRINT: ${{ inputs.reviewed_fingerprint }}
+      PLAN_FINGERPRINT: ${{ needs.plan.outputs.fingerprint }}
+      REVIEWED_BACKEND_SERVICE_NAME: ${{ needs.plan.outputs.backend_service_name }}
+      REVIEWED_ALLOWED_EMAIL: ${{ needs.plan.outputs.allowed_email }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+
+      # Verify again before OIDC in case Environment configuration changed after preflight.
+      - name: Recheck protected Environment and dev-only branch restriction
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          environment_file="$RUNNER_TEMP/destroy-environment.json"
+          branches_file="$RUNNER_TEMP/destroy-branches.json"
+          base='https://api.github.com/repos/mhachem110/HelpDeskCloud-Infra/environments/dev-infra-destroy'
+          curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" "$base" > "$environment_file"
+          curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" "$base/deployment-branch-policies?per_page=100" > "$branches_file"
+          python scripts/dev_destroy_guard.py environment \
+            --environment-file "$environment_file" --branches-file "$branches_file"
+
+      - name: Revalidate typed target, opt-in and retained protections before cloud authentication
+        env:
+          PROJECT_INPUT: ${{ inputs.project_id }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          OPT_IN: ${{ vars.DEV_DESTROY_ENABLED }}
+        run: |
+          set -euo pipefail
+          python scripts/dev_destroy_guard.py selection \
+            --mode destroy --repository "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" \
+            --project-id "$PROJECT_INPUT" --root "$ROOT_INPUT" \
+            --confirmation "$CONFIRMATION" --opt-in "${OPT_IN:-false}" \
+            --reviewed-fingerprint "$REVIEWED_FINGERPRINT"
+          python scripts/dev_destroy_guard.py protection --root "$ROOT_INPUT" \
+            --terraform-root "$GITHUB_WORKSPACE/$TARGET_DIR"
+
+      - name: Authenticate through the existing Terraform WIF provider
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.STATE_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@v3
+        with:
+          install_components: kubectl,gke-gcloud-auth-plugin
+
+      - name: Recheck backup manifest metadata after approval
+        id: backup-evidence
+        env:
+          BACKUP_URI: ${{ inputs.backup_manifest }}
+          BACKUP_CONFIRMATION: ${{ inputs.backup_confirmation }}
+          BACKUP_BUCKET: ${{ vars.DEV_DESTROY_BACKUP_BUCKET }}
+        run: |
+          set -euo pipefail
+          [[ -n "$BACKUP_BUCKET" ]] || { echo '::error::Recovery backup bucket is not configured.'; exit 1; }
+          python scripts/dev_destroy_guard.py backup-uri --uri "$BACKUP_URI" \
+            --expected-bucket "$BACKUP_BUCKET" --root "$ROOT_INPUT"
+          state_generation=$(gcloud storage objects describe \
+            "gs://$STATE_BUCKET/$STATE_PREFIX/default.tfstate" --project="$PROJECT_ID" --format='value(generation)')
+          [[ "$state_generation" =~ ^[0-9]+$ ]] || { echo '::error::Could not verify the selected current state generation.'; exit 1; }
+          metadata="$RUNNER_TEMP/backup-manifest-metadata.json"
+          gcloud storage objects describe "$BACKUP_URI" --project="$PROJECT_ID" --format=json > "$metadata"
+          python scripts/dev_destroy_guard.py backup --uri "$BACKUP_URI" \
+            --confirmation "$BACKUP_CONFIRMATION" --expected-bucket "$BACKUP_BUCKET" \
+            --expected-state-generation "$state_generation" --root "$ROOT_INPUT" \
+            --metadata-file "$metadata"
+          echo "state_generation=$state_generation" >> "$GITHUB_OUTPUT"
+
+      - name: Install Terraform 1.16.2
+        uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Discover and revalidate the Identity & Access target after approval
+        id: prepare-access
+        working-directory: terraform
+        env:
+          COMPONENT: ${{ inputs.root }}
+          IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
+        run: |
+          set -euo pipefail
+          bash ../scripts/prepare_dev_https_target.sh
+          ready=$(sed -n 's/^ready=//p' "$GITHUB_OUTPUT" | tail -n 1)
+          [[ "$ready" == 'true' ]] || { echo '::error::The exact IAP backend is not ready after approval.'; exit 1; }
+          backend_service_name=$(sed -n 's/^backend_service_name=//p' "$GITHUB_OUTPUT" | tail -n 1)
+          [[ "$backend_service_name" == "$REVIEWED_BACKEND_SERVICE_NAME" && \
+             "$IAP_ALLOWED_EMAIL" == "$REVIEWED_ALLOWED_EMAIL" ]] || {
+            echo '::error::The Identity & Access Terraform inputs changed after review.'
+            exit 1
+          }
+          echo "allowed_email=$IAP_ALLOWED_EMAIL" >> "$GITHUB_OUTPUT"
+
+      - name: Initialize only the exact reviewed state backend
+        run: |
+          set -euo pipefail
+          terraform -chdir="$TARGET_DIR" init -input=false -no-color -lockfile=readonly \
+            -backend-config="$BACKEND_FILE"
+
+      - name: Capture stable state identity and object generation after approval
+        id: state-evidence
+        env:
+          PROJECT_ID: ${{ env.PROJECT_ID }}
+          STATE_BUCKET: ${{ env.STATE_BUCKET }}
+          STATE_PREFIX: ${{ needs.preflight.outputs.state_prefix }}
+          TARGET_DIR: ${{ needs.preflight.outputs.target_dir }}
+        run: bash scripts/capture_terraform_state_evidence.sh
+
+      - name: Require the backup manifest to match the post-approval state
+        env:
+          BACKUP_STATE_GENERATION: ${{ steps.backup-evidence.outputs.state_generation }}
+          CURRENT_STATE_GENERATION: ${{ steps.state-evidence.outputs.state_generation }}
+        run: |
+          set -euo pipefail
+          [[ "$BACKUP_STATE_GENERATION" == "$CURRENT_STATE_GENERATION" ]] || {
+            echo '::error::The state changed after backup verification. No resource was changed.'
+            exit 1
+          }
+
+      - name: Create a fresh local plan after review
+        id: fresh-plan
+        env:
+          BACKEND_SERVICE_NAME: ${{ steps.prepare-access.outputs.backend_service_name }}
+          ALLOWED_EMAIL: ${{ steps.prepare-access.outputs.allowed_email }}
+          PRE_PLAN_STATE_GENERATION: ${{ steps.state-evidence.outputs.state_generation }}
+        run: |
+          set -euo pipefail
+          umask 077
+          plan_file="$RUNNER_TEMP/dev-destroy-reviewed.tfplan"
+          plan_json="$RUNNER_TEMP/dev-destroy-reviewed.json"
+          plan_log="$RUNNER_TEMP/dev-destroy-reviewed-plan.log"
+          if ! terraform -chdir="$TARGET_DIR" plan -destroy -input=false -no-color \
+              -lock-timeout=5m -var="backend_service_name=$BACKEND_SERVICE_NAME" \
+              -var="allowed_email=$ALLOWED_EMAIL" -out="$plan_file" >"$plan_log" 2>&1; then
+            echo '::error::Fresh Identity & Access destroy plan failed. No resources were changed.'
+            exit 1
+          fi
+          terraform -chdir="$TARGET_DIR" show -json "$plan_file" > "$plan_json"
+          bash scripts/capture_terraform_state_evidence.sh
+          post_plan_generation=$(sed -n 's/^state_generation=//p' "$GITHUB_OUTPUT" | tail -n 1)
+          [[ "$post_plan_generation" == "$PRE_PLAN_STATE_GENERATION" ]] || {
+            echo '::error::Terraform state changed during the post-approval plan; no resources were changed.'
+            exit 1
+          }
+          python scripts/dev_destroy_guard.py inspect-plan --root "$ROOT_INPUT" --mode destroy \
+            --plan-file "$plan_json" \
+            --state-file "$RUNNER_TEMP/dev-destroy-state.json" \
+            --state-generation "$post_plan_generation" \
+            --summary-file "$GITHUB_STEP_SUMMARY" --output-file "$GITHUB_OUTPUT"
+
+      - name: Require the exact same reviewed fingerprint before applying the saved plan
+        env:
+          FRESH_FINGERPRINT: ${{ steps.fresh-plan.outputs.fingerprint }}
+        run: |
+          set -euo pipefail
+          [[ "$FRESH_FINGERPRINT" == "$REVIEWED_FINGERPRINT" && \
+             "$FRESH_FINGERPRINT" == "$PLAN_FINGERPRINT" ]] || {
+            echo '::error::Fresh destroy inventory changed after approval. No resources were changed.'
+            exit 1
+          }
+
+      - name: Apply only the reviewed saved plan
+        run: terraform -chdir="$TARGET_DIR" apply -input=false -no-color -lock-timeout=5m "$RUNNER_TEMP/dev-destroy-reviewed.tfplan"
+
+      - name: Remove local state and plan files
+        if: always()
+        run: rm -f "$RUNNER_TEMP/dev-destroy-state.json" "$RUNNER_TEMP/dev-destroy-reviewed.tfplan" "$RUNNER_TEMP/dev-destroy-reviewed.json" "$RUNNER_TEMP/dev-destroy-reviewed-plan.log"

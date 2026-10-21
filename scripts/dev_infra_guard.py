@@ -20,6 +20,7 @@ SUBNET = "helpdeskcloud-dev-subnet"
 PSA = "helpdeskcloud-dev-psa"
 SERVICE = "servicenetworking.googleapis.com"
 PREFIX = "module.dev_network[0]."
+# Exact resource ownership inventory; addresses are part of the existing GCS state contract.
 NETWORK = {
     PREFIX + "google_compute_network.this": "google_compute_network",
     PREFIX + "google_compute_subnetwork.this": "google_compute_subnetwork",
@@ -346,6 +347,9 @@ STRICT_REFERENCE_PARENTS = {
 }
 
 
+# Terraform plan parsing and recursive resource inventory
+
+
 def require(condition, message):
     if not condition:
         raise ValueError(message)
@@ -374,6 +378,9 @@ def state_resources(module):
 def only_item(value, message):
     require(isinstance(value, list) and len(value) == 1, message)
     return value[0]
+
+
+# Resource create/update policy: network, SQL, GKE, and staged identity phases
 
 
 def check_network(values):
@@ -436,6 +443,9 @@ def check_phase6(values):
     database = values["google_sql_database"]
     require(database.get("project") == PROJECT and database.get("name") == "helpdesk", "Unexpected SQL database")
     require(database.get("instance") == "helpdeskcloud-dev-postgres", "SQL database must use the intended instance")
+
+
+# IAM and Workload Identity trust validation
 
 
 def normalize_cel(expression):
@@ -1140,6 +1150,9 @@ def check_phase7(values, plan, creates):
     )
 
 
+# Provider readback drift normalization and acknowledgement fingerprints
+
+
 def valid_rfc3339_timestamp(value):
     """Return whether a provider update_time is a valid timezone-aware RFC3339 value."""
     if not isinstance(value, str) or not RFC3339_TIMESTAMP.fullmatch(value):
@@ -1517,6 +1530,9 @@ def permitted_drift(entry):
     before_copy["log_config"] = [{k: v for k, v in before_log.items() if k != "metadata_fields"}]
     after_copy["log_config"] = [{k: v for k, v in after_log.items() if k != "metadata_fields"}]
     return before_copy == after_copy
+
+
+# Secret Manager evidence and complete plan decision
 
 
 def check_secret_iam_policy(plan, secret_id, policy):
@@ -1915,6 +1931,7 @@ def check_plan(plan, *, secret_iam_policies=None, acknowledged_drift_fingerprint
                         or migration_runner_iam_remediation or secret_access_recovery) else "no_changes"
 
 
+# Sanitized diagnostics report changed paths and classification, never values.
 SENSITIVE_PARTS = {"id", "name", "project", "region", "self_link", "network", "subnetwork", "ip_cidr_range",
                    "secondary_ip_range", "address", "prefix_length", "purpose", "address_type", "routing_mode",
                    "private_ip_google_access", "peerings", "reserved_peering_ranges", "service", "iam", "firewall",
@@ -1939,6 +1956,9 @@ def changed_paths(before, after, prefix=""):
                                        after[index] if index < len(after) else None, path))
         return paths
     return [prefix or "<unknown>"]
+
+
+# Readback shape, identity, network, and security drift classification
 
 
 def safe_readback_shape(value, *, depth=0, field_name=""):
@@ -2101,63 +2121,23 @@ def settings_version_status(value):
     return "<unexpected value withheld>"
 
 
+# Exact provider identity and GKE readback checks
+
+
 def single_block(value):
     if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
         return value[0]
     return {}
 
 
-def support_provider_identity_checks(snapshot):
-    expected_provider_id = (
-        f"projects/{PROJECT}/locations/global/workloadIdentityPools/helpdesk-github/"
-        f"providers/{SUPPORT_PUBLISHER_PROVIDER_ID}"
-    )
-    oidc = single_block(snapshot.get("oidc"))
-    return {
-        "project": snapshot.get("project") in (PROJECT, PROJECT_NUMBER),
-        "pool": snapshot.get("workload_identity_pool_id") == "helpdesk-github",
-        "provider": snapshot.get("workload_identity_pool_provider_id") == SUPPORT_PUBLISHER_PROVIDER_ID,
-        "enabled": snapshot.get("disabled") is False,
-        "mapping": snapshot.get("attribute_mapping") == SUPPORT_PUBLISHER_MAPPING,
-        # Google may read the same CEL expression back with the Terraform heredoc's
-        # multiline formatting. normalize_cel ignores only whitespace outside the
-        # quoted claim values; repository IDs, branch, Environment, and workflow
-        # text inside those literals remain byte-for-byte exact.
-        "attribute_condition": normalize_cel(snapshot.get("attribute_condition"))
-        == normalize_cel(SUPPORT_PUBLISHER_CONDITION),
-        "issuer": oidc.get("issuer_uri") == "https://token.actions.githubusercontent.com",
-        # Apply #22's provider output confirmed the canonical path uses project ID.
-        "resource_id": snapshot.get("id", expected_provider_id) == expected_provider_id,
-    }
+def provider_identity_checks(snapshot, *, provider_id, condition, mapping, resource_id=None):
+    """Compare a WIF provider with its exact identity and trust policy.
 
-
-def support_provider_identity_matches(snapshot):
-    return all(support_provider_identity_checks(snapshot).values())
-
-
-def migration_provider_identity_checks(snapshot):
-    """Validate the exact Phase 9 provider before accepting audience-only drift."""
-    oidc = single_block(snapshot.get("oidc"))
-    return {
-        "project": snapshot.get("project") in (PROJECT, PROJECT_NUMBER),
-        "pool": snapshot.get("workload_identity_pool_id") == "helpdesk-github",
-        "provider": snapshot.get("workload_identity_pool_provider_id") == MIGRATION_RUNNER_PROVIDER_ID,
-        "enabled": snapshot.get("disabled") is False,
-        "mapping": snapshot.get("attribute_mapping") == SUPPORT_PUBLISHER_MAPPING,
-        "attribute_condition": normalize_cel(snapshot.get("attribute_condition")) == MIGRATION_RUNNER_CONDITION,
-        "issuer": oidc.get("issuer_uri") == "https://token.actions.githubusercontent.com",
-        # The provider's create/readback logs use the canonical project-ID path.
-        "resource_id": snapshot.get("id", MIGRATION_RUNNER_PROVIDER_RESOURCE_ID)
-        == MIGRATION_RUNNER_PROVIDER_RESOURCE_ID,
-    }
-
-
-def migration_provider_identity_matches(snapshot):
-    return all(migration_provider_identity_checks(snapshot).values())
-
-
-def app_delivery_provider_identity_checks(snapshot, provider_id, condition):
-    expected_resource_id = (
+    These providers share the same Google identity shape. Keeping the field
+    checks in one place prevents a new publisher or migration identity from
+    accidentally receiving a weaker comparison than the original provider.
+    """
+    expected_resource_id = resource_id or (
         f"projects/{PROJECT}/locations/global/workloadIdentityPools/"
         f"helpdesk-github/providers/{provider_id}"
     )
@@ -2167,12 +2147,54 @@ def app_delivery_provider_identity_checks(snapshot, provider_id, condition):
         "pool": snapshot.get("workload_identity_pool_id") == "helpdesk-github",
         "provider": snapshot.get("workload_identity_pool_provider_id") == provider_id,
         "enabled": snapshot.get("disabled") is False,
-        "mapping": snapshot.get("attribute_mapping") == APP_DELIVERY_MAPPING,
+        "mapping": snapshot.get("attribute_mapping") == mapping,
+        # Google may read the same CEL expression back with the Terraform heredoc's
+        # multiline formatting. normalize_cel ignores only whitespace outside the
+        # quoted claim values; repository IDs, branch, Environment, and workflow
+        # text inside those literals remain byte-for-byte exact.
         "attribute_condition": normalize_cel(snapshot.get("attribute_condition"))
         == normalize_cel(condition),
         "issuer": oidc.get("issuer_uri") == "https://token.actions.githubusercontent.com",
+        # Google provider readbacks use the canonical project-ID resource path.
         "resource_id": snapshot.get("id", expected_resource_id) == expected_resource_id,
     }
+
+
+def support_provider_identity_checks(snapshot):
+    return provider_identity_checks(
+        snapshot,
+        provider_id=SUPPORT_PUBLISHER_PROVIDER_ID,
+        condition=SUPPORT_PUBLISHER_CONDITION,
+        mapping=SUPPORT_PUBLISHER_MAPPING,
+    )
+
+
+def support_provider_identity_matches(snapshot):
+    return all(support_provider_identity_checks(snapshot).values())
+
+
+def migration_provider_identity_checks(snapshot):
+    """Validate the exact Phase 9 provider before accepting audience-only drift."""
+    return provider_identity_checks(
+        snapshot,
+        provider_id=MIGRATION_RUNNER_PROVIDER_ID,
+        condition=MIGRATION_RUNNER_CONDITION,
+        mapping=SUPPORT_PUBLISHER_MAPPING,
+        resource_id=MIGRATION_RUNNER_PROVIDER_RESOURCE_ID,
+    )
+
+
+def migration_provider_identity_matches(snapshot):
+    return all(migration_provider_identity_checks(snapshot).values())
+
+
+def app_delivery_provider_identity_checks(snapshot, provider_id, condition):
+    return provider_identity_checks(
+        snapshot,
+        provider_id=provider_id,
+        condition=condition,
+        mapping=APP_DELIVERY_MAPPING,
+    )
 
 
 def app_delivery_provider_identity_matches(snapshot, provider_id, condition):
@@ -2246,6 +2268,9 @@ def ca_mode_status(value):
     if value in ("GOOGLE_MANAGED_INTERNAL_CA", "GOOGLE_MANAGED_CAS_CA", "CUSTOMER_MANAGED_CAS_CA"):
         return value
     return known_value(value)
+
+
+# Human-readable drift diagnostics are deliberately value-free.
 
 
 def diagnose_drift(plan):
@@ -2449,6 +2474,9 @@ def diagnose_drift(plan):
                      "unknown resources, and malformed drift remain blocked.")
     lines.append("Only exact documented normalization patterns pass automatically.")
     return lines
+
+
+# Post-Apply evidence validation uses fresh read-only provider evidence.
 
 
 def verify_deployment(paths):
@@ -2879,6 +2907,9 @@ def check_iam(policy, label):
     require(isinstance(policy, dict) and isinstance(policy.get("bindings", []), list), f"Invalid {label} IAM evidence")
     require(not any({"allUsers", "allAuthenticatedUsers"} & set(binding.get("members", []))
                     for binding in policy.get("bindings", [])), f"Public {label} IAM binding requires review")
+
+
+# Command-line entry points keep plan validation and evidence checks explicit.
 
 
 def main():
