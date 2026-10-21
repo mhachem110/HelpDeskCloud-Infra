@@ -503,7 +503,12 @@ def check_access(plan, backend_service_name, allowed_email):
     changes = check_actions(plan, ACCESS)
     resource = changes["google_iap_web_backend_service_iam_member.helpdesk_user"].get("change", {}).get("after") or values[
         "google_iap_web_backend_service_iam_member.helpdesk_user"]["values"]
-    require(resource.get("project") == PROJECT and resource.get("web_backend_service") == backend_service_name and
+    expected_backend_references = {
+        backend_service_name,
+        f"projects/{PROJECT}/iap_web/compute/services/{backend_service_name}",
+    }
+    require(resource.get("project") == PROJECT and
+            resource.get("web_backend_service") in expected_backend_references and
             resource.get("role") == "roles/iap.httpsResourceAccessor" and
             resource.get("member") == f"user:{allowed_email}",
             "IAP grant must be one exact user on the supplied backend service")
