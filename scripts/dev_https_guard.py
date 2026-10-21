@@ -384,8 +384,10 @@ def _validate_certificate_map_target(values, allow_empty):
     require(isinstance(targets, list) and len(targets) == 1 and isinstance(targets[0], dict),
             "certificate map readback must contain only the single reviewed HTTPS Gateway target")
     target = targets[0]
-    require(set(target) == {"ip_configs", "target_https_proxy"},
-            "certificate map target must use only the reviewed global HTTPS proxy fields")
+    require(set(target) <= {"ip_configs", "target_https_proxy", "target_ssl_proxy"} and
+            {"ip_configs", "target_https_proxy"} <= set(target) and
+            target.get("target_ssl_proxy") in (None, ""),
+            "certificate map target must use only the reviewed HTTPS proxy fields")
     ip_configs = target.get("ip_configs")
     require(isinstance(ip_configs, list) and len(ip_configs) == 1 and isinstance(ip_configs[0], dict) and
             set(ip_configs[0]) == {"ip_address", "ports"} and
