@@ -171,12 +171,15 @@ def check_certificate_map_entry_readback_drift(item):
     require({path for path, _, _ in differences} == {"labels", "state"},
             f"certificate map entry readback may change only labels and serving state: {describe_drift(item)}")
     for values in (before, after):
+        certificates = values.get("certificates")
+        expected_certificate = (
+            f"projects/{PROJECT}/locations/global/certificates/helpdesk-dev-https-certificate")
         require(values.get("project") == PROJECT and
                 values.get("name") == "helpdesk-dev-https-host" and
                 values.get("map") == "helpdesk-dev-https-map" and
                 values.get("hostname") == LEGACY_HOSTNAME and
-                values.get("certificates") == [
-                    f"projects/{PROJECT}/locations/global/certificates/helpdesk-dev-https-certificate"],
+                isinstance(certificates, list) and len(certificates) == 1 and
+                isinstance(certificates[0], str) and expected_certificate in certificates[0],
                 "certificate map entry readback drift must remain on the exact retained legacy entry")
     values_by_path = {path: (left, right) for path, left, right in differences}
     require(values_by_path["labels"] == (None, {}),
