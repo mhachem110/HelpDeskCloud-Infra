@@ -19,11 +19,11 @@ variable "region" {
 }
 
 variable "backend_service_name" {
-  description = "Exact global backend service name discovered from the HelpDesk Gateway's backend-services annotation."
+  description = "Exact GKE Gateway backend discovered from the approved HelpDesk HTTPRoute and Service NEG."
   type        = string
   validation {
-    condition     = can(regex("^gkegw-[a-z0-9-]{1,50}$", var.backend_service_name))
-    error_message = "Use the exact GKE Gateway generated global backend name (gkegw-*); arbitrary backends are rejected."
+    condition     = can(regex("^gkegw1?-[a-z0-9-]{1,56}$", var.backend_service_name))
+    error_message = "Use the exact GKE Gateway generated global backend name (gkegw-* or gkegw1-*); arbitrary backends are rejected."
   }
 }
 

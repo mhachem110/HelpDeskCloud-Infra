@@ -154,6 +154,18 @@ class DevHttpsWorkflowTests(unittest.TestCase):
         self.assertIn("DEV_IAP_ALLOWED_EMAIL", (ROOT / "scripts/prepare_dev_https_access.sh").read_text())
         self.assertIn("--dns-endpoint", (ROOT / "scripts/prepare_dev_https_access.sh").read_text())
         self.assertIn("networking.gke.io/backend-services", (ROOT / "scripts/dev_https_backend.py").read_text())
+        prepare_script = (ROOT / "scripts/prepare_dev_https_access.sh").read_text()
+        for resource_read in (
+            "kubectl get gateway helpdesk-dev-https",
+            "kubectl get httproute helpdesk-dev-https",
+            "kubectl get service helpdesk-helpdesk",
+        ):
+            self.assertIn(resource_read, prepare_script)
+        backend_helper = (ROOT / "scripts/dev_https_backend.py").read_text()
+        self.assertIn("network_endpoint_groups", backend_helper)
+        self.assertIn("HTTPROUTE_NAME", backend_helper)
+        self.assertIn("SERVICE_NAME", backend_helper)
+        self.assertIn("gkegw1?-[a-z0-9-]{1,56}", (ROOT / "terraform/https-access/variables.tf").read_text())
         apply = load_workflow(ROOT / ".github/workflows/terraform-dev-apply.yml")
         self.assertIn("needs.review-https-plan.outputs.ready == 'true'", apply["jobs"]["approved-https-apply"]["if"])
 

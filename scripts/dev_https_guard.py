@@ -484,7 +484,7 @@ def check_foundation(plan, hostname):
 
 
 def check_access(plan, backend_service_name, allowed_email):
-    require(re.fullmatch(r"gkegw-[a-z0-9-]{1,50}", backend_service_name) is not None,
+    require(re.fullmatch(r"gkegw1?-[a-z0-9-]{1,56}", backend_service_name) is not None,
             "backend name must be one generated global GKE Gateway backend")
     require(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", allowed_email) is not None,
             "access principal must be one email address")

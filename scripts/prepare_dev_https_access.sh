@@ -32,8 +32,30 @@ if ! kubectl get gateway helpdesk-dev-https -n helpdesk-dev -o json > "$gateway_
   exit 1
 fi
 
+route_file="$RUNNER_TEMP/helpdesk-https-route.json"
+if ! kubectl get httproute helpdesk-dev-https -n helpdesk-dev -o json > "$route_file" 2> "$RUNNER_TEMP/helpdesk-route-error.txt"; then
+  if grep -Eqi 'not found|no resources found' "$RUNNER_TEMP/helpdesk-route-error.txt"; then
+    not_ready 'The HelpDesk HTTPRoute has not been deployed yet.'
+    exit 0
+  fi
+  cat "$RUNNER_TEMP/helpdesk-route-error.txt" >&2
+  echo '::error::Unable to read the HelpDesk HTTPRoute through the validated GKE DNS endpoint.'
+  exit 1
+fi
+
+service_file="$RUNNER_TEMP/helpdesk-https-service.json"
+if ! kubectl get service helpdesk-helpdesk -n helpdesk-dev -o json > "$service_file" 2> "$RUNNER_TEMP/helpdesk-service-error.txt"; then
+  if grep -Eqi 'not found|no resources found' "$RUNNER_TEMP/helpdesk-service-error.txt"; then
+    not_ready 'The HelpDesk application Service or its GKE NEG is not ready yet.'
+    exit 0
+  fi
+  cat "$RUNNER_TEMP/helpdesk-service-error.txt" >&2
+  echo '::error::Unable to read the HelpDesk Service through the validated GKE DNS endpoint.'
+  exit 1
+fi
+
 set +e
-backend_name=$(python ../scripts/dev_https_backend.py gateway-backend "$gateway_file")
+backend_name=$(python ../scripts/dev_https_backend.py gateway-backend "$gateway_file" "$route_file" "$service_file")
 status=$?
 set -e
 if [[ "$status" -eq 2 ]]; then
@@ -46,7 +68,7 @@ fi
 backend_file="$RUNNER_TEMP/helpdesk-https-backend.json"
 gcloud compute backend-services describe "$backend_name" --global \
   --project helpdeskcloud-capstone-511905 --format=json > "$backend_file"
-python ../scripts/dev_https_backend.py validate "$gateway_file" "$backend_file"
+python ../scripts/dev_https_backend.py validate "$gateway_file" "$route_file" "$service_file" "$backend_file"
 echo "ready=true" >> "$GITHUB_OUTPUT"
 echo "backend_service_name=$backend_name" >> "$GITHUB_OUTPUT"
 echo '### HTTPS access target ready' >> "$GITHUB_STEP_SUMMARY"
