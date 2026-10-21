@@ -1,4 +1,4 @@
-name: Terraform Dev Destroy (future use)
+name: Terraform Destroy
 
 # Manual safety workflow: protected roots get inventory-only previews; only https-access can be destroyed.
 on:
